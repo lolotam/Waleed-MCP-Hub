@@ -27,6 +27,9 @@ const unavailable = () =>
   );
 const localPath = (value: string) =>
   /^[a-z]:[\\/]/i.test(value) && !/[\0\r\n]/.test(value);
+/** The admin-owned Windows PowerShell module folder under `systemRoot`. */
+export const systemModulePath = (systemRoot: string) =>
+  win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
 const emptyResult = (outcome: ProcessResult['outcome']): ProcessResult => ({
   outcome,
   exitCode: null,
@@ -160,6 +163,13 @@ export async function createWindowsProcessRunner(
   };
   for (const name of ['TEMP', 'TMP'])
     if (process.env[name]) hostEnvironment[name] = process.env[name]!;
+  // Without PSModulePath, Windows PowerShell 5.1 can take 20-30 seconds to
+  // start. Point it at the admin-owned system modules only, never the
+  // inherited user path, which could load an untrusted module into the host.
+  const hostLaunchEnvironment = {
+    ...hostEnvironment,
+    PSModulePath: systemModulePath(systemRoot),
+  };
   let active = 0;
 
   return {
@@ -215,7 +225,7 @@ export async function createWindowsProcessRunner(
               shell: false,
               windowsHide: true,
               cwd: directory,
-              env: hostEnvironment,
+              env: hostLaunchEnvironment,
               stdio: ['pipe', 'pipe', 'pipe'],
             },
           );
