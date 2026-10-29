@@ -1,4 +1,4 @@
-import { lstat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import type { PackageErrorCode } from '@waleed/contracts';
@@ -104,14 +104,20 @@ export async function prepareJob(
     globalNpmrc: join(root, 'global.npmrc'),
     ca: registry.ca === undefined ? null : join(root, 'ca.pem'),
   };
+  // Only the job root is restricted: its private DACL is protected and
+  // inheritable, so every folder and file created below it inherits it, and a
+  // restriction per folder would cost one PowerShell start each.
   await createPrivateDirectory(root);
-  await createPrivateDirectory(paths.project);
-  await createPrivateDirectory(paths.cache);
-  await createPrivateDirectory(paths.tmp);
-  await createPrivateDirectory(profile);
-  await createPrivateDirectory(paths.home);
-  await createPrivateDirectory(paths.appdata);
-  await createPrivateDirectory(paths.localappdata);
+  for (const folder of [
+    paths.project,
+    paths.cache,
+    paths.tmp,
+    profile,
+    paths.home,
+    paths.appdata,
+    paths.localappdata,
+  ])
+    await mkdir(folder, { mode: 0o700 });
   await writeFile(paths.userNpmrc, '', { flag: 'wx', mode: 0o600 });
   await writeFile(paths.globalNpmrc, '', { flag: 'wx', mode: 0o600 });
   if (registry.ca !== undefined && paths.ca)
