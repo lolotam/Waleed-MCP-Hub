@@ -12,11 +12,7 @@ let directory: string;
 
 test.beforeAll(async () => {
   directory = await mkdtemp(
-    join(
-      process.env.HUB_TEST_TEMP ??
-        (process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir()),
-      'hub-browser-',
-    ),
+    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-browser-'),
   );
   child = fork('apps/server/dist/main.js', [], {
     env: {
@@ -240,11 +236,7 @@ test('an unlaunched browser cannot see inventory', async ({ page }) => {
 
 test('source-mode server starts on Node 24 and releases its writer lock on shutdown', async () => {
   const sourceDirectory = await mkdtemp(
-    join(
-      process.env.HUB_TEST_TEMP ??
-        (process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir()),
-      'hub-source-',
-    ),
+    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-source-'),
   );
   const source = fork('apps/server/src/main.ts', [], {
     execArgv: ['--conditions=development', '--import', 'tsx'],
@@ -291,11 +283,7 @@ test('restart reconciliation preserves drifted state and disables further local 
   page,
 }) => {
   const isolated = await mkdtemp(
-    join(
-      process.env.HUB_TEST_TEMP ??
-        (process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir()),
-      'hub-recovery-browser-',
-    ),
+    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-recovery-browser-'),
   );
   const before = emptyState();
   const expected = { ...emptyState(), revision: 1 };

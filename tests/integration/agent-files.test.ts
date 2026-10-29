@@ -13,12 +13,7 @@ import { tmpdir } from 'node:os';
 import { it, expect } from 'vitest';
 import { agentFiles } from '@waleed/hub-core';
 it('atomically backs up/updates only allowed files; rejects links, drift and foreign paths', async () => {
-  const directory = await mkdtemp(
-    join(
-      process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir(),
-      'hub-agent-files-',
-    ),
-  );
+  const directory = await mkdtemp(join(tmpdir(), 'hub-agent-files-'));
   try {
     const path = join(directory, 'config.json'),
       backups = join(directory, 'backups');

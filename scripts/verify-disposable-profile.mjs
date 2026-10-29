@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -24,9 +24,7 @@ import {
 
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Use Node 24 on Windows.');
-const directory = await mkdtemp(
-  join('E:\\Dev\\Temp\\opencode', 'hub-p5-verify-'),
-);
+const directory = await mkdtemp(join(tmpdir(), 'hub-p5-verify-'));
 const environment = Object.fromEntries(
   [
     'PATH',

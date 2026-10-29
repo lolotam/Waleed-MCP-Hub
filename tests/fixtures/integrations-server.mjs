@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 // Disposable Windows-user scopes only; no personal config/pilot reads or writes.
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
@@ -11,7 +12,7 @@ import {
 import { memoryStore } from '../helpers/memory-store.ts';
 import { memorySecrets } from '../helpers/secrets.ts';
 import { createHubServer } from '../../apps/server/dist/app.js';
-const directory = await mkdtemp('E:\\Dev\\Temp\\opencode\\hub-p7-browser-');
+const directory = await mkdtemp(join(tmpdir(), 'hub-p7-browser-'));
 const targets = windowsAgentTargets('C:\\Synthetic', {}).map((target) => ({
   ...target,
   paths: [

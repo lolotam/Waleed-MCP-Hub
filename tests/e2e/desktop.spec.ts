@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fork, type ChildProcess } from 'node:child_process';
 import { mkdtemp, access, rm } from 'node:fs/promises';
 import { test, expect } from '@playwright/test';
@@ -9,9 +11,7 @@ test('desktop single-instance reopen issues fresh fragment launches and protecte
     process.platform !== 'win32',
     'Windows named-pipe desktop runtime.',
   );
-  const directory = await mkdtemp(
-    'E:\\Dev\\Temp\\opencode\\hub-desktop-browser-',
-  );
+  const directory = await mkdtemp(join(tmpdir(), 'hub-desktop-browser-'));
   const children: ChildProcess[] = [];
   const start = () => {
     const child = fork('tests/fixtures/desktop-host.mjs', [], {
@@ -97,9 +97,7 @@ test('desktop single-instance reopen issues fresh fragment launches and protecte
 });
 test('desktop port conflict releases owned locks and exits without stopping its owner', async () => {
   test.skip(process.platform !== 'win32', 'Windows desktop runtime.');
-  const directory = await mkdtemp(
-    'E:\\Dev\\Temp\\opencode\\hub-desktop-conflict-',
-  );
+  const directory = await mkdtemp(join(tmpdir(), 'hub-desktop-conflict-'));
   const owner = createServer();
   let child: ChildProcess | undefined;
   try {

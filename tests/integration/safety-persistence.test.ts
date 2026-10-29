@@ -24,11 +24,7 @@ const ledgers: SafetyLedger[] = [];
 const stores: StateStore[] = [];
 async function temporary() {
   const path = await mkdtemp(
-    join(
-      process.env.HUB_TEST_TEMP ??
-        (process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir()),
-      'hub-safety-',
-    ),
+    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-safety-'),
   );
   directories.push(path);
   return path;

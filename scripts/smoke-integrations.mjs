@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 // Real protected Windows files/DPAPI/compiled bridge, exclusively disposable roots.
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
@@ -15,7 +16,7 @@ import {
 } from '@waleed/hub-core';
 if (process.platform !== 'win32')
   throw new Error('Windows integration smoke requires Windows.');
-const directory = await mkdtemp('E:\\Dev\\Temp\\opencode\\hub-p7-compiled-'),
+const directory = await mkdtemp(join(tmpdir(), 'hub-p7-compiled-')),
   home = join(directory, 'home'),
   runtime = join(directory, 'runtime');
 await mkdir(home);

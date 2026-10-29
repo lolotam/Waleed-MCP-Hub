@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 // Opt-in real Docker keychain smoke. Fresh owned name only, no provider/account
 // credentials, image runs, OAuth consent, or existing secret value reads.
 import assert from 'node:assert/strict';
@@ -13,9 +14,7 @@ import {
 
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Use Node 24 on Windows.');
-const directory = await mkdtemp(
-  join('E:\\Dev\\Temp\\opencode', 'hub-p6-docker-secret-'),
-);
+const directory = await mkdtemp(join(tmpdir(), 'hub-p6-docker-secret-'));
 const id = `wmh-secret-${randomUUID()}`;
 const value = Buffer.from(`SYNTHETIC-DISPOSABLE-${randomUUID()}`);
 let backend,

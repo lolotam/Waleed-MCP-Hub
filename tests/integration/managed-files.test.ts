@@ -14,12 +14,7 @@ import { hashBytes } from '../../packages/hub-core/src/runtime/registry.js';
 
 const directories: string[] = [];
 async function temporary() {
-  const path = await mkdtemp(
-    join(
-      process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir(),
-      'hub-managed-',
-    ),
-  );
+  const path = await mkdtemp(join(tmpdir(), 'hub-managed-'));
   directories.push(path);
   return path;
 }

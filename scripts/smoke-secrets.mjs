@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 // Compiled CurrentUser vault + generated native launcher smoke, entirely
 // disposable. No Docker/provider/agent config or real credential is involved.
 import assert from 'node:assert/strict';
@@ -20,9 +21,7 @@ import {
 
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Use Node 24 on Windows.');
-const directory = await mkdtemp(
-  join('E:\\Dev\\Temp\\opencode', 'hub-p6-compiled-'),
-);
+const directory = await mkdtemp(join(tmpdir(), 'hub-p6-compiled-'));
 const store = await openStateStore(directory),
   safety = await openSafetyLedger(directory),
   backend = await windowsSecretStore(join(directory, 'credentials'));

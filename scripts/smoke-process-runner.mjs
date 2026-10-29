@@ -11,11 +11,7 @@ if (process.platform !== 'win32') {
   );
 } else {
   const directory = await mkdtemp(
-    join(
-      process.env.HUB_TEST_TEMP ??
-        (process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir()),
-      'hub-compiled-',
-    ),
+    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-compiled-'),
   );
   try {
     const runner = await createWindowsProcessRunner({

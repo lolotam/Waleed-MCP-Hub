@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,9 +147,7 @@ describe.skipIf(process.platform !== 'win32')(
   'real contained MCP stdio discovery',
   () => {
     it('negotiates and lists capabilities using isolated explicit argv/environment and cleans up its session', async () => {
-      const directory = await mkdtemp(
-        join('E:\\Dev\\Temp\\opencode', 'hub-mcp space-'),
-      );
+      const directory = await mkdtemp(join(tmpdir(), 'hub-mcp space-'));
       directories.push(directory);
       const path = join(directory, 'peer.json');
       const value = connector('native', 'native');
@@ -188,9 +187,7 @@ describe.skipIf(process.platform !== 'win32')(
       expect(peer.inheritedSecret).toBeNull();
     }, 20_000);
     it('cancels only its contained stalled target and does not publish fake capabilities', async () => {
-      const directory = await mkdtemp(
-        join('E:\\Dev\\Temp\\opencode', 'hub-mcp-cancel-'),
-      );
+      const directory = await mkdtemp(join(tmpdir(), 'hub-mcp-cancel-'));
       directories.push(directory);
       const value = connector('native', 'native');
       if (value.executionMode !== 'native') throw new Error();

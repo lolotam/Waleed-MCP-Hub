@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { cp, mkdtemp, rm, access } from 'node:fs/promises';
 import { fork } from 'node:child_process';
@@ -6,7 +7,7 @@ import { join, resolve } from 'node:path';
 const source = resolve(process.argv[2] ?? '');
 if (!process.argv[2])
   throw new Error('Pass the generated portable folder path.');
-const directory = await mkdtemp('E:\\Dev\\Temp\\opencode\\hub-portable-check-');
+const directory = await mkdtemp(join(tmpdir(), 'hub-portable-check-'));
 const app = join(directory, 'app'),
   data = join(directory, 'data');
 let child;

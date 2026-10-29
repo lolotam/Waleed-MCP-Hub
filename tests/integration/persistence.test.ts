@@ -8,11 +8,7 @@ const directories: string[] = [];
 const stores: StateStore[] = [];
 async function temporary() {
   const path = await mkdtemp(
-    join(
-      process.env.HUB_TEST_TEMP ??
-        (process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir()),
-      'hub-state-',
-    ),
+    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-state-'),
   );
   directories.push(path);
   return path;

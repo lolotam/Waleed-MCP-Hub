@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import {
   mkdtemp,
   readFile,
@@ -20,7 +21,7 @@ describe.skipIf(process.platform !== 'win32')(
       'SYNTHETIC-DPAPI-only-secret-عربي-0123456789',
     );
     beforeAll(async () => {
-      directory = await mkdtemp(join('E:\\Dev\\Temp\\opencode', 'hub-dpapi-'));
+      directory = await mkdtemp(join(tmpdir(), 'hub-dpapi-'));
       vault = await windowsSecretStore(join(directory, 'vault'));
     }, 30_000);
     afterAll(async () => {

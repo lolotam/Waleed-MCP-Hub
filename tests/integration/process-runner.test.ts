@@ -80,13 +80,7 @@ describe.skipIf(process.platform !== 'win32')(
   () => {
     beforeEach(async () => {
       directory = await mkdtemp(
-        join(
-          process.env.HUB_TEST_TEMP ??
-            (process.platform === 'win32'
-              ? 'E:\\Dev\\Temp\\opencode'
-              : tmpdir()),
-          'hub-process space-',
-        ),
+        join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-process space-'),
       );
       runner = await createWindowsProcessRunner({
         allowedExecutables: [process.execPath],

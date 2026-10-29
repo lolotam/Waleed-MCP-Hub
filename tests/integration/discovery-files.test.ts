@@ -15,11 +15,7 @@ import { createWindowsDiscoveryPorts } from '@waleed/hub-core';
 const directories: string[] = [];
 async function temporary() {
   const path = await mkdtemp(
-    join(
-      process.env.HUB_TEST_TEMP ??
-        (process.platform === 'win32' ? 'E:\\Dev\\Temp\\opencode' : tmpdir()),
-      'hub-discovery-',
-    ),
+    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-discovery-'),
   );
   directories.push(path);
   return path;

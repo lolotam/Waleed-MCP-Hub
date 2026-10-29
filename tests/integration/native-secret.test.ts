@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,9 +18,7 @@ describe.skipIf(process.platform !== 'win32')(
   'disposable real DPAPI-backed native connector',
   () => {
     it('stores and resolves only the declared credential, discovers over contained stdio and clears the owned value', async () => {
-      const directory = await mkdtemp(
-        join('E:\\Dev\\Temp\\opencode', 'hub-secret-native-'),
-      );
+      const directory = await mkdtemp(join(tmpdir(), 'hub-secret-native-'));
       let hub: ReturnType<typeof createLifecycle> | undefined;
       try {
         const backend = await windowsSecretStore(
