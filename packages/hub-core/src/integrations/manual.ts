@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   ManualMcpSchema,
+  type HubState,
   type ImportDefinition,
   type RegistryOperation,
 } from '@waleed/contracts';
@@ -9,6 +10,40 @@ import { HubError } from '../errors.js';
 import { definitionHash } from '../runtime/registry.js';
 import { assertBinding } from '../auth/bindings.js';
 import { assertNoCredentialEcho } from './bridge.js';
+
+// The shared credential write: every value is written through the journaled
+// one-way interface of P6, one at a time, with the state read again before
+// each write. The value is blanked as soon as it is stored, so it never stays
+// in the caller's map.
+export async function writeCredentialValues(
+  host: {
+    inventory(): Promise<HubState>;
+    auth: {
+      credentials: {
+        write(connectorId: string, raw: unknown): Promise<unknown>;
+      };
+    };
+  },
+  connectorId: string,
+  location: 'environment' | 'header',
+  values: Record<string, string>,
+  adapter: 'windows' | 'docker',
+): Promise<void> {
+  for (const name of Object.keys(values)) {
+    const state = await host.inventory(),
+      connector = state.connectors.find((item) => item.id === connectorId)!;
+    await host.auth.credentials.write(connectorId, {
+      expectedRevision: state.revision,
+      expectedConnectorRevision: connector.revision,
+      location,
+      name,
+      format: 'raw',
+      adapter,
+      value: values[name],
+    });
+    values[name] = '';
+  }
+}
 
 // Values are transient and committed through P6's journaled one-way interface.
 // Partial completion is explicit; never retry a saved definition as a new one.
@@ -116,20 +151,13 @@ export async function addManualMcp(
     saved = true;
     for (const location of ['environment', 'header'] as const) {
       const values = location === 'environment' ? input.env : input.headers;
-      for (const name of Object.keys(values)) {
-        const state = await hub.inventory(),
-          connector = state.connectors.find((item) => item.id === id)!;
-        await hub.auth.credentials.write(id, {
-          expectedRevision: state.revision,
-          expectedConnectorRevision: connector.revision,
-          location,
-          name,
-          format: 'raw',
-          adapter: input.type === 'docker' ? 'docker' : 'windows',
-          value: values[name],
-        });
-        values[name] = '';
-      }
+      await writeCredentialValues(
+        hub,
+        id,
+        location,
+        values,
+        input.type === 'docker' ? 'docker' : 'windows',
+      );
     }
     if (input.approveExecution) {
       const state = await hub.inventory(),

@@ -289,6 +289,9 @@ export interface ResolvePackageOptions {
   packagesDir: string;
   signal: AbortSignal;
   previews: PreviewStore;
+  // The folder id of the job. The service passes the id of its own job, so it
+  // knows which job folders are live while the lookup runs.
+  jobId?: string;
   registry?: RegistryTarget;
   nodeExecutable?: string;
   now?: () => Date;
@@ -375,7 +378,7 @@ export const resolvePackage = async (
       throw error;
   }
 
-  const jobId = randomUUID();
+  const jobId = options.jobId ?? randomUUID();
   try {
     const paths = await prepareJob(options.packagesDir, jobId, registry);
     await writeFile(

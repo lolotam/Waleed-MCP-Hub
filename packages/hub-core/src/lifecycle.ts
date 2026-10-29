@@ -13,7 +13,11 @@ import {
   type SafetyLedger,
 } from './safety.js';
 import { publicError } from './diagnostics.js';
-import { planRegistry, type RegistryPlan } from './runtime/registry.js';
+import {
+  planRegistry,
+  type RegistryContext,
+  type RegistryPlan,
+} from './runtime/registry.js';
 import { createRuntimeChecks } from './runtime/checks.js';
 import {
   MaterializationFault,
@@ -30,12 +34,21 @@ import {
   createIntegrationEngine,
   type IntegrationAdapters,
 } from './integrations/engine.js';
+import {
+  createPackageService,
+  type PackageHost,
+  type PackageService,
+  type PackageServiceAdapter,
+} from './packages/service.js';
 
 interface Draft {
   input: RegistryOperation;
   preview: OperationPreview;
   owner: string;
   external?: MaterializationPlan;
+  // The trusted context of an internal caller. Only the package service passes
+  // one; the HTTP routes never do.
+  context?: RegistryContext;
 }
 export interface LifecycleAdapters {
   integrations?: IntegrationAdapters;
@@ -45,6 +58,7 @@ export interface LifecycleAdapters {
   oauthRecipes?: readonly OAuthRecipe[];
   oauthTimeoutMs?: number;
   oauthFlows?: { begin: typeof beginOAuth; refresh: typeof refreshOAuth };
+  packages?: PackageServiceAdapter;
 }
 export function createLifecycle(
   store: StateStore,
@@ -120,7 +134,8 @@ export function createLifecycle(
     )!;
     profile.dockerProfileId = external.record?.dockerProfileId ?? null;
   };
-  return {
+  let packages: PackageService | null = null;
+  const lifecycle = {
     safety,
     checks,
     auth,
@@ -132,7 +147,11 @@ export function createLifecycle(
       agentApply: integrations.enabled,
     },
     inventory: () => store.read(),
-    async preview(raw: unknown, owner: string): Promise<OperationPreview> {
+    async preview(
+      raw: unknown,
+      owner: string,
+      context?: RegistryContext,
+    ): Promise<OperationPreview> {
       if (closed) throw new HubError('unavailable', 'Lifecycle is closed.');
       const input = RegistryOperationSchema.parse(raw);
       await safety.assertWritable();
@@ -143,7 +162,7 @@ export function createLifecycle(
           : 'connectorId' in input
             ? input.connectorId
             : randomUUID();
-      const plan = planRegistry(input, state, targetId, timestamp());
+      const plan = planRegistry(input, state, targetId, timestamp(), context);
       let external: MaterializationPlan | undefined;
       if (
         input.kind === 'materialize_profile' ||
@@ -208,6 +227,7 @@ export function createLifecycle(
         preview,
         owner,
         ...(external ? { external } : {}),
+        ...(context ? { context } : {}),
       });
       return structuredClone(preview);
     },
@@ -269,6 +289,7 @@ export function createLifecycle(
                 state,
                 draft.preview.targetId!,
                 timestamp(),
+                draft.context,
               );
               if (draft.external) attachExternal(plan, draft.external);
               plan.next.activity.push({
@@ -398,6 +419,9 @@ export function createLifecycle(
       await checks.drain();
     },
     async close() {
+      // The package jobs finish first: their save needs the lifecycle, so the
+      // lifecycle stays open until they reported their real outcome.
+      await packages?.close();
       closed = true;
       drafts.clear();
       for (const entry of jobs.values())
@@ -408,5 +432,23 @@ export function createLifecycle(
         await new Promise<void>((resolve) => setImmediate(resolve));
     },
   };
+  if (adapters.packages) {
+    // The service sees a narrow host, never the whole lifecycle.
+    const host: PackageHost = {
+      preview: (raw, owner, context) => lifecycle.preview(raw, owner, context),
+      apply: (previewId, owner) => lifecycle.apply(previewId, owner),
+      drain: () => lifecycle.drain(),
+      job: (id, owner) => lifecycle.job(id, owner),
+      inventory: () => lifecycle.inventory(),
+      auth: {
+        credentials: {
+          write: (connectorId, raw) =>
+            lifecycle.auth.credentials.write(connectorId, raw),
+        },
+      },
+    };
+    packages = createPackageService(host, adapters.packages);
+  }
+  return { ...lifecycle, packages };
 }
 export type HubLifecycle = ReturnType<typeof createLifecycle>;

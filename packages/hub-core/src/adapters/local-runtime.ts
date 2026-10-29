@@ -20,6 +20,7 @@ import type { SecretBackends } from '../auth/secrets.js';
 import { assertNoLinks } from './managed-files.js';
 import { windowsAgentTargets } from '../integrations/targets.js';
 import { agentFiles, outsideProtectedPilot } from '../integrations/files.js';
+import { packagesRoot } from '../packages/store.js';
 
 export async function localRuntimeAdapters(
   directory: string,
@@ -130,6 +131,10 @@ export async function localRuntimeAdapters(
         }
       : {}),
     secrets,
+    packages: {
+      packagesDir: packagesRoot(directory),
+      nodeExecutable: process.execPath,
+    },
     materializer: createMaterializer({
       files,
       ...(command ? { docker: dockerProfiles(command, files) } : {}),

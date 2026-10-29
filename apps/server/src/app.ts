@@ -23,6 +23,7 @@ import {
   type HubLifecycle,
   type DiscoveryService,
   addManualMcp,
+  PackageFault,
 } from '@waleed/hub-core';
 import { createSessions } from './security.js';
 
@@ -92,6 +93,11 @@ export async function createHubServer(options: ServerOptions) {
     '/api/agents/:agentId/status': 'agent_status',
     '/api/agents/sync': 'agent_sync',
     '/api/connectors/manual': 'manual_mcp',
+    '/api/packages/resolve': 'package_resolve',
+    '/api/packages/install': 'package_install',
+    '/api/packages/jobs/:id': 'package_job',
+    '/api/packages/jobs/:id/cancel': 'package_cancel',
+    '/api/packages/verify/:connectorId': 'package_verify',
     '/api/desktop/shutdown': 'desktop_shutdown',
   };
   app.addHook('onSend', async (request, reply, payload) => {
@@ -215,6 +221,12 @@ export async function createHubServer(options: ServerOptions) {
         .code(status)
         .send({ error: safe.code, message: safe.message });
     }
+    // A package failure carries its sanitized code and nothing else: no
+    // message, no path, no registry text and no installer output.
+    if (error instanceof PackageFault)
+      return reply
+        .code(error.code === 'busy' ? 409 : 400)
+        .send({ error: error.code, message: 'Package operation failed.' });
     // Never reflect validation errors (which may contain pasted values), paths,
     // request bodies, exception messages, or provider output back into diagnostics.
     if (error instanceof Error && error.name === 'ZodError')
@@ -591,6 +603,48 @@ export async function createHubServer(options: ServerOptions) {
       request.cookies.waleed_hub_session!,
     );
   });
+  // The managed package routes. The session, CSRF and Origin hooks above
+  // already cover every one of them.
+  const packages = () => {
+    const service = options.lifecycle.packages;
+    if (!service)
+      throw new HubError('unavailable', 'Managed packages are not available.');
+    return service;
+  };
+  app.post('/api/packages/resolve', async (request, reply) => {
+    const service = packages();
+    return reply
+      .code(202)
+      .send(service.resolve(request.body, request.cookies.waleed_hub_session!));
+  });
+  app.post('/api/packages/install', async (request, reply) => {
+    const service = packages();
+    const body = request.body;
+    request.body = undefined;
+    return reply
+      .code(202)
+      .send(await service.install(body, request.cookies.waleed_hub_session!));
+  });
+  app.get<{ Params: { id: string } }>(
+    '/api/packages/jobs/:id',
+    async (request) =>
+      packages().job(
+        IdSchema.parse(request.params.id),
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/packages/jobs/:id/cancel',
+    async (request) =>
+      packages().cancel(
+        IdSchema.parse(request.params.id),
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { connectorId: string } }>(
+    '/api/packages/verify/:connectorId',
+    async (request) => await packages().verify(request.params.connectorId),
+  );
   app.get<{ Params: { id: string } }>(
     '/api/connectors/:id/auth',
     async (request) =>

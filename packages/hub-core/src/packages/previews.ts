@@ -23,6 +23,9 @@ export interface PreviewStoreOptions {
 export interface PreviewStore {
   put(record: PreviewRecord): void;
   take(previewId: string, owner: string): Promise<PreviewRecord>;
+  // The job folder id of every stored record. A record that expired but was
+  // not swept yet still counts: its folder is still on disk.
+  jobIds(): ReadonlySet<string>;
   dispose(): void;
   readonly ttlMs?: number;
 }
@@ -87,6 +90,9 @@ export function createPreviewStore(
         throw new PackageFault('preview_expired');
       }
       return entry.record;
+    },
+    jobIds() {
+      return new Set([...stored.values()].map((entry) => entry.record.jobId));
     },
     dispose() {
       for (const [previewId] of stored) forget(previewId);

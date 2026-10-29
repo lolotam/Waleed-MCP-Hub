@@ -258,7 +258,8 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
         },
         new AbortController().signal,
         async () => {
-          await new Promise((r) => setTimeout(r, 200));
+          // Long enough that three spaced scans fit even on a loaded machine.
+          await new Promise((r) => setTimeout(r, 600));
           return 'ok';
         },
       );

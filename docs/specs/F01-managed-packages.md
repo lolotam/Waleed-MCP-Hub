@@ -364,7 +364,7 @@ entry, acknowledgedWarnings[]}`. Reinstall uses a preview of the same version. T
 - `POST /api/packages/install` `{previewId, entry, acknowledgedWarnings[],
 connectorName, arguments[], env{}}` → job. Refused if the preview is expired, used,
   owned by another session, or any warning is not acknowledged.
-- `GET /api/jobs/<id>`: phase (`resolving`, `downloading`, `verifying`, `saving`),
+- `GET /api/packages/jobs/<id>` (cancel: `POST /api/packages/jobs/<id>/cancel`): phase (`resolving`, `downloading`, `verifying`, `saving`),
   progress, sanitized error code, and on success `{connectorId, outcome}`.
 - `POST /api/packages/replace` (update and reinstall, see above).
 - `POST /api/packages/verify/<connectorId>`: **Verify files**; full verification,

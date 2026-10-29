@@ -59,6 +59,11 @@ export const AuditRouteSchema = z.enum([
   'oauth_refresh',
   'auth_job',
   'auth_cancel',
+  'package_resolve',
+  'package_install',
+  'package_job',
+  'package_cancel',
+  'package_verify',
   'assets',
   'unknown',
 ]);
