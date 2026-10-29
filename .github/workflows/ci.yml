@@ -27,4 +27,19 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run format:check
-      - run: npm run check
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run check:boundaries
+      - run: npm run check:secrets
+      # The process and DPAPI hosts compile C# with Add-Type at startup. A cold
+      # runner's first compile exceeds the hosts' startup budget, so warm it.
+      - name: Warm the .NET compiler
+        shell: powershell
+        run: |
+          foreach ($i in 1..3) {
+            Add-Type -TypeDefinition "public static class Warm$i { public static int Value() { return $i; } }"
+          }
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:windows-runtime
+      - run: npm run test:windows-secrets
