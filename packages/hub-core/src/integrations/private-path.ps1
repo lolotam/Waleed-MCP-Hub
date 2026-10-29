@@ -1,6 +1,11 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Autoloading is off for the same reason as in the process host (host.ps1).
+$PSModuleAutoloadingPreference = 'None'
 try {
+    foreach ($module in 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Security') {
+        Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $module, "$module.psd1"))
+    }
     $inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
     $path = [string]$inputData.path
     if (-not [IO.Path]::IsPathRooted($path) -or $path.StartsWith('\\')) { throw 'invalid' }

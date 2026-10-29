@@ -3,10 +3,7 @@ import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertNoLinks } from '../managed-files.js';
-import {
-  createWindowsProcessRunner,
-  systemModulePath,
-} from '../native/process-runner.js';
+import { createWindowsProcessRunner } from '../native/process-runner.js';
 import { HubError } from '../../errors.js';
 import {
   assertSecretId,
@@ -27,9 +24,8 @@ export async function windowsSecretStore(
   await assertNoLinks(directory, !readOnly);
   if (!readOnly) await mkdir(directory, { recursive: true, mode: 0o700 });
   await assertNoLinks(directory);
-  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
   const executable = win32.join(
-    systemRoot,
+    process.env.SystemRoot ?? 'C:\\Windows',
     'System32',
     'WindowsPowerShell',
     'v1.0',
@@ -48,8 +44,7 @@ export async function windowsSecretStore(
     const result = await runner.run({
       executable,
       arguments: ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script],
-      // The system module path keeps PowerShell startup fast (see process-runner).
-      environment: { PSModulePath: systemModulePath(systemRoot) },
+      environment: {},
       stdin: JSON.stringify(input),
       signal,
       timeoutMs: 10_000,

@@ -3,7 +3,10 @@ Set-StrictMode -Version Latest
 $bytes = $null
 $entropy = $null
 $result = $null
+# Autoloading is off for the same reason as in the process host (host.ps1).
+$PSModuleAutoloadingPreference = 'None'
 try {
+    Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Utility.psd1'))
     Add-Type -AssemblyName System.Security
     $inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
     if ($inputData.action -eq 'acl') {
