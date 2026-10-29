@@ -3,15 +3,22 @@ Set-StrictMode -Version Latest
 $bytes = $null
 $entropy = $null
 $result = $null
+# Autoloading is off for the same reason as in the process host (host.ps1).
+$PSModuleAutoloadingPreference = 'None'
 try {
+    Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Utility.psd1'))
     Add-Type -AssemblyName System.Security
     $inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
     if ($inputData.action -eq 'acl') {
         $path = [string]$inputData.path
         if (-not [IO.Path]::IsPathRooted($path) -or $path.StartsWith('\\')) { throw 'invalid' }
-        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $sid = $identity.User
         $existing = [IO.Directory]::GetAccessControl($path)
-        if ($existing.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw 'owner' }
+        # An elevated token creates objects owned by BUILTIN\Administrators, so also
+        # accept the token's default owner: the owner this process's own folders get.
+        $owner = $existing.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($owner -ne $sid.Value -and $owner -ne $identity.Owner.Value) { throw 'owner' }
         $acl = New-Object Security.AccessControl.DirectorySecurity
         $acl.SetAccessRuleProtection($true, $false)
         $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'

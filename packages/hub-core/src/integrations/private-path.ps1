@@ -1,14 +1,22 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Autoloading is off for the same reason as in the process host (host.ps1).
+$PSModuleAutoloadingPreference = 'None'
 try {
+    foreach ($module in 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Security') {
+        Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $module, "$module.psd1"))
+    }
     $inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
     $path = [string]$inputData.path
     if (-not [IO.Path]::IsPathRooted($path) -or $path.StartsWith('\\')) { throw 'invalid' }
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sid = $identity.User
     $item = Get-Item -LiteralPath $path -Force
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'invalid' }
     $existing = Get-Acl -LiteralPath $path
-    if ($existing.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw 'owner' }
+    # Accept the token's default owner too, as in dpapi.ps1 (elevated tokens).
+    $owner = $existing.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -ne $sid.Value -and $owner -ne $identity.Owner.Value) { throw 'owner' }
     if ($item.PSIsContainer) {
         $acl = New-Object Security.AccessControl.DirectorySecurity
         $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'

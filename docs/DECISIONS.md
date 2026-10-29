@@ -386,6 +386,9 @@ bound to a random vault scope plus reference ID. The directory DACL admits the
 current SID and SYSTEM only; existing ownership must match. Setting the existing
 owner again was rejected without elevated WRITE_OWNER rights, so the implementation
 verifies ownership and changes only the DACL—no elevation or execution-policy bypass.
+"Match" means the current user SID or the token's default owner. An elevated token
+creates objects owned by `BUILTIN\Administrators`, which no other non-admin user can
+produce, and an administrator can already rewrite any ACL, so this admits nothing new.
 Read-only launchers reuse the scope without creating/writing vault state. Junctions,
 hardlinks, unsafe IDs, missing/wrong-scope/tampered ciphertext fail closed; there is
 no plaintext fallback. CurrentUser isolation relies on Windows DPAPI's OS contract;
