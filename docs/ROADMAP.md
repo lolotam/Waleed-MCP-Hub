@@ -76,6 +76,13 @@ targets from one screen.
    the reference integration. Provider tokens go into the DPAPI store like every
    other credential, and the same draft-only rule applies.
 
+   The chat flow: the agent searches the registry and recommends a server; the hub
+   shows a **sign-in card** for OAuth servers and a **secrets card** listing the
+   exact fields an API-key server needs. The user types values into the card, never
+   into the chat, and the agent only learns that a value was saved. The card ends
+   with approval of the exact definition, after which the agent tests the connector
+   and reports which tools work.
+
 ## P1 — control and daily use
 
 9. **Per-tool Allow / Ask / Block** (in progress). Block hides the tool; Ask
