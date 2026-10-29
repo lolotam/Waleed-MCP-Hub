@@ -1,0 +1,203 @@
+# Add any MCP server to the hub
+
+This guide covers every kind of MCP server the hub can run today, with the exact
+screens and fields to use. If something here no longer matches the app, the app is
+right and this page needs fixing.
+
+## The flow is always the same
+
+1. **Save** the definition (nothing runs yet).
+2. **Add credentials**, if the server needs them (Authentication on the connector row).
+3. **Approve execution** — you confirm you trust this exact command, image or URL.
+4. **Test capabilities** — the hub connects and lists the server's tools. It never
+   calls a tool during a test.
+5. **Connect your agents** once (see [connecting-agents.md](connecting-agents.md)).
+   Every enabled, approved connector then appears in each agent as
+   `<connector-name>__<tool-name>`, for example `ssh-prod-mcp__list-connections`.
+
+Editing a connector, changing its credentials, or disabling and re-enabling it
+clears the approval. Approve it again and re-test.
+
+Profiles are optional. Agents connected through the hub see every enabled,
+approved connector; profiles are only for generating Docker profile snapshots.
+
+## Which type is my server?
+
+| The server's README says…                                | Use                                         |
+| -------------------------------------------------------- | ------------------------------------------- |
+| a URL such as `https://…/mcp`                            | [Remote HTTP](#remote-http)                 |
+| a URL ending in `/sse`                                   | [Remote SSE](#remote-sse)                   |
+| `npx -y some-package` (Node.js)                          | [npm package](#npm-package-npx)             |
+| `uvx some-package` or `pip install` (Python)             | [Python package](#python-package-uvx)       |
+| a downloadable `.exe` (Go, Rust, .NET…)                  | [Native executable](#native-executable)     |
+| `docker run …` or an image name                          | [Docker image](#docker-image)               |
+| a JSON block with `mcpServers` you already use elsewhere | [Paste a config](#paste-an-existing-config) |
+
+## Remote HTTP
+
+1. **Connectors → Add Manual MCP**.
+2. **MCP name**: a short name, for example `linear`.
+3. **Connection type**: `Remote HTTP`.
+4. **HTTPS MCP URL**: the server's URL. It must be public `https://`, with no
+   username, password, `?query` or `#fragment` in it.
+5. **Protected headers (write-only JSON)**: leave empty if the server needs no key.
+   Otherwise see [API keys and tokens](#api-keys-and-tokens).
+6. Tick **I trust this exact … endpoint** if you want it approved now, then
+   **Save MCP**.
+7. Open the connector row and choose **Test capabilities**.
+
+`http://localhost` and private-network URLs are refused. The hub pins validated
+public DNS addresses and does not follow redirects.
+
+## Remote SSE
+
+Same as Remote HTTP, with **Connection type** `Remote SSE`. Use it only when the
+provider still documents the older SSE transport; prefer HTTP when both exist.
+
+## API keys and tokens
+
+Put the exact header the provider documents in **Protected headers**, including
+the prefix:
+
+```json
+{ "Authorization": "Bearer YOUR_TOKEN" }
+```
+
+Some providers use their own header instead, for example
+`{ "X-API-Key": "YOUR_KEY" }`. The value is encrypted with Windows DPAPI for your
+user account and is never shown again, written to agent files, or returned by the
+API.
+
+To change a key later, open the connector row → **Authentication** → enter the
+**New credential value** → choose the **Header format** → save. Saving a key does not
+prove it works: approve the connector again and run **Test capabilities**.
+
+Never put a secret in the name, URL or arguments. The hub rejects URLs that
+contain credentials.
+
+## OAuth sign-in
+
+The hub has a built-in OAuth flow only for **Linear (read-only)**:
+`https://mcp.linear.app/mcp/readonly`, scope `read`. Add it as Remote HTTP, approve
+it, then **Authentication → Sign in and verify → Continue to verified provider**.
+
+Other OAuth-only servers show **auth_required** after a test. Until general OAuth
+support lands (see [ROADMAP](../ROADMAP.md)), check whether the provider also
+accepts a personal access token or API key in a header. If it does, use
+[API keys and tokens](#api-keys-and-tokens).
+
+## npm package (npx)
+
+The hub never runs `npx`, `npm`, `.cmd` or `.bat` files, because they can download
+and run different code each time. Install the package once into a folder you
+control, then point the hub at `node.exe` and the package's entry script.
+
+1. Install a pinned version into its own folder:
+
+   ```powershell
+   npm install --prefix E:\Dev\Tools_and_Utilities\my-mcp some-mcp-package@1.2.3
+   ```
+
+2. Find the entry script. Open
+   `E:\Dev\Tools_and_Utilities\my-mcp\node_modules\some-mcp-package\package.json`
+   and read the `bin` field, for example `"bin": { "some-mcp": "build/index.js" }`.
+   The full path is then
+   `E:\Dev\Tools_and_Utilities\my-mcp\node_modules\some-mcp-package\build\index.js`.
+
+3. Find your Node executable: `(Get-Command node).Source`. Use the real
+   `node.exe` path, for example `E:\Dev\Tools_and_Utilities\nodejs24\node.exe`.
+
+4. **Add Manual MCP** → **Connection type** `Stdio — local executable`:
+   - **Absolute command (.exe)**: the `node.exe` path.
+   - **Arguments (JSON array)**: the entry script first, then the server's own
+     options, each as a separate string:
+
+     ```json
+     [
+       "E:\\Dev\\Tools_and_Utilities\\my-mcp\\node_modules\\some-mcp-package\\build\\index.js",
+       "--some-option"
+     ]
+     ```
+
+   - **Protected environment values**: any keys the server reads from the
+     environment, for example `{ "API_TOKEN": "…" }`.
+
+5. Save, approve, test.
+
+Your SSH connectors are set up this way: `node.exe` plus
+`ssh-mcp\node_modules\ssh-mcp\build\index.js`.
+
+Backslashes must be doubled inside JSON strings.
+
+## Python package (uvx)
+
+Install the tool so it gets a real `.exe` launcher, then use that `.exe`:
+
+```powershell
+uv tool install some-mcp-server==1.2.3
+(Get-Command some-mcp-server).Source   # e.g. C:\Users\you\.local\bin\some-mcp-server.exe
+```
+
+Without `uv`, a virtual environment works too:
+
+```powershell
+python -m venv E:\Dev\Tools_and_Utilities\my-py-mcp
+E:\Dev\Tools_and_Utilities\my-py-mcp\Scripts\pip install some-mcp-server==1.2.3
+# use E:\Dev\Tools_and_Utilities\my-py-mcp\Scripts\some-mcp-server.exe
+```
+
+Then **Add Manual MCP** → `Stdio — local executable` with that `.exe`, its
+arguments, and protected environment values.
+
+## Native executable
+
+For servers shipped as a binary: download it to a stable folder, then
+**Add Manual MCP** → `Stdio — local executable` → the absolute `.exe` path →
+arguments as a JSON array.
+
+The process starts with an isolated environment rather than your user
+environment, so add every variable the server needs to **Protected environment
+values**.
+
+## Docker image
+
+1. Docker Desktop must be running with a local (not remote) context.
+2. **Add Manual MCP** → **Connection type** `Docker image`.
+3. **Docker image**: pin a version, for example `mcp/fetch:1.0.0`, not `latest`.
+4. **Arguments**: the container arguments as a JSON array.
+5. **Loopback ports**: only if the server must be reachable, for example
+   `[{"host":8080,"container":8080}]`. Ports bind to `127.0.0.1` only.
+6. Save, approve, test. A test can pull the image if it is missing.
+
+Agents can't use Docker connectors that need protected environment values yet.
+Use a native install for those servers for now.
+
+## Paste an existing config
+
+If you already have the server in another app's config:
+
+1. **Connectors → Add connector**.
+2. Paste the JSON into **Configuration JSON**. Accepted shapes: a single server
+   object, an `mcpServers` map, a `servers` map, OpenCode's `mcp.servers`, and Docker
+   image or remote definitions.
+3. **Preview configuration** → review the normalized definition → **Preview local
+   save** → **Apply reviewed change**.
+
+Env and header values in the paste become write-only references; re-enter them
+in **Authentication** after saving. Entries that use `npx`, `uvx` or `.cmd` launchers
+are saved as data only. Convert them as described in
+[npm package](#npm-package-npx) or [Python package](#python-package-uvx) before
+they can run. JSONC (comments) and TOML are not accepted; remove comments first.
+
+## Current limits worth knowing
+
+- **Each tool call starts a fresh process** for native connectors. Servers that keep
+  state between calls (open SSH sessions, browser tabs, database transactions) lose
+  that state after every call. Single-call tools work normally.
+- Native sessions are capped at 120 seconds and 1 MiB of output per call.
+- Agents see **tools only**: resources and prompts are not forwarded.
+- At most 256 tools are exposed across all connectors.
+
+## When something fails
+
+See [troubleshooting.md](troubleshooting.md).

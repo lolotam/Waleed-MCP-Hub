@@ -1,0 +1,13 @@
+{
+  "name": "@waleed/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@fastify/cookie": "11.1.5",
+    "@fastify/static": "10.1.8",
+    "@waleed/contracts": "0.1.0",
+    "@waleed/hub-core": "0.1.0",
+    "fastify": "5.12.7"
+  }
+}

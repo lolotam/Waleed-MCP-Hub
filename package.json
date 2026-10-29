@@ -1,0 +1,51 @@
+{
+  "name": "waleed-mcp-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24.21.0 <25",
+    "npm": ">=11 <12"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc -b packages/contracts packages/hub-core apps/server && node scripts/copy-runtime-assets.mjs && vite build --config apps/web/vite.config.ts && node scripts/check-bundle.mjs",
+    "start": "node apps/server/dist/main.js",
+    "desktop": "node scripts/desktop.mjs",
+    "package:desktop": "npm run build && node scripts/package-desktop.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write apps packages scripts tests \"*.json\" \"*.mjs\" \"*.config.ts\" README.md",
+    "format:check": "prettier --check apps packages scripts tests \"*.json\" \"*.mjs\" \"*.config.ts\" README.md",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:windows-runtime": "node scripts/smoke-process-runner.mjs",
+    "test:windows-secrets": "node scripts/smoke-secrets.mjs",
+    "test:windows-integrations": "node scripts/smoke-integrations.mjs",
+    "test:disposable-profile": "node scripts/verify-disposable-profile.mjs",
+    "test:disposable-secret": "node scripts/verify-disposable-secrets.mjs",
+    "discovery:read-only": "node scripts/discover-readonly.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check": "npm run typecheck && npm run lint && npm run check:boundaries && npm run check:secrets && npm test && npm run build && npm run test:windows-runtime && npm run test:windows-secrets"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "10.13.0",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}
