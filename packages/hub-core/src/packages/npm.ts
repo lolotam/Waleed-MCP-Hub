@@ -81,17 +81,18 @@ export async function assertNoAncestorProject(
   }
 }
 
-// The job folder: the staging project, the cache, the temporary folder, the
-// redirected profile folders and the two empty configuration files. Everything
-// is private to the current user and nothing of it leaves the job.
-export async function prepareJob(
+// The paths of one job: the working folder, the cache, the temporary folder,
+// the redirected profile folders and the two empty configuration files. They
+// are computed without touching the disk, so a caller that owns the job folder
+// already can reuse them.
+export const jobPaths = (
   packagesDir: string,
   jobId: string,
   registry: RegistryTarget,
-): Promise<JobPaths> {
+): JobPaths => {
   const root = jobDirectory(packagesDir, jobId);
   const profile = join(root, 'profile');
-  const paths: JobPaths = {
+  return {
     root,
     project: join(root, 'project'),
     prefix: join(root, 'project'),
@@ -104,10 +105,22 @@ export async function prepareJob(
     globalNpmrc: join(root, 'global.npmrc'),
     ca: registry.ca === undefined ? null : join(root, 'ca.pem'),
   };
+};
+
+// The job folder: the staging project, the cache, the temporary folder, the
+// redirected profile folders and the two empty configuration files. Everything
+// is private to the current user and nothing of it leaves the job.
+export async function prepareJob(
+  packagesDir: string,
+  jobId: string,
+  registry: RegistryTarget,
+): Promise<JobPaths> {
+  const paths = jobPaths(packagesDir, jobId, registry);
+  const profile = join(paths.root, 'profile');
   // Only the job root is restricted: its private DACL is protected and
   // inheritable, so every folder and file created below it inherits it, and a
   // restriction per folder would cost one PowerShell start each.
-  await createPrivateDirectory(root);
+  await createPrivateDirectory(paths.root);
   for (const folder of [
     paths.project,
     paths.cache,

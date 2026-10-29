@@ -51,6 +51,9 @@ while (queue.length) {
   const pkg = JSON.parse(await readFile(manifest, 'utf8'));
   const source = dirname(manifest);
   const workspace = pkg.name?.startsWith('@waleed/');
+  // The bundled npm keeps its dependencies inside its own folder, so it ships
+  // whole and none of its dependencies is queued.
+  const bundled = pkg.name === 'npm';
   const destination = workspace
     ? join(output, 'node_modules', pkg.name)
     : join(output, relative(root, source));
@@ -70,12 +73,15 @@ while (queue.length) {
       errorOnExist: true,
       force: false,
       dereference: true,
-      filter: (path) => relative(source, path).split(sep)[0] !== 'node_modules',
+      filter: bundled
+        ? undefined
+        : (path) => relative(source, path).split(sep)[0] !== 'node_modules',
     });
   for (const name of Object.keys({
     ...pkg.dependencies,
     ...pkg.optionalDependencies,
   })) {
+    if (bundled) continue;
     try {
       queue.push(await packageFor(name, manifest));
     } catch (error) {

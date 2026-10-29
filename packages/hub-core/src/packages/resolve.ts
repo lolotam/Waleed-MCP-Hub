@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, readFile, statfs, writeFile } from 'node:fs/promises';
+import { lstat, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
 import type {
   PackagePreview,
   PackageResolveRequest,
@@ -22,6 +22,12 @@ import {
 } from './npm.js';
 import { PREVIEW_TTL_MS, type PreviewStore } from './previews.js';
 import { jobDirectory, removeTree } from './store.js';
+import {
+  WATCHDOG_MAX_BYTES,
+  WATCHDOG_MAX_FILES,
+  freeBytes,
+  withWatchdog,
+} from './watchdog.js';
 
 // The semver and the spec parser of the bundled npm: the hub never depends on
 // copies of its own, so the pinned npm is the only source of the spec rules.
@@ -212,22 +218,6 @@ export const validateLock = (
   return { installed, bundledCount };
 };
 
-// The free space of the drive the packages folder lives on.
-const freeBytes = async (path: string): Promise<number> => {
-  let current = resolve(path);
-  for (;;) {
-    try {
-      const stats = await statfs(current);
-      return stats.bavail * stats.bsize;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      const up = dirname(current);
-      if (up === current) throw new PackageFault('install_limit');
-      current = up;
-    }
-  }
-};
-
 // A bounded parallel map: the limit is the number of requests in flight.
 const mapLimited = async <T, R>(
   items: readonly T[],
@@ -283,6 +273,15 @@ const documentDependencies = (record: Record<string, unknown>): void => {
         throw new PackageFault('unsupported_dependency');
   }
 };
+
+// The staging manifest of one package: the exact bytes the hub writes into
+// the staging project of a lookup and into the install folder of an install.
+// Both have to be the same, so npm resolves and installs the same tree.
+export const stagingPackageJson = (name: string, version: string): string =>
+  `${JSON.stringify({
+    private: true,
+    dependencies: { [name]: version },
+  })}\n`;
 
 export interface ResolvePackageOptions {
   request: PackageResolveRequest;
@@ -381,25 +380,35 @@ export const resolvePackage = async (
     const paths = await prepareJob(options.packagesDir, jobId, registry);
     await writeFile(
       join(paths.project, 'package.json'),
-      `${JSON.stringify({
-        private: true,
-        dependencies: { [name]: version },
-      })}\n`,
+      stagingPackageJson(name, version),
       { flag: 'wx', mode: 0o600 },
     );
-    const run = await runNpm({
-      command: 'lock',
-      prefix: paths.project,
-      paths,
-      registry,
-      signal: options.signal,
-      downloadCapBytes: DOWNLOAD_CAP_BYTES,
-      timeoutMs: NPM_TIMEOUT_MS,
-      ...(options.nodeExecutable === undefined
-        ? {}
-        : { nodeExecutable: options.nodeExecutable }),
-      ...(options.runner === undefined ? {} : { runner: options.runner }),
-    });
+    // The watchdog measures the job folder while npm runs. A breach is a
+    // limit, not a fault of the run, so it is reported before the run itself.
+    const watched = await withWatchdog(
+      {
+        roots: [paths.root],
+        maxBytes: WATCHDOG_MAX_BYTES,
+        maxFiles: WATCHDOG_MAX_FILES,
+      },
+      options.signal,
+      async (signal) =>
+        runNpm({
+          command: 'lock',
+          prefix: paths.project,
+          paths,
+          registry,
+          signal,
+          downloadCapBytes: DOWNLOAD_CAP_BYTES,
+          timeoutMs: NPM_TIMEOUT_MS,
+          ...(options.nodeExecutable === undefined
+            ? {}
+            : { nodeExecutable: options.nodeExecutable }),
+          ...(options.runner === undefined ? {} : { runner: options.runner }),
+        }),
+    );
+    if (watched.breached) throw new PackageFault('install_limit');
+    const run = watched.value;
     const fault = npmFault(run, options.signal);
     if (fault) throw new PackageFault(fault);
 
