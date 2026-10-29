@@ -197,6 +197,8 @@ export const CapabilityObservationSchema = z.strictObject({
     'destination_denied',
     'definition_changed',
     'auth_expired',
+    'package_modified',
+    'invalid_configuration',
   ]),
 });
 export const RuntimeJobSchema = z.strictObject({

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PortBindingsSchema } from './integrations.js';
+import { PackageProposalSchema, PackageProvenanceSchema } from './packages.js';
 
 const Revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const Id = z
@@ -68,6 +69,7 @@ export const ImportDefinitionSchema = z.discriminatedUnion('executionMode', [
     transport: z.literal('stdio'),
     executable: z.string().max(1024),
     arguments: Args,
+    package: PackageProvenanceSchema.optional(),
   }),
   z.strictObject({
     ...common,
@@ -119,6 +121,7 @@ export const ImportEntrySchema = z.strictObject({
   name: Name,
   id: Id,
   definition: ImportDefinitionSchema.nullable(),
+  packageProposal: PackageProposalSchema.nullable().optional(),
   issues: z.array(ImportIssueSchema).max(100),
   warnings: z.array(ImportWarningSchema).max(20),
   conflicts: z
