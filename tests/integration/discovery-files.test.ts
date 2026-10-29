@@ -6,6 +6,7 @@ import {
   rm,
   symlink,
   readdir,
+  realpath,
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -14,8 +15,11 @@ import { createWindowsDiscoveryPorts } from '@waleed/hub-core';
 
 const directories: string[] = [];
 async function temporary() {
-  const path = await mkdtemp(
-    join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-discovery-'),
+  // realpath expands 8.3 short names (C:\Users\RUNNER~1) to the canonical path.
+  const path = await realpath(
+    await mkdtemp(
+      join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-discovery-'),
+    ),
   );
   directories.push(path);
   return path;

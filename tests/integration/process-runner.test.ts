@@ -8,6 +8,7 @@ import {
   copyFile,
   link,
   writeFile,
+  realpath,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -79,8 +80,11 @@ describe.skipIf(process.platform !== 'win32')(
   'Windows owned process runner',
   () => {
     beforeEach(async () => {
-      directory = await mkdtemp(
-        join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-process space-'),
+      // realpath expands 8.3 short names (C:\Users\RUNNER~1) to the canonical path.
+      directory = await realpath(
+        await mkdtemp(
+          join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-process space-'),
+        ),
       );
       runner = await createWindowsProcessRunner({
         allowedExecutables: [process.execPath],
