@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   IdSchema,
   PackageInstallRequestSchema,
+  PackageReplaceRequestSchema,
   PackageResolveRequestSchema,
   type HubState,
   type ImportDefinition,
@@ -11,12 +12,14 @@ import {
   type PackageJob,
   type PackagePreview,
   type PackageProvenance,
+  type PackageWarning,
 } from '@waleed/contracts';
 import { HubError } from '../errors.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
 import {
   packageArguments,
   planRegistry,
+  type PackageReplaceInput,
   type RegistryContext,
 } from '../runtime/registry.js';
 import { assertBinding } from '../auth/bindings.js';
@@ -32,7 +35,11 @@ import {
 import { DEFAULT_REGISTRY, type RegistryTarget } from './npm.js';
 import { createPreviewStore, type PreviewStore } from './previews.js';
 import { resolvePackage } from './resolve.js';
-import { createPackageLock, type PackageLock } from './store.js';
+import {
+  createPackageLock,
+  reconcilePackages,
+  type PackageLock,
+} from './store.js';
 import { verifyPackageFiles } from './verify.js';
 
 // The bounds of the service: the job records are bounded, one install runs at
@@ -68,6 +75,9 @@ export interface PackageHost {
     context?: RegistryContext,
   ): Promise<OperationPreview>;
   apply(previewId: string, owner: string): Promise<Job>;
+  // The internal replacement of an installed package. Only the service calls
+  // it; it is never exposed through an HTTP route.
+  replacePackage(input: PackageReplaceInput, owner: string): Promise<Job>;
   drain(): Promise<void>;
   job(id: string, owner: string): Job;
   inventory(): Promise<HubState>;
@@ -86,9 +96,13 @@ export interface PackageVerifyResult {
 export interface PackageService {
   resolve(raw: unknown, owner: string): PackageJob;
   install(raw: unknown, owner: string): Promise<PackageJob>;
+  replace(raw: unknown, owner: string): Promise<PackageJob>;
   job(id: string, owner: string): PackageJob;
   cancel(id: string, owner: string): PackageJob;
   verify(connectorId: string): Promise<PackageVerifyResult>;
+  // The reconciliation of the package folders: the number of deleted and the
+  // number of retained folders. Never a folder id and never a path.
+  reconcile(): Promise<{ deleted: number; retained: number }>;
   // Every job folder that is live: the folder of a running lookup, the
   // folders of the stored previews and the folder of a running install.
   activeJobs(): ReadonlySet<string>;
@@ -145,6 +159,16 @@ export function createPackageService(
 
   const snapshot = (entry: JobRecord): PackageJob => structuredClone(entry.job);
 
+  // The state of a registry job of the host, or null when the hub cannot
+  // read it any more.
+  const jobState = (id: string, owner: string): string | null => {
+    try {
+      return host.job(id, owner).state;
+    } catch {
+      return null;
+    }
+  };
+
   // The bounded retention: the oldest finished record makes room for a new
   // one. A hundred running jobs are refused instead of evicted.
   const reserve = (): void => {
@@ -159,7 +183,7 @@ export function createPackageService(
   };
 
   const createJob = (
-    kind: 'resolve' | 'install',
+    kind: PackageJob['kind'],
     phase: PackageJob['phase'],
     owner: string,
   ): JobRecord => {
@@ -209,6 +233,69 @@ export function createPackageService(
     if (code === 'cancelled' && !userCancelled) code = 'install_limit';
     return code;
   };
+
+  // The shared runner of the install and the replace job: the same preview,
+  // the same phases, the same commit states, the same cancellation rules and
+  // the same deadline. Only the save differs.
+  const runPackageJob = (
+    entry: JobRecord,
+    signal: AbortSignal,
+    options: {
+      previewId: string;
+      entry: string;
+      acknowledgedWarnings: readonly PackageWarning[];
+      save: (provenance: PackageProvenance) => Promise<SaveOutcome>;
+      // The hook that runs after the install folder was published.
+      afterSave?: () => void;
+      // The cleanup that runs when the job is over.
+      cleanup?: () => void;
+    },
+  ): Promise<void> =>
+    (async () => {
+      try {
+        const record = await previews.take(options.previewId, entry.owner);
+        entry.folderId = record.jobId;
+        entry.job.progress = {
+          ...entry.job.progress,
+          packages: record.preview.packageCount,
+        };
+        const saved = await installPackage({
+          record,
+          entry: options.entry,
+          acknowledgedWarnings: options.acknowledgedWarnings,
+          packagesDir: adapter.packagesDir,
+          lock,
+          signal,
+          save: options.save,
+          registry,
+          nodeExecutable: adapter.nodeExecutable,
+          ...(adapter.runner === undefined ? {} : { runner: adapter.runner }),
+          onPhase: (phase) => {
+            entry.job.phase = phase;
+          },
+          onCommitState: (state) => {
+            entry.commitState = state;
+          },
+        });
+        entry.job.result = {
+          connectorId: saved.connectorId,
+          outcome: saved.outcome,
+        };
+        entry.job.phase = 'complete';
+        entry.job.state = 'succeeded';
+        // The old folder is unreferenced now. It goes away in the background,
+        // never inside the save that runs under the package lock.
+        options.afterSave?.();
+      } catch (error) {
+        const code = errorCode(error, entry.userCancelled, signal.aborted);
+        entry.job.error = code;
+        entry.job.state = code === 'cancelled' ? 'cancelled' : 'failed';
+      } finally {
+        options.cleanup?.();
+        entry.job.completedAt = timestamp();
+        installs -= 1;
+      }
+    })();
 
   const contextFor = (provenance: PackageProvenance): RegistryContext => ({
     trustedPackage: provenance,
@@ -391,14 +478,6 @@ export function createPackageService(
       return { status: 'committed', connectorId, outcome: 'saved' };
     };
 
-    const jobState = (id: string): string | null => {
-      try {
-        return host.job(id, owner).state;
-      } catch {
-        return null;
-      }
-    };
-
     // The internal save of the connector. It runs under the package lock,
     // because the installer calls it there: the marker is gone and the folder
     // is published, so the state write and the credential values belong to
@@ -444,7 +523,7 @@ export function createPackageService(
         } catch {
           settled = false;
         }
-        if (settled && jobState(applied.id) === 'succeeded')
+        if (settled && jobState(applied.id, owner) === 'succeeded')
           return commitCredentials();
         // The mutation did not succeed. The registry decides whether the
         // connector exists: a write that may have committed is uncertain.
@@ -472,50 +551,155 @@ export function createPackageService(
       };
     };
 
-    entry.done = (async () => {
-      try {
-        const record = await previews.take(request.previewId, owner);
-        entry.folderId = record.jobId;
-        entry.job.progress = {
-          ...entry.job.progress,
-          packages: record.preview.packageCount,
-        };
-        const saved = await installPackage({
-          record,
-          entry: request.entry,
-          acknowledgedWarnings: request.acknowledgedWarnings,
-          packagesDir: adapter.packagesDir,
-          lock,
-          signal,
-          save: (provenance) => savePackageConnector(provenance),
-          registry,
-          nodeExecutable: adapter.nodeExecutable,
-          ...(adapter.runner === undefined ? {} : { runner: adapter.runner }),
-          onPhase: (phase) => {
-            entry.job.phase = phase;
-          },
-          onCommitState: (state) => {
-            entry.commitState = state;
-          },
-        });
-        entry.job.result = {
-          connectorId: saved.connectorId,
-          outcome: saved.outcome,
-        };
-        entry.job.phase = 'complete';
-        entry.job.state = 'succeeded';
-      } catch (error) {
-        const code = errorCode(error, entry.userCancelled, signal.aborted);
-        entry.job.error = code;
-        entry.job.state = code === 'cancelled' ? 'cancelled' : 'failed';
-      } finally {
+    entry.done = runPackageJob(entry, signal, {
+      previewId: request.previewId,
+      entry: request.entry,
+      acknowledgedWarnings: request.acknowledgedWarnings,
+      save: (provenance) => savePackageConnector(provenance),
+      cleanup: () => {
         blank(env);
         blank(request.env);
         blank(rawEnv);
-        entry.job.completedAt = timestamp();
-        installs -= 1;
+      },
+    });
+
+    return snapshot(entry);
+  };
+
+  const replace = async (raw: unknown, owner: string): Promise<PackageJob> => {
+    if (closed)
+      throw new HubError('unavailable', 'Managed packages are not available.');
+    const request = PackageReplaceRequestSchema.parse(raw);
+    // The replace shares the single install slot with the install: the slot
+    // is taken before the first await, so two installs never pass the check.
+    if (installs >= MAX_INSTALLS)
+      throw new HubError('busy', 'A package install is already running.');
+    installs += 1;
+    try {
+      const state = await host.inventory();
+      const connector = state.connectors.find(
+        (item) => item.id === request.connectorId,
+      );
+      if (!connector) throw new HubError('not_found', 'Connector not found.');
+      if (connector.executionMode !== 'native' || !connector.package)
+        throw new HubError(
+          'invalid',
+          'This connector is not a managed package.',
+        );
+      if (connector.revision !== request.expectedConnectorRevision)
+        throw new HubError(
+          'conflict',
+          'Definition changed. Preview the replacement again.',
+        );
+      // A preview that is gone is not refused here: the job reports
+      // preview_expired. A preview of another package never runs.
+      const preview = previews.peek(request.previewId, owner);
+      if (preview && preview.name !== connector.package.name)
+        throw new HubError(
+          'invalid',
+          'The preview is for a different package.',
+        );
+      reserve();
+    } catch (error) {
+      installs -= 1;
+      throw error;
+    }
+
+    const entry = createJob('replace', 'queued', owner);
+    const signal = AbortSignal.any([
+      entry.controller.signal,
+      AbortSignal.timeout(DEADLINE_MS),
+    ]);
+
+    // The internal save of the replacement. It runs under the package lock,
+    // because the installer calls it there: the marker is gone and the folder
+    // is published, so the state write belongs to the same critical section.
+    // There are no credential writes: the bindings, the environment, the user
+    // arguments and the profile membership stay as they are.
+    const savePackageReplace = async (
+      provenance: PackageProvenance,
+    ): Promise<SaveOutcome> => {
+      let busy = false;
+      for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
+        let applied: Job;
+        try {
+          applied = await host.replacePackage(
+            {
+              connectorId: request.connectorId,
+              expectedConnectorRevision: request.expectedConnectorRevision,
+              package: provenance,
+              nodeExecutable: adapter.nodeExecutable,
+              packagesDir: adapter.packagesDir,
+            },
+            owner,
+          );
+        } catch (error) {
+          // A busy mutation committed nothing: the replacement is tried again.
+          if (error instanceof HubError && error.code === 'busy') {
+            busy = true;
+            await delay(SAVE_RETRY_MS);
+            continue;
+          }
+          return { status: 'not_committed', error: 'install_failed' };
+        }
+        // Once the mutation was accepted, only the registry can say whether it
+        // committed: a failure from here on is never "nothing committed".
+        let settled = true;
+        try {
+          await host.drain();
+        } catch {
+          settled = false;
+        }
+        if (settled && jobState(applied.id, owner) === 'succeeded')
+          return {
+            status: 'committed',
+            connectorId: request.connectorId,
+            outcome: 'saved',
+          };
+        // The mutation did not succeed. The registry decides whether the
+        // connector carries the new install: a write that may have committed
+        // is uncertain.
+        let current: HubState;
+        try {
+          current = await host.inventory();
+        } catch {
+          return { status: 'indeterminate' };
+        }
+        const stored = current.connectors.find(
+          (item) => item.id === request.connectorId,
+        );
+        if (!stored)
+          return { status: 'not_committed', error: 'install_failed' };
+        if (
+          stored.executionMode === 'native' &&
+          stored.package?.installId === provenance.installId
+        )
+          return {
+            status: 'committed',
+            connectorId: request.connectorId,
+            outcome: 'saved',
+          };
+        // The connector still carries its old install: the new folder is
+        // deleted and the old one stays.
+        return { status: 'not_committed', error: 'install_failed' };
       }
-    })();
+      return {
+        status: 'not_committed',
+        error: busy ? 'busy' : 'install_failed',
+      };
+    };
+
+    entry.done = runPackageJob(entry, signal, {
+      previewId: request.previewId,
+      entry: request.entry,
+      acknowledgedWarnings: request.acknowledgedWarnings,
+      save: (provenance) => savePackageReplace(provenance),
+      // The old folder is unreferenced now. It is removed after the install
+      // returned, never from inside the save that runs under the lock.
+      afterSave: () => {
+        void reconcile().catch(() => undefined);
+      },
+    });
 
     return snapshot(entry);
   };
@@ -576,6 +760,53 @@ export function createPackageService(
     return active;
   };
 
+  // The reconciliation of the package folders. One pass runs at a time. A
+  // call that arrives while a pass runs gets one follow-up pass, shared by
+  // every such call: the running pass may have read the registry before the
+  // change that asked for it, so it is never reused. A failure rejects and
+  // nothing is deleted without a state read.
+  type ReconcileCounts = { deleted: number; retained: number };
+  let reconciling: Promise<ReconcileCounts> | null = null;
+  let followUp: Promise<ReconcileCounts> | null = null;
+  const pass = async (): Promise<ReconcileCounts> => {
+    const result = await reconcilePackages({
+      packagesDir: adapter.packagesDir,
+      readState: () => host.inventory(),
+      activeJobs,
+      lock,
+    });
+    // Only the counts leave the service: never a folder id and never a path.
+    return {
+      deleted: result.deleted.length,
+      retained: result.retained.length,
+    };
+  };
+  const reconcile = (): Promise<ReconcileCounts> => {
+    if (closed && !reconciling)
+      return Promise.resolve({ deleted: 0, retained: 0 });
+    if (!reconciling) {
+      const running: Promise<ReconcileCounts> = pass().finally(() => {
+        if (reconciling === running) reconciling = null;
+      });
+      reconciling = running;
+      return running;
+    }
+    if (!followUp) {
+      const queued: Promise<ReconcileCounts> = reconciling
+        .catch(() => undefined)
+        .then(() => {
+          if (followUp === queued) followUp = null;
+          return reconcile();
+        });
+      followUp = queued;
+    }
+    return followUp;
+  };
+
+  // The startup reconciliation: a restart removes the orphans of a crash.
+  const startup = reconcile();
+  void startup.catch(() => undefined);
+
   const close = async (): Promise<void> => {
     closed = true;
     for (const entry of records.values()) {
@@ -586,14 +817,21 @@ export function createPackageService(
     }
     await Promise.allSettled([...records.values()].map((entry) => entry.done));
     previews.dispose();
+    // The reconciliation of the startup and a running one finish before the
+    // service ends.
+    await startup.catch(() => undefined);
+    while (reconciling || followUp)
+      await (followUp ?? reconciling)!.catch(() => undefined);
   };
 
   return {
     resolve,
     install,
+    replace,
     job,
     cancel,
     verify,
+    reconcile,
     activeJobs,
     lock,
     close,

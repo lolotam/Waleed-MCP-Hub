@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   RegistryOperationSchema,
   type RegistryOperation,
+  type HubState,
   type Job,
   type OperationPreview,
 } from '@waleed/contracts';
@@ -15,6 +16,8 @@ import {
 import { publicError } from './diagnostics.js';
 import {
   planRegistry,
+  planPackageReplace,
+  type PackageReplaceInput,
   type RegistryContext,
   type RegistryPlan,
 } from './runtime/registry.js';
@@ -135,6 +138,139 @@ export function createLifecycle(
     profile.dockerProfileId = external.record?.dockerProfileId ?? null;
   };
   let packages: PackageService | null = null;
+  // The removal hook of a committed mutation: an install folder that no
+  // connector references any more is deleted in the background. The mutation
+  // never waits for the deletion and never fails because of it.
+  const removalHook = (before: HubState, after: HubState): void => {
+    const kept = new Set<string>();
+    for (const connector of after.connectors)
+      if (connector.executionMode === 'native' && connector.package)
+        kept.add(connector.package.installId);
+    let orphaned = false;
+    for (const connector of before.connectors)
+      if (
+        connector.executionMode === 'native' &&
+        connector.package &&
+        !kept.has(connector.package.installId)
+      )
+        orphaned = true;
+    if (!orphaned) return;
+    void packages?.reconcile().catch(() => undefined);
+  };
+  // The commit of one registry mutation. The build function plans it; the
+  // journal, the write, the read-back recovery and the timers are the same
+  // for every operation.
+  const run = async (
+    job: Job,
+    controller: AbortController,
+    build: (state: HubState) => RegistryPlan,
+    external?: MaterializationPlan,
+  ): Promise<void> => {
+    let prepared = false,
+      receipt: { rollback(): Promise<void> } | undefined;
+    let plan: RegistryPlan | undefined;
+    let before: HubState | undefined;
+    let beforeHash = '',
+      afterHash = '';
+    let startedExternal = false;
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    try {
+      if (job.state === 'cancelled') return;
+      job.state = 'running';
+      const state = await store.read();
+      before = state;
+      plan = build(state);
+      if (external) attachExternal(plan, external);
+      plan.next.activity.push({
+        id: job.id,
+        time: timestamp(),
+        operation: job.operation,
+        targetId: plan.targetId,
+        priorRevision: state.revision,
+        newRevision: plan.next.revision,
+        result: 'succeeded',
+      });
+      plan.next.activity = plan.next.activity.slice(-200);
+      beforeHash = stateHash(state);
+      afterHash = stateHash(plan.next);
+      await safety.prepare({
+        id: job.id,
+        operation: job.operation,
+        targetId: plan.targetId,
+        expectedRevision: state.revision,
+        beforeHash,
+        afterHash,
+        phase: 'prepared',
+        reason: 'none',
+        createdAt: job.createdAt,
+        updatedAt: timestamp(),
+        ...(external ? { external: true } : {}),
+      });
+      prepared = true;
+      if (external) {
+        startedExternal = true;
+        receipt = await adapters.materializer!.apply(
+          external,
+          controller.signal,
+        );
+      }
+      if (controller.signal.aborted)
+        throw new HubError(
+          'unavailable',
+          'Operation cancelled before registry commit.',
+        );
+      await store.write(state.revision, plan.next);
+      checks.invalidate(plan.affectedConnectors);
+      job.state = 'succeeded';
+      job.resultId = plan.targetId;
+      try {
+        await safety.finish(job.id, 'committed');
+      } catch {
+        job.reason =
+          'Saved, but journal finalization needs recovery review. Do not retry the save.';
+      }
+      // The commit is confirmed: a folder nobody owns any more goes away.
+      removalHook(state, plan.next);
+    } catch (error) {
+      job.state = controller.signal.aborted ? 'cancelled' : 'failed';
+      job.reason = publicError(error).message;
+      if (prepared && plan) {
+        try {
+          const actual = stateHash(await store.read());
+          if (actual === afterHash) {
+            job.state = 'succeeded';
+            job.resultId = plan.targetId;
+            checks.invalidate(plan.affectedConnectors);
+            job.reason =
+              'Saved; exact read-back confirmed the commit after a storage error. Do not repeat the operation.';
+            await safety.finish(job.id, 'committed');
+            // The read-back confirmed the commit: the same removal hook runs.
+            if (before) removalHook(before, plan.next);
+          } else if (actual === beforeHash) {
+            if (receipt) await receipt.rollback();
+            else if (
+              startedExternal &&
+              (!(error instanceof MaterializationFault) || !error.restored)
+            )
+              throw new HubError('unavailable', 'External state is uncertain.');
+            await safety.finish(job.id, 'aborted', 'commit_failed');
+          } else await safety.finish(job.id, 'needs_review', 'state_drift');
+        } catch {
+          try {
+            await safety.finish(job.id, 'needs_review', 'state_drift');
+          } catch {
+            /* Prepared journal remains blocking and durable. */
+          }
+          job.reason =
+            'Recovery review is required. No uncertain external state was overwritten or replayed.';
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+      job.completedAt = timestamp();
+      active = false;
+    }
+  };
   const lifecycle = {
     safety,
     checks,
@@ -272,117 +408,59 @@ export function createLifecycle(
         drafts.delete(previewId);
         active = true;
         setImmediate(() => {
-          void (async () => {
-            let prepared = false,
-              receipt: { rollback(): Promise<void> } | undefined;
-            let plan: RegistryPlan | undefined;
-            let beforeHash = '',
-              afterHash = '';
-            let startedExternal = false;
-            const timer = setTimeout(() => controller.abort(), 60_000);
-            try {
-              if (job.state === 'cancelled') return;
-              job.state = 'running';
-              const state = await store.read();
-              plan = planRegistry(
+          void run(
+            job,
+            controller,
+            (state) =>
+              planRegistry(
                 draft.input,
                 state,
                 draft.preview.targetId!,
                 timestamp(),
                 draft.context,
-              );
-              if (draft.external) attachExternal(plan, draft.external);
-              plan.next.activity.push({
-                id: job.id,
-                time: timestamp(),
-                operation: draft.input.kind,
-                targetId: plan.targetId,
-                priorRevision: state.revision,
-                newRevision: plan.next.revision,
-                result: 'succeeded',
-              });
-              plan.next.activity = plan.next.activity.slice(-200);
-              beforeHash = stateHash(state);
-              afterHash = stateHash(plan.next);
-              await safety.prepare({
-                id: job.id,
-                operation: draft.input.kind,
-                targetId: plan.targetId,
-                expectedRevision: state.revision,
-                beforeHash,
-                afterHash,
-                phase: 'prepared',
-                reason: 'none',
-                createdAt: job.createdAt,
-                updatedAt: timestamp(),
-                ...(draft.external ? { external: true } : {}),
-              });
-              prepared = true;
-              if (draft.external) {
-                startedExternal = true;
-                receipt = await adapters.materializer!.apply(
-                  draft.external,
-                  controller.signal,
-                );
-              }
-              if (controller.signal.aborted)
-                throw new HubError(
-                  'unavailable',
-                  'Operation cancelled before registry commit.',
-                );
-              await store.write(state.revision, plan.next);
-              checks.invalidate(plan.affectedConnectors);
-              job.state = 'succeeded';
-              job.resultId = plan.targetId;
-              try {
-                await safety.finish(job.id, 'committed');
-              } catch {
-                job.reason =
-                  'Saved, but journal finalization needs recovery review. Do not retry the save.';
-              }
-            } catch (error) {
-              job.state = controller.signal.aborted ? 'cancelled' : 'failed';
-              job.reason = publicError(error).message;
-              if (prepared && plan) {
-                try {
-                  const actual = stateHash(await store.read());
-                  if (actual === afterHash) {
-                    job.state = 'succeeded';
-                    job.resultId = plan.targetId;
-                    checks.invalidate(plan.affectedConnectors);
-                    job.reason =
-                      'Saved; exact read-back confirmed the commit after a storage error. Do not repeat the operation.';
-                    await safety.finish(job.id, 'committed');
-                  } else if (actual === beforeHash) {
-                    if (receipt) await receipt.rollback();
-                    else if (
-                      startedExternal &&
-                      (!(error instanceof MaterializationFault) ||
-                        !error.restored)
-                    )
-                      throw new HubError(
-                        'unavailable',
-                        'External state is uncertain.',
-                      );
-                    await safety.finish(job.id, 'aborted', 'commit_failed');
-                  } else
-                    await safety.finish(job.id, 'needs_review', 'state_drift');
-                } catch {
-                  try {
-                    await safety.finish(job.id, 'needs_review', 'state_drift');
-                  } catch {
-                    /* Prepared journal remains blocking and durable. */
-                  }
-                  job.reason =
-                    'Recovery review is required. No uncertain external state was overwritten or replayed.';
-                }
-              }
-            } finally {
-              clearTimeout(timer);
-              job.completedAt = timestamp();
-              active = false;
-            }
-          })();
+              ),
+            draft.external,
+          );
+        });
+        return structuredClone(job);
+      } finally {
+        accepting = false;
+      }
+    },
+    // The internal replacement of an installed package. Only the package
+    // service calls it; it is never exposed through an HTTP route.
+    async replacePackage(
+      input: PackageReplaceInput,
+      owner: string,
+    ): Promise<Job> {
+      if (closed) throw new HubError('unavailable', 'Lifecycle is closed.');
+      if (accepting || active)
+        throw new HubError('busy', 'Another mutation is in progress.');
+      accepting = true;
+      try {
+        await safety.assertWritable();
+        if (jobs.size >= 100) {
+          const oldest = [...jobs.values()].find(
+            (entry) => entry.job.completedAt,
+          );
+          if (oldest) jobs.delete(oldest.job.id);
+        }
+        const job: Job = {
+          id: randomUUID(),
+          operation: 'edit_connector',
+          state: 'queued',
+          createdAt: timestamp(),
+          completedAt: null,
+          reason: null,
+          resultId: null,
+        };
+        const controller = new AbortController();
+        jobs.set(job.id, { owner, job, controller, external: false });
+        active = true;
+        setImmediate(() => {
+          void run(job, controller, (state) =>
+            planPackageReplace(state, input, timestamp()),
+          );
         });
         return structuredClone(job);
       } finally {
@@ -437,6 +515,7 @@ export function createLifecycle(
     const host: PackageHost = {
       preview: (raw, owner, context) => lifecycle.preview(raw, owner, context),
       apply: (previewId, owner) => lifecycle.apply(previewId, owner),
+      replacePackage: (input, owner) => lifecycle.replacePackage(input, owner),
       drain: () => lifecycle.drain(),
       job: (id, owner) => lifecycle.job(id, owner),
       inventory: () => lifecycle.inventory(),

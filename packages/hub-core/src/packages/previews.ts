@@ -23,6 +23,9 @@ export interface PreviewStoreOptions {
 export interface PreviewStore {
   put(record: PreviewRecord): void;
   take(previewId: string, owner: string): Promise<PreviewRecord>;
+  // The preview of a stored record, without spending it: the record stays in
+  // the store and its job folder stays on disk.
+  peek(previewId: string, owner: string): PackagePreview | null;
   // The job folder id of every stored record. A record that expired but was
   // not swept yet still counts: its folder is still on disk.
   jobIds(): ReadonlySet<string>;
@@ -90,6 +93,14 @@ export function createPreviewStore(
         throw new PackageFault('preview_expired');
       }
       return entry.record;
+    },
+    peek(previewId, owner) {
+      const entry = stored.get(previewId);
+      // Another session learns nothing: an unknown, a foreign and an expired
+      // preview all look the same. Nothing is consumed and nothing is deleted.
+      if (!entry || entry.record.owner !== owner) return null;
+      if (entry.expiresAt <= now()) return null;
+      return structuredClone(entry.record.preview);
     },
     jobIds() {
       return new Set([...stored.values()].map((entry) => entry.record.jobId));

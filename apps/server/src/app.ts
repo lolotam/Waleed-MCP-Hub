@@ -95,6 +95,8 @@ export async function createHubServer(options: ServerOptions) {
     '/api/connectors/manual': 'manual_mcp',
     '/api/packages/resolve': 'package_resolve',
     '/api/packages/install': 'package_install',
+    '/api/packages/replace': 'package_replace',
+    '/api/packages/cleanup': 'package_cleanup',
     '/api/packages/jobs/:id': 'package_job',
     '/api/packages/jobs/:id/cancel': 'package_cancel',
     '/api/packages/verify/:connectorId': 'package_verify',
@@ -625,6 +627,17 @@ export async function createHubServer(options: ServerOptions) {
       .code(202)
       .send(await service.install(body, request.cookies.waleed_hub_session!));
   });
+  app.post('/api/packages/replace', async (request, reply) => {
+    const service = packages();
+    const body = request.body;
+    request.body = undefined;
+    return reply
+      .code(202)
+      .send(await service.replace(body, request.cookies.waleed_hub_session!));
+  });
+  // The cleanup of the package folders: the counts of the deleted and the
+  // retained folders. Never a folder id and never a path.
+  app.post('/api/packages/cleanup', async () => await packages().reconcile());
   app.get<{ Params: { id: string } }>(
     '/api/packages/jobs/:id',
     async (request) =>
