@@ -146,6 +146,6 @@ export function registryPath(name: string, version?: string): string {
     !PackageProvenanceSchema.shape.version.safeParse(version).success
   )
     throw new PackageFault('package_not_found');
-  const encoded = name.replace('/', '%2f');
+  const encoded = name.replaceAll('/', '%2f');
   return version === undefined ? `/${encoded}` : `/${encoded}/${version}`;
 }

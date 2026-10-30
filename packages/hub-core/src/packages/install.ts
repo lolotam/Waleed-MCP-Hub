@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, readFile, readdir, writeFile } from 'node:fs/promises';
+import { lstat, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import type {
   PackageErrorCode,
@@ -22,11 +22,12 @@ import {
   type RegistryTarget,
 } from './npm.js';
 import type { PreviewRecord } from './previews.js';
-import { stagingPackageJson } from './resolve.js';
+import { MAX_LOCK_BYTES, stagingPackageJson } from './resolve.js';
 import {
   createPrivateDirectory,
   installDirectory,
   jobDirectory,
+  readOwnedFile,
   removeMarker,
   removeTree,
   writeMarker,
@@ -151,25 +152,19 @@ const verifyInstall = async (
   try {
     await assertNoLinks(installFolder, true);
     const lockPath = join(installFolder, 'package-lock.json');
-    const lockInfo = await lstat(lockPath);
-    if (!lockInfo.isFile() || lockInfo.nlink !== 1)
-      throw new PackageFault('integrity_mismatch');
-    const lockBytes = await readFile(lockPath);
+    const lockBytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES);
+    if (!lockBytes) throw new PackageFault('integrity_mismatch');
     if (createHash('sha256').update(lockBytes).digest('hex') !== lockHash)
       throw new PackageFault('integrity_mismatch');
 
     const packageFolder = join(installFolder, 'node_modules', name);
     const manifestPath = join(packageFolder, 'package.json');
-    const manifestInfo = await lstat(manifestPath);
-    if (
-      !manifestInfo.isFile() ||
-      manifestInfo.nlink !== 1 ||
-      manifestInfo.size > MAX_PACKAGE_JSON_BYTES
-    )
-      throw new PackageFault('install_failed');
-    const installed = asRecord(
-      JSON.parse((await readFile(manifestPath)).toString('utf8')),
+    const manifestBytes = await readOwnedFile(
+      manifestPath,
+      MAX_PACKAGE_JSON_BYTES,
     );
+    if (!manifestBytes) throw new PackageFault('install_failed');
+    const installed = asRecord(JSON.parse(manifestBytes.toString('utf8')));
     if (!installed) throw new PackageFault('install_failed');
     let bins: NormalizedBin[];
     try {
@@ -214,28 +209,6 @@ export async function installPackage(
 
   options.onCommitState?.('precommit');
 
-  // The entry has to be one the preview offered, every warning has to be
-  // acknowledged and the caller may not have given up already.
-  const candidate = preview.entries.find(
-    (item) => item.entry === options.entry,
-  );
-  if (!candidate) throw new PackageFault('no_entry');
-  const acknowledged = new Set(options.acknowledgedWarnings);
-  for (const warning of preview.warnings)
-    if (!acknowledged.has(warning))
-      throw new PackageFault('warning_not_acknowledged');
-  if (options.signal.aborted) throw new PackageFault('cancelled');
-
-  // The drive keeps a reserve and the tree keeps the unpacked cap of the spec.
-  await assertNoAncestorProject(options.packagesDir);
-  if ((await freeBytes(options.packagesDir)) < MIN_FREE_BYTES)
-    throw new PackageFault('install_limit');
-  if (
-    preview.unpackedSize !== null &&
-    preview.unpackedSize > MAX_UNPACKED_BYTES
-  )
-    throw new PackageFault('install_limit');
-
   const installId = randomUUID();
   const installFolder = installDirectory(options.packagesDir, installId);
   const jobFolder = jobDirectory(options.packagesDir, options.record.jobId);
@@ -244,6 +217,31 @@ export async function installPackage(
   // uncertain; every earlier failure deletes it.
   let keepFolder = false;
   try {
+    // The entry has to be one the preview offered, every warning has to be
+    // acknowledged and the caller may not have given up already. The refusals
+    // are inside the scope that cleans up: a consumed preview never leaves
+    // its job folder on the disk.
+    const candidate = preview.entries.find(
+      (item) => item.entry === options.entry,
+    );
+    if (!candidate) throw new PackageFault('no_entry');
+    const acknowledged = new Set(options.acknowledgedWarnings);
+    for (const warning of preview.warnings)
+      if (!acknowledged.has(warning))
+        throw new PackageFault('warning_not_acknowledged');
+    if (options.signal.aborted) throw new PackageFault('cancelled');
+
+    // The drive keeps a reserve and the tree keeps the unpacked cap of the
+    // spec.
+    await assertNoAncestorProject(options.packagesDir);
+    if ((await freeBytes(options.packagesDir)) < MIN_FREE_BYTES)
+      throw new PackageFault('install_limit');
+    if (
+      preview.unpackedSize !== null &&
+      preview.unpackedSize > MAX_UNPACKED_BYTES
+    )
+      throw new PackageFault('install_limit');
+
     // The marker comes first: it names the job that owns the folder while the
     // install runs.
     await writeMarker(options.packagesDir, installId, options.record.jobId);

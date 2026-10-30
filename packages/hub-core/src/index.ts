@@ -1,4 +1,8 @@
-export { HubError } from './errors.js';
+export {
+  HubError,
+  RevisionConflictError,
+  isRevisionConflict,
+} from './errors.js';
 export { publicError, redactDiagnostic } from './diagnostics.js';
 export {
   createSafetyLedger,

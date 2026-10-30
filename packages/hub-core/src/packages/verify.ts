@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
 import { dirname, join, resolve, win32 } from 'node:path';
 import type { Connector } from '@waleed/contracts';
 import { assertNoLinks } from '../adapters/managed-files.js';
@@ -10,14 +10,17 @@ import {
   isPackageEnvName,
   packagesDirOf,
 } from '../runtime/registry.js';
-import { installDirectory, markerPath } from './store.js';
+// The cap of the frozen lock. The lookup, the install and the verification
+// share it: a lock the install accepted is never "modified" at the next
+// launch.
+import { MAX_LOCK_BYTES } from './resolve.js';
+import { installDirectory, markerPath, readOwnedFile } from './store.js';
 
 // Every failure here is a closed failure with a sanitized reason: no path, no
 // file name and no content ever reaches the caller.
 const modified = () => new RuntimeFault('package_modified');
 const MAX_FILES = 50_000;
 const MAX_BYTES = 500 * 1024 * 1024;
-const MAX_LOCK_BYTES = 4 * 1024 * 1024;
 
 export interface PackageManifest {
   hash: string;
@@ -104,10 +107,8 @@ export async function verifyPackageFiles(
     if (!info.isDirectory() || info.isSymbolicLink()) throw modified();
     if (await exists(markerPath(packagesDir, pkg.installId))) throw modified();
     const lockPath = join(installDir, 'package-lock.json');
-    const lockInfo = await lstat(lockPath);
-    if (!lockInfo.isFile() || lockInfo.nlink !== 1) throw modified();
-    if (lockInfo.size > MAX_LOCK_BYTES) throw modified();
-    const bytes = await readFile(lockPath);
+    const bytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES);
+    if (!bytes) throw modified();
     try {
       if (createHash('sha256').update(bytes).digest('hex') !== pkg.lockHash)
         throw modified();

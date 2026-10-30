@@ -255,9 +255,12 @@ entryPath`; entry file is a regular file inside the folder; no `.npmrc`, `_logs`
 - npm searches parent folders for a project root and reads that project's
   `.npmrc`. The hub writes `package.json` into the working folder before the first
   npm run, passes `--prefix <that folder>`, `--workspaces=false`,
-  `--include-workspace-root=false`, and refuses to start if any parent folder of
-  `<data>\packages\` contains `package.json`, `.npmrc` or `node_modules` (the data
-  folder must not sit inside an npm project).
+  `--include-workspace-root=false`. With the prefix given on the command line,
+  npm does not search parent folders, so an ancestor `package.json` or `.npmrc`
+  (such as the one `npm login` writes to the user's home folder) is never read and
+  is not refused. The hub refuses to start only if a parent folder of
+  `<data>\packages\` contains `node_modules`, because Node itself searches parent
+  folders for modules at launch.
 - `--userconfig` and `--globalconfig` point at empty files in the job folder;
   `--cache=<job>\cache`; `--logs-max=0`; `--update-notifier=false`; `--fund=false`;
   `--audit=false`; the four `--allow-*=none` flags; `--strict-ssl=true`.

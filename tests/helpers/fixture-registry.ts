@@ -109,8 +109,8 @@ export async function createFixtureRegistry(
       const rawPath = url.split('?')[0]!;
       const candidates = [
         rawPath,
-        rawPath.replace(/%2f/gi, '%2f'),
-        rawPath.replace(/%2f/gi, '%2F'),
+        rawPath.replaceAll(/%2f/gi, '%2f'),
+        rawPath.replaceAll(/%2f/gi, '%2F'),
         rawPath.startsWith('/') ? rawPath.slice(1) : `/${rawPath}`,
       ];
       try {
@@ -208,13 +208,13 @@ export async function createFixtureRegistry(
   };
 
   const setPackage = (name: string, packument: unknown): void => {
-    const encoded = name.replace('/', '%2f');
+    const encoded = name.replaceAll('/', '%2f');
     set(`/${encoded}`, packument);
     set(`/${name}`, packument);
   };
 
   const setVersion = (name: string, version: string, doc: unknown): void => {
-    const encoded = name.replace('/', '%2f');
+    const encoded = name.replaceAll('/', '%2f');
     set(`/${encoded}/${version}`, doc);
     set(`/${name}/${version}`, doc);
   };

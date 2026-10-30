@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import {
   lstat,
   mkdir,
@@ -12,11 +13,24 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type {
   HubLifecycle,
+  PackageHost,
   PackageService,
   StateStore,
 } from '@waleed/hub-core';
-import type { PackageJob } from '@waleed/contracts';
-import { createLifecycle, createMemorySafetyLedger } from '@waleed/hub-core';
+import type {
+  HubState,
+  Job,
+  OperationPreview,
+  PackageJob,
+} from '@waleed/contracts';
+import {
+  createLifecycle,
+  createMemorySafetyLedger,
+  createPackageService,
+  emptyState,
+  HubError,
+  RevisionConflictError,
+} from '@waleed/hub-core';
 import type {
   ProcessRequest,
   ProcessResult,
@@ -24,6 +38,7 @@ import type {
 } from '../packages/hub-core/src/ports.js';
 import {
   installDirectory,
+  jobDirectory,
   markerPath,
 } from '../packages/hub-core/src/packages/store.js';
 import { memoryStore } from './helpers/memory-store.js';
@@ -259,17 +274,22 @@ describe('package-service', { timeout: 60_000 }, () => {
   const lifecycles: HubLifecycle[] = [];
   const registries: FixtureRegistry[] = [];
   const secretBackends: ReturnType<typeof memorySecrets>[] = [];
+  const services: PackageService[] = [];
   let sharedTls: TestTls;
 
   beforeAll(async () => {
     sharedTls = await createTestTls();
-  });
+  }, 60_000);
 
   afterAll(async () => {
     if (sharedTls) await sharedTls.dispose();
   });
 
   afterEach(async () => {
+    while (services.length > 0) {
+      const service = services.pop();
+      if (service) await service.close().catch(() => undefined);
+    }
     while (lifecycles.length > 0) {
       const lc = lifecycles.pop();
       if (lc) await lc.close().catch(() => undefined);
@@ -717,6 +737,9 @@ describe('package-service', { timeout: 60_000 }, () => {
       'owner-a',
     );
 
+    // The values of the refused request are blanked before the refusal
+    // leaves the service: a busy install keeps no credential value.
+    const busyEnv = { API_KEY: 'busy-secret-value' };
     await expect(
       service.install(
         {
@@ -725,11 +748,12 @@ describe('package-service', { timeout: 60_000 }, () => {
           acknowledgedWarnings: prev2.warnings,
           connectorName: 'Running-2',
           arguments: [],
-          env: {},
+          env: busyEnv,
         },
         'owner-a',
       ),
     ).rejects.toMatchObject({ code: 'busy' });
+    expect(busyEnv.API_KEY).toBe('');
 
     // Release the first install
     releaseCi();
@@ -1331,5 +1355,341 @@ describe('package-service', { timeout: 60_000 }, () => {
     const nextDone = await waitFor(service, next, 'owner-a');
     expect(nextDone.state).toBe('succeeded');
     expect(calls).toBe(1);
+  });
+
+  // 17. A revision conflict during the save
+  describe('17. A revision conflict during the save', () => {
+    // The narrow host of the service: the lifecycle offers more than the
+    // service needs, and the service never sees the whole lifecycle.
+    function createFakeHost(apply: () => Promise<Job>): PackageHost {
+      const state: HubState = emptyState();
+      const job: Job = {
+        id: '22222222-2222-4222-8222-222222222222',
+        operation: 'create_connector',
+        state: 'succeeded',
+        createdAt: '2026-10-30T00:00:00.000Z',
+        completedAt: '2026-10-30T00:00:00.000Z',
+        reason: null,
+        resultId: null,
+      };
+      return {
+        async preview(): Promise<OperationPreview> {
+          return {
+            id: '11111111-1111-4111-8111-111111111111',
+            expectedRevision: state.revision,
+            kind: 'create_connector',
+            summary: 'Create one connector',
+            changes: [],
+            warnings: [],
+            expiresAt: '2026-10-30T00:10:00.000Z',
+          };
+        },
+        apply,
+        discard() {},
+        async replacePackage(): Promise<Job> {
+          throw new Error('The replace is not used here.');
+        },
+        async drain() {},
+        job: () => job,
+        async inventory() {
+          return state;
+        },
+        auth: {
+          credentials: {
+            async write() {
+              return {};
+            },
+          },
+        },
+      };
+    }
+
+    async function setupWithHost(host: PackageHost) {
+      const tempBase = await mkdtemp(join(tmpdir(), 'wmh-svc-'));
+      tempDirs.push(tempBase);
+      const packagesDir = join(tempBase, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const registry = await createFixtureRegistry({ tls: sharedTls });
+      registries.push(registry);
+      const seeded = seedPackage(registry);
+      const fakeRunner = createFakeRunner({
+        lock: seeded.lock,
+        defaultBin: seeded.bin,
+      });
+
+      const service = createPackageService(host, {
+        packagesDir,
+        nodeExecutable: process.execPath,
+        registry: registry.registry,
+        runner: fakeRunner.runner,
+        selfTest: async () => undefined,
+      });
+      services.push(service);
+
+      return { service, packagesDir };
+    }
+
+    async function installOf(
+      service: PackageService,
+      connectorName: string,
+    ): Promise<PackageJob> {
+      const resolveJob = service.resolve(
+        { name: 'srv', version: '1.0.0' },
+        'owner-a',
+      );
+      const resolved = await waitFor(service, resolveJob, 'owner-a');
+      const preview = resolved.preview!;
+      const installJob = await service.install(
+        {
+          previewId: preview.previewId,
+          entry: preview.entries[0]!.entry,
+          acknowledgedWarnings: preview.warnings,
+          connectorName,
+          arguments: [],
+          env: {},
+        },
+        'owner-a',
+      );
+      return waitFor(service, installJob, 'owner-a');
+    }
+
+    it('17a. Retries a revision conflict and commits the install', async () => {
+      let attempts = 0;
+      const host = createFakeHost(async () => {
+        attempts += 1;
+        if (attempts <= 2)
+          throw new RevisionConflictError(
+            'Inventory changed. Create a new preview.',
+          );
+        return {
+          id: '22222222-2222-4222-8222-222222222222',
+          operation: 'create_connector',
+          state: 'queued',
+          createdAt: '2026-10-30T00:00:00.000Z',
+          completedAt: null,
+          reason: null,
+          resultId: null,
+        };
+      });
+
+      const { service } = await setupWithHost(host);
+      const completed = await installOf(service, 'RevisionConflictPkg');
+
+      expect(attempts).toBe(3);
+      expect(completed.state).toBe('succeeded');
+      expect(completed.error).toBeNull();
+      expect(completed.result).toEqual({
+        connectorId: expect.any(String),
+        outcome: 'saved',
+      });
+    });
+
+    it('17b. A name conflict is not retried and commits nothing', async () => {
+      let attempts = 0;
+      const host = createFakeHost(async () => {
+        attempts += 1;
+        throw new HubError(
+          'conflict',
+          'Connector name or identifier already exists.',
+        );
+      });
+
+      const { service, packagesDir } = await setupWithHost(host);
+      const completed = await installOf(service, 'NameConflictPkg');
+
+      expect(attempts).toBe(1);
+      expect(completed.state).toBe('failed');
+      expect(completed.error).toBe('install_failed');
+
+      // Nothing was committed: the install folder is gone.
+      const entries = await readdir(packagesDir, { withFileTypes: true });
+      const installDirs = entries.filter(
+        (entry) => entry.isDirectory() && entry.name !== '.jobs',
+      );
+      expect(installDirs).toHaveLength(0);
+    });
+
+    // The host of the save loop that keeps its drafts, so a test can see
+    // what the service leaves behind.
+    function createDraftHost(apply: (previewId: string) => Promise<Job>) {
+      const state: HubState = emptyState();
+      const drafts = new Map<string, string>();
+      const previewIds: string[] = [];
+      const discarded: string[] = [];
+      const job: Job = {
+        id: '33333333-3333-4333-8333-333333333333',
+        operation: 'create_connector',
+        state: 'succeeded',
+        createdAt: '2026-10-30T00:00:00.000Z',
+        completedAt: '2026-10-30T00:00:00.000Z',
+        reason: null,
+        resultId: null,
+      };
+      const host: PackageHost = {
+        async preview(): Promise<OperationPreview> {
+          const id = randomUUID();
+          drafts.set(id, 'owner-a');
+          previewIds.push(id);
+          return {
+            id,
+            expectedRevision: state.revision,
+            kind: 'create_connector',
+            summary: 'Create one connector',
+            changes: [],
+            warnings: [],
+            expiresAt: '2026-10-30T00:10:00.000Z',
+          };
+        },
+        async apply(previewId: string): Promise<Job> {
+          // A refused apply keeps the draft, exactly like the lifecycle.
+          const applied = await apply(previewId);
+          drafts.delete(previewId);
+          return applied;
+        },
+        discard(previewId: string, owner: string): void {
+          discarded.push(previewId);
+          if (drafts.get(previewId) === owner) drafts.delete(previewId);
+        },
+        async replacePackage(): Promise<Job> {
+          throw new Error('The replace is not used here.');
+        },
+        async drain() {},
+        job: () => job,
+        async inventory() {
+          return state;
+        },
+        auth: {
+          credentials: {
+            async write() {
+              return {};
+            },
+          },
+        },
+      };
+      return { host, drafts, previewIds, discarded };
+    }
+
+    const acceptedJob = (): Job => ({
+      id: '33333333-3333-4333-8333-333333333333',
+      operation: 'create_connector',
+      state: 'queued',
+      createdAt: '2026-10-30T00:00:00.000Z',
+      completedAt: null,
+      reason: null,
+      resultId: null,
+    });
+
+    it('17c. A busy apply is retried with the same preview and leaves one draft', async () => {
+      let attempts = 0;
+      const { host, drafts, previewIds, discarded } = createDraftHost(
+        async () => {
+          attempts += 1;
+          if (attempts <= 3)
+            throw new HubError('busy', 'Another mutation is in progress.');
+          return acceptedJob();
+        },
+      );
+
+      const { service } = await setupWithHost(host);
+      const completed = await installOf(service, 'BusyRetryPkg');
+
+      expect(completed.state).toBe('succeeded');
+      expect(completed.error).toBeNull();
+      expect(attempts).toBe(4);
+      // One preview for four attempts: the busy retry reuses the draft of the
+      // first one, so no unused draft is left behind.
+      expect(previewIds).toHaveLength(1);
+      expect(discarded).toHaveLength(0);
+      expect(drafts.size).toBe(0);
+    });
+
+    it('17d. A revision conflict drops the stale draft', async () => {
+      let attempts = 0;
+      const { host, drafts, previewIds, discarded } = createDraftHost(
+        async () => {
+          attempts += 1;
+          if (attempts === 1)
+            throw new RevisionConflictError(
+              'Inventory changed. Create a new preview.',
+            );
+          return acceptedJob();
+        },
+      );
+
+      const { service } = await setupWithHost(host);
+      const completed = await installOf(service, 'RevisionConflictDraftPkg');
+
+      expect(completed.state).toBe('succeeded');
+      expect(completed.error).toBeNull();
+      expect(attempts).toBe(2);
+      // The stale draft was dropped before the new one was built, so no
+      // draft of the old revision survives the save.
+      expect(previewIds).toHaveLength(2);
+      expect(discarded).toEqual([previewIds[0]]);
+      expect(drafts.size).toBe(0);
+    });
+  });
+
+  it('18. A refused install removes the job folder of the consumed preview', async () => {
+    const { service, packagesDir } = await setupService({
+      packageConfig: {
+        scripts: { postinstall: 'node postinstall.js' },
+      },
+    });
+
+    // 18a: an entry the preview never offered.
+    const resolveJob = service.resolve(
+      { name: 'srv', version: '1.0.0' },
+      'owner-a',
+    );
+    const resolved = await waitFor(service, resolveJob, 'owner-a');
+    const preview = resolved.preview!;
+    const jobFolder = jobDirectory(packagesDir, resolveJob.id);
+    expect(await pathExists(jobFolder)).toBe(true);
+
+    const refused = await service.install(
+      {
+        previewId: preview.previewId,
+        entry: 'not-an-entry',
+        acknowledgedWarnings: preview.warnings,
+        connectorName: 'SrvRefusedEntry',
+        arguments: [],
+        env: {},
+      },
+      'owner-a',
+    );
+    const completed = await waitFor(service, refused, 'owner-a');
+    expect(completed.state).toBe('failed');
+    expect(completed.error).toBe('no_entry');
+    // The preview was consumed, so its job folder goes away with it.
+    expect(await pathExists(jobFolder)).toBe(false);
+
+    // 18b: a warning of the preview that was not acknowledged.
+    const resolveJob2 = service.resolve(
+      { name: 'srv', version: '1.0.0' },
+      'owner-a',
+    );
+    const resolved2 = await waitFor(service, resolveJob2, 'owner-a');
+    const preview2 = resolved2.preview!;
+    expect(preview2.warnings).toContain('install_scripts');
+    const jobFolder2 = jobDirectory(packagesDir, resolveJob2.id);
+    expect(await pathExists(jobFolder2)).toBe(true);
+
+    const refused2 = await service.install(
+      {
+        previewId: preview2.previewId,
+        entry: preview2.entries[0]!.entry,
+        acknowledgedWarnings: [],
+        connectorName: 'SrvRefusedWarning',
+        arguments: [],
+        env: {},
+      },
+      'owner-a',
+    );
+    const completed2 = await waitFor(service, refused2, 'owner-a');
+    expect(completed2.state).toBe('failed');
+    expect(completed2.error).toBe('warning_not_acknowledged');
+    expect(await pathExists(jobFolder2)).toBe(false);
   });
 });

@@ -31,7 +31,7 @@ describe('package network', () => {
 
   beforeAll(async () => {
     sharedTls = await createTestTls();
-  });
+  }, 60_000);
 
   afterAll(async () => {
     if (sharedTls) {

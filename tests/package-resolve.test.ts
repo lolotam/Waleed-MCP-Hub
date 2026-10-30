@@ -22,6 +22,7 @@ import {
   npmFault,
   npmSelfTest,
   prepareJob,
+  runNpm,
   type JobPaths,
   type NpmPaths,
   type NpmRunResult,
@@ -138,7 +139,7 @@ describe('package-resolve', { timeout: 60_000 }, () => {
 
   beforeAll(async () => {
     sharedTls = await createTestTls();
-  });
+  }, 60_000);
 
   afterAll(async () => {
     if (sharedTls) {
@@ -203,7 +204,6 @@ describe('package-resolve', { timeout: 60_000 }, () => {
 
     it('refuses invalid, path, url, git, alias, and workspace specs', () => {
       const invalidSpecs = [
-        '',
         'a'.repeat(257),
         'evil.tgz',
         'x.tar.gz',
@@ -222,6 +222,10 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       for (const spec of invalidSpecs) {
         expect(isRegistrySpec(spec), `expected false for: ${spec}`).toBe(false);
       }
+    });
+
+    it('accepts an empty range, because npm reads it as the range "*"', () => {
+      expect(isRegistrySpec('')).toBe(true);
     });
   });
 
@@ -988,6 +992,47 @@ describe('package-resolve', { timeout: 60_000 }, () => {
     }, 30_000);
   });
 
+  // 5b. The proxy and the runner
+  describe('5b. The proxy and the runner', () => {
+    const registry: RegistryTarget = {
+      host: '127.0.0.1',
+      port: 4873,
+      origin: 'https://127.0.0.1:4873',
+    };
+
+    // The listening servers of this process. A proxy that was not closed
+    // keeps one of them alive.
+    const listeningServers = (): number =>
+      process
+        .getActiveResourcesInfo()
+        .filter((resource) => resource === 'TCPServerWrap').length;
+
+    it('closes the proxy when the runner cannot be created', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+      const paths = await prepareJob(packagesDir, randomUUID(), registry);
+
+      // No runner is injected and the working folder of the runner does not
+      // exist, so the runner cannot be created.
+      const before = listeningServers();
+      await expect(
+        runNpm({
+          command: 'lock',
+          prefix: join(packagesDir, 'missing-folder'),
+          paths,
+          registry,
+          signal: new AbortController().signal,
+          downloadCapBytes: 1024 * 1024,
+          timeoutMs: 30_000,
+        }),
+      ).rejects.toThrow();
+      // The proxy of the run is closed: no listening server is left behind.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(listeningServers()).toBe(before);
+    }, 30_000);
+  });
+
   // 6. npmFault precedence
   describe('6. npmFault precedence', () => {
     it('respects exact fault precedence rules', () => {
@@ -1094,7 +1139,7 @@ describe('package-resolve', { timeout: 60_000 }, () => {
 
   // 7. assertNoAncestorProject
   describe('7. assertNoAncestorProject', () => {
-    it('passes for clean temp tree and fails closed if package.json, .npmrc, or node_modules exists in ancestor', async () => {
+    it('passes for clean temp tree, accepts an ancestor package.json or .npmrc and refuses an ancestor node_modules', async () => {
       const tempDir = await createTempDir();
       const tree = join(tempDir, 'sub', 'tree');
       const packagesDir = join(tree, 'packages');
@@ -1105,23 +1150,24 @@ describe('package-resolve', { timeout: 60_000 }, () => {
         assertNoAncestorProject(packagesDir),
       ).resolves.toBeUndefined();
 
-      // package.json in ancestor
+      // package.json in ancestor: accepted, npm never reads it
       const pkgJson = join(tree, 'package.json');
       await writeFile(pkgJson, '{}');
-      await expect(assertNoAncestorProject(packagesDir)).rejects.toMatchObject({
-        code: 'install_failed',
-      });
+      await expect(
+        assertNoAncestorProject(packagesDir),
+      ).resolves.toBeUndefined();
       await rm(pkgJson);
 
-      // .npmrc in ancestor
+      // .npmrc in ancestor: accepted, the npm runs of the hub use their own
+      // configuration files
       const npmrc = join(tree, '.npmrc');
       await writeFile(npmrc, '');
-      await expect(assertNoAncestorProject(packagesDir)).rejects.toMatchObject({
-        code: 'install_failed',
-      });
+      await expect(
+        assertNoAncestorProject(packagesDir),
+      ).resolves.toBeUndefined();
       await rm(npmrc);
 
-      // node_modules in ancestor
+      // node_modules in ancestor: refused, Node resolves bare imports there
       const nm = join(tree, 'node_modules');
       await mkdir(nm);
       await expect(assertNoAncestorProject(packagesDir)).rejects.toMatchObject({
@@ -1253,6 +1299,79 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       expect(calls[0]!.packageJsonContent?.trim()).toBe(
         '{"private":true,"dependencies":{"srv":"1.0.0"}}',
       );
+    });
+  });
+
+  // 8b. An empty dependency range
+  describe('8b. An empty dependency range', () => {
+    it('resolves a tree with a dependency written as an empty range', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const registry = await createRegistry();
+      const srvIntegrity = sha512Integrity('srv-empty-range');
+      const depIntegrity = sha512Integrity('dep-empty-range');
+      const subIntegrity = sha512Integrity('sub-empty-range');
+
+      registry.setVersion('srv', '1.0.0', {
+        name: 'srv',
+        version: '1.0.0',
+        bin: { srv: 'bin/srv.js' },
+        dependencies: { dep: '' },
+        dist: { integrity: srvIntegrity, unpackedSize: 1000, fileCount: 5 },
+      });
+      registry.setVersion('dep', '2.1.0', {
+        name: 'dep',
+        version: '2.1.0',
+        dependencies: { sub: '' },
+        dist: { integrity: depIntegrity, unpackedSize: 2000, fileCount: 10 },
+      });
+      registry.setVersion('sub', '3.0.0', {
+        name: 'sub',
+        version: '3.0.0',
+        dist: { integrity: subIntegrity, unpackedSize: 500, fileCount: 1 },
+      });
+
+      const lockObject = {
+        name: 'staging',
+        version: '1.0.0',
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'staging', version: '1.0.0' },
+          'node_modules/srv': {
+            version: '1.0.0',
+            integrity: srvIntegrity,
+            resolved: `${registry.origin}/srv/-/srv-1.0.0.tgz`,
+          },
+          'node_modules/dep': {
+            version: '2.1.0',
+            integrity: depIntegrity,
+            resolved: `${registry.origin}/dep/-/dep-2.1.0.tgz`,
+          },
+          'node_modules/sub': {
+            version: '3.0.0',
+            integrity: subIntegrity,
+            resolved: `${registry.origin}/sub/-/sub-3.0.0.tgz`,
+          },
+        },
+      };
+
+      const { runner } = createFakeRunner({ lock: lockObject });
+      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+      const preview = await resolvePackage({
+        request: { name: 'srv', version: '1.0.0' },
+        owner: 'test-owner-empty-range',
+        packagesDir,
+        signal: new AbortController().signal,
+        previews,
+        registry: registry.registry,
+        runner,
+      });
+
+      expect(preview.name).toBe('srv');
+      expect(preview.packageCount).toBe(3);
     });
   });
 
@@ -2122,77 +2241,189 @@ describe('package-resolve', { timeout: 60_000 }, () => {
 
   // 15. Real end-to-end run
   describe('15. Real end-to-end run with bundled npm', () => {
-    it('resolves srv@1.0.0 with real bundled npm runner through allow-list proxy', async () => {
-      const tempDir = await createTempDir();
-      const packagesDir = join(tempDir, 'packages');
-      await mkdir(packagesDir, { recursive: true });
+    it.skipIf(process.platform !== 'win32')(
+      'resolves srv@1.0.0 with real bundled npm runner through allow-list proxy',
+      async () => {
+        const tempDir = await createTempDir();
+        const packagesDir = join(tempDir, 'packages');
+        await mkdir(packagesDir, { recursive: true });
 
-      const registry = await createRegistry();
+        const registry = await createRegistry();
 
-      // Build a real tarball for srv@1.0.0 using npm's bundled tar
-      const tarball = await createSimpleTarball(
-        {
-          'package.json': JSON.stringify({
-            name: 'srv',
-            version: '1.0.0',
-            bin: { srv: 'bin/srv.js' },
-          }),
-          'bin/srv.js': 'console.log("running srv");',
-        },
-        tempDir,
-      );
-
-      const integrity = sha512Integrity(tarball);
-      const tarballUrl = `${registry.origin}/srv/-/srv-1.0.0.tgz`;
-
-      registry.set('/srv/-/srv-1.0.0.tgz', tarball);
-      registry.setVersion('srv', '1.0.0', {
-        name: 'srv',
-        version: '1.0.0',
-        bin: { srv: 'bin/srv.js' },
-        dist: {
-          integrity,
-          tarball: tarballUrl,
-          unpackedSize: tarball.length,
-          fileCount: 2,
-        },
-      });
-
-      registry.setPackage('srv', {
-        _id: 'srv',
-        name: 'srv',
-        'dist-tags': { latest: '1.0.0' },
-        versions: {
-          '1.0.0': {
-            name: 'srv',
-            version: '1.0.0',
-            bin: { srv: 'bin/srv.js' },
-            dist: { integrity, tarball: tarballUrl },
+        // Build a real tarball for srv@1.0.0 using npm's bundled tar
+        const tarball = await createSimpleTarball(
+          {
+            'package.json': JSON.stringify({
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+            }),
+            'bin/srv.js': 'console.log("running srv");',
           },
-        },
-        time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
-      });
+          tempDir,
+        );
 
-      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+        const integrity = sha512Integrity(tarball);
+        const tarballUrl = `${registry.origin}/srv/-/srv-1.0.0.tgz`;
 
-      // runner is omitted: real Windows runner and process.execPath are used!
-      const preview = await resolvePackage({
-        request: { name: 'srv', version: '1.0.0' },
-        owner: 'test-owner-e2e',
-        packagesDir,
-        signal: new AbortController().signal,
-        previews,
-        registry: registry.registry,
-      });
+        registry.set('/srv/-/srv-1.0.0.tgz', tarball);
+        registry.setVersion('srv', '1.0.0', {
+          name: 'srv',
+          version: '1.0.0',
+          bin: { srv: 'bin/srv.js' },
+          dist: {
+            integrity,
+            tarball: tarballUrl,
+            unpackedSize: tarball.length,
+            fileCount: 2,
+          },
+        });
 
-      expect(preview.name).toBe('srv');
-      expect(preview.version).toBe('1.0.0');
-      expect(preview.packageCount).toBe(1);
+        registry.setPackage('srv', {
+          _id: 'srv',
+          name: 'srv',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+              dist: { integrity, tarball: tarballUrl },
+            },
+          },
+          time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
+        });
 
-      // Every request the fixture saw went through the proxy
-      const reqs = registry.requests();
-      expect(reqs.length).toBeGreaterThan(0);
-    }, 120_000);
+        const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+        // runner is omitted: real Windows runner and process.execPath are used!
+        const preview = await resolvePackage({
+          request: { name: 'srv', version: '1.0.0' },
+          owner: 'test-owner-e2e',
+          packagesDir,
+          signal: new AbortController().signal,
+          previews,
+          registry: registry.registry,
+        });
+
+        expect(preview.name).toBe('srv');
+        expect(preview.version).toBe('1.0.0');
+        expect(preview.packageCount).toBe(1);
+
+        // Every request the fixture saw went through the proxy
+        const reqs = registry.requests();
+        expect(reqs.length).toBeGreaterThan(0);
+      },
+      120_000,
+    );
+  });
+
+  // 15b. The real npm and an ancestor .npmrc
+  describe('15b. The real npm and an ancestor .npmrc', () => {
+    it.skipIf(process.platform !== 'win32')(
+      'resolves against the fixture registry although an ancestor .npmrc names another registry',
+      async () => {
+        const tempDir = await createTempDir();
+        const packagesDir = join(tempDir, 'packages');
+        await mkdir(packagesDir, { recursive: true });
+
+        const registry = await createRegistry();
+
+        // The .npmrc of the user: npm never reads it, because every npm run
+        // of the hub names its own configuration files.
+        const sentinelHost = 'sentinel-npmrc.invalid';
+        const sentinelToken = 'sentinel-npmrc-value';
+        await writeFile(
+          join(tempDir, '.npmrc'),
+          `registry=https://${sentinelHost}/\n//${sentinelHost}/:_authToken=${sentinelToken}\n`,
+          'utf8',
+        );
+
+        const tarball = await createSimpleTarball(
+          {
+            'package.json': JSON.stringify({
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+            }),
+            'bin/srv.js': 'console.log("running srv");',
+          },
+          tempDir,
+        );
+
+        const integrity = sha512Integrity(tarball);
+        const tarballUrl = `${registry.origin}/srv/-/srv-1.0.0.tgz`;
+
+        registry.set('/srv/-/srv-1.0.0.tgz', tarball);
+        registry.setVersion('srv', '1.0.0', {
+          name: 'srv',
+          version: '1.0.0',
+          bin: { srv: 'bin/srv.js' },
+          dist: {
+            integrity,
+            tarball: tarballUrl,
+            unpackedSize: tarball.length,
+            fileCount: 2,
+          },
+        });
+        registry.setPackage('srv', {
+          _id: 'srv',
+          name: 'srv',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+              dist: { integrity, tarball: tarballUrl },
+            },
+          },
+          time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
+        });
+
+        const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+        // runner is omitted: the real Windows runner and the real npm run.
+        const preview = await resolvePackage({
+          request: { name: 'srv', version: '1.0.0' },
+          owner: 'test-owner-npmrc',
+          packagesDir,
+          signal: new AbortController().signal,
+          previews,
+          registry: registry.registry,
+        });
+
+        expect(preview.name).toBe('srv');
+        expect(preview.version).toBe('1.0.0');
+        expect(preview.packageCount).toBe(1);
+
+        // The proxy never saw the host of the ancestor .npmrc: such an attempt
+        // would have ended the lookup with "foreign_host".
+        for (const request of registry.requests())
+          expect(request).not.toContain(sentinelHost);
+
+        // The sentinel never reaches the output of the lookup, the preview or
+        // the stored job record.
+        expect(JSON.stringify(preview)).not.toContain(sentinelToken);
+        const record = await previews.take(
+          preview.previewId,
+          'test-owner-npmrc',
+        );
+        expect(JSON.stringify(record.preview)).not.toContain(sentinelToken);
+        expect(Buffer.from(record.lock).toString('utf8')).not.toContain(
+          sentinelToken,
+        );
+
+        // The npm run used the configuration files of the job, not the ones
+        // of the ancestor.
+        const jobFolder = jobDirectory(packagesDir, record.jobId);
+        expect(await readFile(join(jobFolder, 'user.npmrc'), 'utf8')).toBe('');
+        expect(await readFile(join(jobFolder, 'global.npmrc'), 'utf8')).toBe(
+          '',
+        );
+      },
+      120_000,
+    );
   });
 
   // 16. Bounded lookup

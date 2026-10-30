@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
 import { ConnectorSchema, StateSchema, isPackageEnvName as isRefusedPackageEnvName, type Connector, type HubState, type ImportDefinition, type PackageProvenance, type Profile, type RegistryOperation } from '@waleed/contracts';
-import { HubError } from '../errors.js';
+import { HubError, RevisionConflictError } from '../errors.js';
 import { normalizeImport, clearImport } from '../imports/normalize.js';
 
 export function canonical(value: unknown): string {
@@ -120,7 +120,9 @@ function finalizeRegistry(next: HubState, profiles: Set<string>, connectors: Set
   StateSchema.parse(next);
 }
 export function planRegistry(input: RegistryOperation, state: HubState, targetId: string, timestamp: string, context: RegistryContext = {}): RegistryPlan {
-  if (input.expectedRevision !== state.revision) conflict('Inventory changed. Create a new preview.');
+  // The revision moved: nothing was planned and nothing was committed, so the
+  // caller may preview again.
+  if (input.expectedRevision !== state.revision) throw new RevisionConflictError('Inventory changed. Create a new preview.');
   const next = structuredClone(state); const profiles = new Set<string>(); const connectors = new Set<string>();
   const touch = (profile: Profile) => { profile.revision++; profile.updatedAt = timestamp; profiles.add(profile.id); };
   const uniqueProfile = (name: string, except?: string) => { if (next.profiles.some((profile) => profile.id !== except && fold(profile.name) === fold(name))) conflict('A profile with this name already exists.'); };

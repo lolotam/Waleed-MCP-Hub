@@ -1008,7 +1008,15 @@ describe('F01 T2: registry and approval of managed npm packages', () => {
 
       await expect(
         hub.auth.credentials.write(managedConnector.id, writeCaInput),
-      ).rejects.toThrow(expect.objectContaining({ code: 'invalid' }));
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: 'invalid',
+          // The refusal names the OpenSSL variables as well: it is the same
+          // wording as the one of the registry.
+          message:
+            'Environment names starting with NODE_ and the OpenSSL certificate variables are refused on package connectors.',
+        }),
+      );
 
       expect(secrets.writes).toHaveLength(0);
       expect(secrets.values.size).toBe(0);

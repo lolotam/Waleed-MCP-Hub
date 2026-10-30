@@ -202,6 +202,34 @@ async function login(hub: Awaited<ReturnType<typeof createHubServer>>) {
   };
 }
 
+// The poll of a job: the read-only package routes answer 429 after six
+// hundred requests a minute, so the poll waits longer and longer until the
+// job is over.
+async function waitForJobApi(
+  hub: Awaited<ReturnType<typeof createHubServer>>,
+  jobId: string,
+  headers: Record<string, string>,
+  bodies?: string[],
+): Promise<PackageJob> {
+  const deadline = Date.now() + 20_000;
+  let wait = 25;
+  while (Date.now() < deadline) {
+    const res = await hub.app.inject({
+      method: 'GET',
+      url: `/api/packages/jobs/${jobId}`,
+      headers,
+    });
+    if (res.statusCode === 200) {
+      bodies?.push(res.body);
+      const job = res.json<PackageJob>();
+      if (job.completedAt) return job;
+    }
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    wait = Math.min(wait * 2, 1000);
+  }
+  throw new Error(`Job ${jobId} timed out waiting for completion`);
+}
+
 describe('package-api', { timeout: 60_000 }, () => {
   const tempDirs: string[] = [];
   const hubs: Awaited<ReturnType<typeof createHubServer>>[] = [];
@@ -212,7 +240,7 @@ describe('package-api', { timeout: 60_000 }, () => {
 
   beforeAll(async () => {
     sharedTls = await createTestTls();
-  });
+  }, 60_000);
 
   afterAll(async () => {
     if (sharedTls) await sharedTls.dispose();
@@ -402,17 +430,7 @@ describe('package-api', { timeout: 60_000 }, () => {
     });
     expect(getRes.statusCode).toBe(200);
 
-    let currentJob = getRes.json<PackageJob>();
-    const deadline = Date.now() + 20_000;
-    while (!currentJob.completedAt && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 10));
-      const poll = await hub.app.inject({
-        method: 'GET',
-        url: `/api/packages/jobs/${initialJob.id}`,
-        headers,
-      });
-      currentJob = poll.json<PackageJob>();
-    }
+    const currentJob = await waitForJobApi(hub, initialJob.id, headers);
 
     expect(currentJob.state).toBe('succeeded');
     expect(currentJob.phase).toBe('complete');
@@ -438,17 +456,12 @@ describe('package-api', { timeout: 60_000 }, () => {
     recordedBodies.push(resResolve.body);
     const resolveJob = resResolve.json<PackageJob>();
 
-    let currentResolve = resolveJob;
-    while (!currentResolve.completedAt) {
-      await new Promise((r) => setTimeout(r, 10));
-      const poll = await hub.app.inject({
-        method: 'GET',
-        url: `/api/packages/jobs/${resolveJob.id}`,
-        headers,
-      });
-      recordedBodies.push(poll.body);
-      currentResolve = poll.json<PackageJob>();
-    }
+    const currentResolve = await waitForJobApi(
+      hub,
+      resolveJob.id,
+      headers,
+      recordedBodies,
+    );
     const preview = currentResolve.preview!;
 
     // Install
@@ -469,17 +482,12 @@ describe('package-api', { timeout: 60_000 }, () => {
     expect(resInstall.statusCode).toBe(202);
     const installJob = resInstall.json<PackageJob>();
 
-    let currentInstall = installJob;
-    while (!currentInstall.completedAt) {
-      await new Promise((r) => setTimeout(r, 10));
-      const poll = await hub.app.inject({
-        method: 'GET',
-        url: `/api/packages/jobs/${installJob.id}`,
-        headers,
-      });
-      recordedBodies.push(poll.body);
-      currentInstall = poll.json<PackageJob>();
-    }
+    const currentInstall = await waitForJobApi(
+      hub,
+      installJob.id,
+      headers,
+      recordedBodies,
+    );
 
     expect(currentInstall.state).toBe('succeeded');
     expect(currentInstall.result?.outcome).toBe('saved');
@@ -531,16 +539,7 @@ describe('package-api', { timeout: 60_000 }, () => {
       payload: { name: 'srv', version: '1.0.0' },
     });
     const resolveJob = resResolve.json<PackageJob>();
-    let currentResolve = resolveJob;
-    while (!currentResolve.completedAt) {
-      await new Promise((r) => setTimeout(r, 10));
-      const poll = await hub.app.inject({
-        method: 'GET',
-        url: `/api/packages/jobs/${resolveJob.id}`,
-        headers,
-      });
-      currentResolve = poll.json<PackageJob>();
-    }
+    const currentResolve = await waitForJobApi(hub, resolveJob.id, headers);
     const preview = currentResolve.preview!;
 
     // Install
@@ -558,16 +557,7 @@ describe('package-api', { timeout: 60_000 }, () => {
       },
     });
     const installJob = resInstall.json<PackageJob>();
-    let currentInstall = installJob;
-    while (!currentInstall.completedAt) {
-      await new Promise((r) => setTimeout(r, 10));
-      const poll = await hub.app.inject({
-        method: 'GET',
-        url: `/api/packages/jobs/${installJob.id}`,
-        headers,
-      });
-      currentInstall = poll.json<PackageJob>();
-    }
+    const currentInstall = await waitForJobApi(hub, installJob.id, headers);
     expect(currentInstall.state).toBe('succeeded');
     const connectorId = currentInstall.result!.connectorId;
 
@@ -627,4 +617,117 @@ describe('package-api', { timeout: 60_000 }, () => {
       error: 'invalid_input',
     });
   });
+
+  it('21. The 61st verify request of a session answers 429; another session is not limited', async () => {
+    const { hub } = await setup();
+    const setupSession = await login(hub);
+
+    // Install a connector, so the verify answers "verified".
+    const resResolve = await hub.app.inject({
+      method: 'POST',
+      url: '/api/packages/resolve',
+      headers: setupSession,
+      payload: { name: 'srv', version: '1.0.0' },
+    });
+    const resolveJob = resResolve.json<PackageJob>();
+    const currentResolve = await waitForJobApi(
+      hub,
+      resolveJob.id,
+      setupSession,
+    );
+    const preview = currentResolve.preview!;
+
+    const resInstall = await hub.app.inject({
+      method: 'POST',
+      url: '/api/packages/install',
+      headers: setupSession,
+      payload: {
+        previewId: preview.previewId,
+        entry: preview.entries[0]!.entry,
+        acknowledgedWarnings: preview.warnings,
+        connectorName: 'SrvRateLimited',
+        arguments: [],
+        env: {},
+      },
+    });
+    const installJob = resInstall.json<PackageJob>();
+    const currentInstall = await waitForJobApi(
+      hub,
+      installJob.id,
+      setupSession,
+    );
+    expect(currentInstall.state).toBe('succeeded');
+    const connectorId = currentInstall.result!.connectorId;
+
+    const session = await login(hub);
+    const otherSession = await login(hub);
+
+    // The first sixty verify requests of the session pass.
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const response = await hub.app.inject({
+        method: 'POST',
+        url: `/api/packages/verify/${connectorId}`,
+        headers: session,
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
+    // The sixty-first answers 429 with the body of the server.
+    const limited = await hub.app.inject({
+      method: 'POST',
+      url: `/api/packages/verify/${connectorId}`,
+      headers: session,
+    });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toEqual({
+      error: 'busy',
+      message: expect.any(String),
+    });
+
+    // Another session has its own budget.
+    const other = await hub.app.inject({
+      method: 'POST',
+      url: `/api/packages/verify/${connectorId}`,
+      headers: otherSession,
+    });
+    expect(other.statusCode).toBe(200);
+  });
+
+  it('22. The job poll of a session answers 200 six hundred times; the six hundred and first answers 429', async () => {
+    const { hub } = await setup();
+    const headers = await login(hub);
+
+    const resResolve = await hub.app.inject({
+      method: 'POST',
+      url: '/api/packages/resolve',
+      headers,
+      payload: { name: 'srv', version: '1.0.0' },
+    });
+    const job = resResolve.json<PackageJob>();
+
+    // The poll of a job is a read: the web UI polls it once a second while
+    // an install runs, so it has a budget of its own.
+    let refused = 0;
+    for (let attempt = 0; attempt < 600; attempt++) {
+      const response = await hub.app.inject({
+        method: 'GET',
+        url: `/api/packages/jobs/${job.id}`,
+        headers,
+      });
+      if (response.statusCode !== 200) refused += 1;
+    }
+    expect(refused).toBe(0);
+
+    // The six hundred and first poll answers 429 with the body of the server.
+    const limited = await hub.app.inject({
+      method: 'GET',
+      url: `/api/packages/jobs/${job.id}`,
+      headers,
+    });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toEqual({
+      error: 'busy',
+      message: expect.any(String),
+    });
+  }, 120_000);
 });

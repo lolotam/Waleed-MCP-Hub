@@ -198,7 +198,10 @@ function ustarPath(path) {
 function paxHeader(path) {
   const body = ` path=${path}\n`;
   let length = Buffer.byteLength(body);
-  while (`${length}${body}`.length !== length)
+  // The length of a pax record counts its own digits, so both sides are
+  // measured in bytes: a path outside the ASCII range is longer in bytes
+  // than in characters.
+  while (Buffer.byteLength(`${length}${body}`) !== length)
     length = Buffer.byteLength(`${length}${body}`);
   const record = Buffer.from(`${length}${body}`, 'utf8');
   return [header('PaxHeader', '', record.length, 0o644, 'x'), padded(record)];

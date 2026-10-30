@@ -5,10 +5,10 @@ import {
   mkdir,
   open,
   readdir,
-  readFile,
   rename,
   rmdir,
   unlink,
+  type FileHandle,
 } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import type { HubState } from '@waleed/contracts';
@@ -75,20 +75,63 @@ export async function writeMarker(
     throw error;
   }
 }
+// Reads a regular file the hub owns through one handle: the checks and the
+// read see the same file, so nothing can swap it in between. A link, a
+// hard-linked file, a file over the cap or one that grows while it is read is
+// refused.
+export async function readOwnedFile(
+  path: string,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, 'r');
+  } catch (error) {
+    // A folder or a link that cannot be followed is not a regular file: it
+    // is refused, not an error.
+    const reason = code(error);
+    if (reason === 'ENOENT' || reason === 'EISDIR' || reason === 'ELOOP')
+      return null;
+    throw error;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.nlink !== 1 || info.size > maxBytes) return null;
+    // The path must still name the file the handle points to: a link that
+    // took its place in the meantime is refused, even though the handle
+    // followed it.
+    const pathInfo = await lstat(path);
+    if (pathInfo.isSymbolicLink()) return null;
+    if (pathInfo.dev !== info.dev || pathInfo.ino !== info.ino) return null;
+    // The read never asks for more than one byte beyond the cap, so a file
+    // that grew while it was read is refused instead of being cut short.
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    while (size <= maxBytes) {
+      const wanted = Math.min(chunk.length, maxBytes + 1 - size);
+      const { bytesRead } = await handle.read(chunk, 0, wanted, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+      chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
+    }
+    if (size > maxBytes) return null;
+    return Buffer.concat(chunks);
+  } catch (error) {
+    if (code(error) === 'ENOENT') return null;
+    throw error;
+  } finally {
+    await handle.close();
+  }
+}
 export async function readMarker(
   packagesDir: string,
   installId: string,
 ): Promise<string | null> {
-  const path = markerPath(packagesDir, installId);
-  try {
-    const info = await lstat(path);
-    if (!info.isFile() || info.nlink !== 1 || info.size > 4096) return null;
-    const jobId = (await readFile(path, 'utf8')).trim();
-    return UUID.test(jobId) ? jobId : null;
-  } catch (error) {
-    if (code(error) === 'ENOENT') return null;
-    throw error;
-  }
+  const bytes = await readOwnedFile(markerPath(packagesDir, installId), 4096);
+  if (!bytes) return null;
+  const jobId = bytes.toString('utf8').trim();
+  return UUID.test(jobId) ? jobId : null;
 }
 export async function removeMarker(
   packagesDir: string,
@@ -223,6 +266,11 @@ export async function reconcilePackages(
       if (connector.executionMode === 'native' && connector.package)
         referenced.add(connector.package.installId);
     const active = options.activeJobs();
+    // A lookup that starts during the pass must not lose its folder while npm
+    // runs in it: the live jobs are read again before every deletion that
+    // depends on a job id.
+    const isActive = (jobId: string): boolean =>
+      options.activeJobs().has(jobId);
     const deleted = new Set<string>();
     const retained = new Set<string>();
     let entries: Dirent[];
@@ -254,7 +302,7 @@ export async function reconcilePackages(
         continue;
       }
       const jobId = await readMarker(options.packagesDir, entry.name);
-      if (jobId && active.has(jobId)) {
+      if (jobId && isActive(jobId)) {
         retained.add(entry.name);
         continue;
       }
@@ -275,7 +323,7 @@ export async function reconcilePackages(
       const folder = join(options.packagesDir, JOBS_FOLDER, entry.name);
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
-      if (active.has(entry.name)) continue;
+      if (isActive(entry.name)) continue;
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);

@@ -55,26 +55,33 @@ export interface JobPaths extends NpmPaths {
 const code = (error: unknown): string | undefined =>
   (error as NodeJS.ErrnoException).code;
 
-// npm looks for a project root in the parent folders and reads the project's
-// own configuration there. The hub refuses to start when the data folder sits
-// inside an npm project, so no ancestor configuration can reach the install.
+// Node resolves bare imports by walking up the parent folders, so an ancestor
+// "node_modules" would put foreign packages in reach of an installed
+// connector. It is the only ancestor entry the hub refuses.
+//
+// An ancestor "package.json" and an ancestor ".npmrc" are not refused: the npm
+// runs of the hub pass "--prefix", "--userconfig" and "--globalconfig" to the
+// private files of the job, and "@npmcli/config" does not search the parent
+// folders when the prefix comes from the command line. A ".npmrc" in the home
+// folder of the user ("npm login" writes one) would otherwise break every
+// lookup of a data folder under "%LOCALAPPDATA%".
 export async function assertNoAncestorProject(
   packagesDir: string,
 ): Promise<void> {
   let current = dirname(resolve(packagesDir));
   for (;;) {
-    for (const name of ['package.json', '.npmrc', 'node_modules']) {
-      try {
-        await lstat(join(current, name));
-      } catch (error) {
-        const reason = code(error);
-        if (reason === 'ENOENT' || reason === 'ENOTDIR') continue;
-        // An ancestor that cannot be checked counts as one that is present; a
-        // raw error would also carry its path to the caller.
+    let present = false;
+    try {
+      await lstat(join(current, 'node_modules'));
+      present = true;
+    } catch (error) {
+      const reason = code(error);
+      // An ancestor that cannot be checked counts as one that is present; a
+      // raw error would also carry its path to the caller.
+      if (reason !== 'ENOENT' && reason !== 'ENOTDIR')
         throw new PackageFault('install_failed');
-      }
-      throw new PackageFault('install_failed');
     }
+    if (present) throw new PackageFault('install_failed');
     const up = dirname(current);
     if (up === current) return;
     current = up;
@@ -263,16 +270,18 @@ const executeNpm = async (
     allow: [{ host: options.registry.host, port: options.registry.port }],
     downloadCapBytes: options.downloadCapBytes,
   });
-  const executable = options.nodeExecutable ?? process.execPath;
-  const runner =
-    options.runner ??
-    (await createWindowsProcessRunner({
-      allowedExecutables: [executable],
-      workingDirectory: options.prefix,
-      concurrency: 1,
-      maxTimeoutMs: 600_000,
-    }));
   try {
+    const executable = options.nodeExecutable ?? process.execPath;
+    // The runner is created inside the scope that closes the proxy: a runner
+    // that cannot be created leaves no listening server behind.
+    const runner =
+      options.runner ??
+      (await createWindowsProcessRunner({
+        allowedExecutables: [executable],
+        workingDirectory: options.prefix,
+        concurrency: 1,
+        maxTimeoutMs: 600_000,
+      }));
     const result = await runner.run({
       executable,
       arguments: options.arguments(proxy.url),

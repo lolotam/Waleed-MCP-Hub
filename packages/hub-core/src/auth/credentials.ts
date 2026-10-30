@@ -109,8 +109,9 @@ export function createCredentials(
               'invalid',
               'Credential backend/binding does not match the connector runtime.',
             );
-          // A managed package may never receive a NODE_ environment variable:
-          // nothing outside the install can preload code or change TLS trust.
+          // A managed package may never receive a NODE_ environment variable
+          // or an OpenSSL certificate variable: nothing outside the install
+          // can preload code or change TLS trust.
           if (
             current.executionMode === 'native' &&
             current.package &&
@@ -119,7 +120,7 @@ export function createCredentials(
           )
             throw new HubError(
               'invalid',
-              'Environment names starting with NODE_ are refused on package connectors.',
+              'Environment names starting with NODE_ and the OpenSSL certificate variables are refused on package connectors.',
             );
           if (
             oauth &&

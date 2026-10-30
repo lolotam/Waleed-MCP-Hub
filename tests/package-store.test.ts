@@ -311,6 +311,27 @@ describe('2. Launch verification (verifyPackageFiles)', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('passes when the lock is between four and sixteen megabytes', async () => {
+    const dataDir = await createTempDir();
+    // A lock of five megabytes: over the old four megabyte cap of the
+    // verification and under the sixteen megabyte cap of the lookup and the
+    // install, so an accepted install is never "modified" at the next launch.
+    const lockContent = JSON.stringify({
+      name: '@scope/srv',
+      version: '1.2.3',
+      lockfileVersion: 3,
+      packages: {},
+      padding: 'x'.repeat(5 * 1024 * 1024),
+    });
+    const { connector, packagesDir } = await createFakeInstall(dataDir, {
+      lockContent,
+    });
+
+    await expect(
+      verifyPackageFiles(connector, packagesDir),
+    ).resolves.toBeUndefined();
+  }, 30_000);
+
   it('fails with package_modified when package-lock.json is edited', async () => {
     const dataDir = await createTempDir();
     const { connector, packagesDir, installDir } =
@@ -1100,6 +1121,39 @@ describe('9. Reconciliation (reconcilePackages)', () => {
     expect(await exists(folder)).toBe(true);
     expect(reconcileResult.retained).toContain(installId);
     expect(reconcileResult.deleted).not.toContain(installId);
+  });
+
+  it('keeps the folder of a job that started while the pass ran', async () => {
+    const dataDir = await createTempDir();
+    const packagesDir = packagesRoot(dataDir);
+    await mkdir(packagesDir, { recursive: true });
+    const lock = createPackageLock();
+
+    const jobId = randomUUID();
+    const folder = jobDirectory(packagesDir, jobId);
+
+    // The lookup starts while the pass runs: its folder appears after the
+    // pass began, and the live jobs know the job only from the second read
+    // on.
+    let calls = 0;
+    const activeJobs = () => {
+      calls += 1;
+      return calls >= 2 ? new Set([jobId]) : new Set<string>();
+    };
+
+    const result = await reconcilePackages({
+      packagesDir,
+      readState: async () => {
+        await mkdir(folder, { recursive: true });
+        await writeFile(join(folder, 'active.txt'), 'active');
+        return emptyState();
+      },
+      activeJobs,
+      lock,
+    });
+
+    expect(result.deleted).not.toContain(jobId);
+    expect(await exists(folder)).toBe(true);
   });
 
   it('guarantees an id appears in at most one of deleted or retained', async () => {

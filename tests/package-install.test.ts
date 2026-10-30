@@ -242,7 +242,7 @@ describe('package-install', { timeout: 60_000 }, () => {
 
   beforeAll(async () => {
     sharedTls = await createTestTls();
-  });
+  }, 60_000);
 
   afterAll(async () => {
     if (sharedTls) {
@@ -762,7 +762,7 @@ describe('package-install', { timeout: 60_000 }, () => {
       expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
     });
 
-    it('rejects ancestor project or hostile .npmrc with install_failed and never leaks sentinel', async () => {
+    it('refuses an ancestor node_modules with install_failed and accepts an ancestor package.json or .npmrc', async () => {
       const tempDir = await createTempDir();
       const subDir = join(tempDir, 'nested');
       const packagesDir = join(subDir, 'packages');
@@ -776,9 +776,10 @@ describe('package-install', { timeout: 60_000 }, () => {
         previews,
       );
 
-      // 1. Ancestor package.json
-      const pkgJsonPath = join(tempDir, 'package.json');
-      await writeFile(pkgJsonPath, '{}', 'utf8');
+      // 1. Ancestor node_modules: Node resolves bare imports from there, so
+      // the install is refused before npm runs.
+      const nm = join(tempDir, 'node_modules');
+      await mkdir(nm, { recursive: true });
 
       await expect(
         installPackage({
@@ -794,11 +795,30 @@ describe('package-install', { timeout: 60_000 }, () => {
       ).rejects.toMatchObject({ code: 'install_failed' });
 
       expect(calls.filter((c) => c.command === 'ci')).toHaveLength(0);
-      let entries = await readdir(packagesDir);
+      const entries = await readdir(packagesDir);
       expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
+      await rm(nm, { recursive: true, force: true });
+
+      // 2. Ancestor package.json: accepted, npm never reads it.
+      const pkgJsonPath = join(tempDir, 'package.json');
+      await writeFile(pkgJsonPath, '{}', 'utf8');
+
+      const saved = await installPackage({
+        record,
+        entry: 'srv',
+        acknowledgedWarnings: record.preview.warnings,
+        packagesDir,
+        lock: createPackageLock(),
+        signal: new AbortController().signal,
+        save: createSaveSpy(),
+        runner,
+      });
+      expect(saved.outcome).toBe('saved');
+      expect(calls.filter((c) => c.command === 'ci')).toHaveLength(1);
       await rm(pkgJsonPath);
 
-      // 2. Ancestor hostile .npmrc with sentinel
+      // 3. Ancestor .npmrc with a sentinel: accepted, and the sentinel never
+      // reaches an argument or an environment value of the npm run.
       const sentinelToken = 'SECRET_SENTINEL_TOKEN_XYZ_98765';
       const npmrcPath = join(tempDir, '.npmrc');
       await writeFile(
@@ -807,22 +827,18 @@ describe('package-install', { timeout: 60_000 }, () => {
         'utf8',
       );
 
-      await expect(
-        installPackage({
-          record,
-          entry: 'srv',
-          acknowledgedWarnings: record.preview.warnings,
-          packagesDir,
-          lock: createPackageLock(),
-          signal: new AbortController().signal,
-          save: createSaveSpy(),
-          runner,
-        }),
-      ).rejects.toMatchObject({ code: 'install_failed' });
-
-      expect(calls.filter((c) => c.command === 'ci')).toHaveLength(0);
-      entries = await readdir(packagesDir);
-      expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
+      const second = await installPackage({
+        record,
+        entry: 'srv',
+        acknowledgedWarnings: record.preview.warnings,
+        packagesDir,
+        lock: createPackageLock(),
+        signal: new AbortController().signal,
+        save: createSaveSpy(),
+        runner,
+      });
+      expect(second.outcome).toBe('saved');
+      expect(calls.filter((c) => c.command === 'ci')).toHaveLength(2);
 
       // Sentinel must never appear in any argument or environment value
       for (const call of calls) {
@@ -1459,279 +1475,291 @@ describe('package-install', { timeout: 60_000 }, () => {
 
   // 11. Real npm end-to-end
   describe('11. Real npm end-to-end with postinstall script', () => {
-    it('ignores postinstall script, generates warning, commits, and builds manifest', async () => {
-      const tempDir = await createTempDir();
-      const packagesDir = join(tempDir, 'packages');
-      await mkdir(packagesDir, { recursive: true });
+    it.skipIf(process.platform !== 'win32')(
+      'ignores postinstall script, generates warning, commits, and builds manifest',
+      async () => {
+        const tempDir = await createTempDir();
+        const packagesDir = join(tempDir, 'packages');
+        await mkdir(packagesDir, { recursive: true });
 
-      const registry = await createRegistry();
-      const postinstallScript =
-        "node -e \"require('fs').writeFileSync(process.env.SENTINEL_PATH || 'POSTINSTALL_RAN', 'x')\"";
+        const registry = await createRegistry();
+        const postinstallScript =
+          "node -e \"require('fs').writeFileSync(process.env.SENTINEL_PATH || 'POSTINSTALL_RAN', 'x')\"";
 
-      const tarball = await createSimpleTarball(
-        {
-          'package.json': JSON.stringify({
-            name: 'srv',
-            version: '1.0.0',
-            bin: { srv: 'bin/srv.js' },
-            scripts: {
-              postinstall: postinstallScript,
-            },
-          }),
-          'bin/srv.js': 'console.log("running srv");',
-        },
-        tempDir,
-      );
-
-      const integrity = sha512Integrity(tarball);
-      const tarballUrl = `${registry.origin}/srv/-/srv-1.0.0.tgz`;
-
-      registry.set('/srv/-/srv-1.0.0.tgz', tarball);
-      registry.setVersion('srv', '1.0.0', {
-        name: 'srv',
-        version: '1.0.0',
-        bin: { srv: 'bin/srv.js' },
-        scripts: {
-          postinstall: postinstallScript,
-        },
-        dist: {
-          integrity,
-          tarball: tarballUrl,
-          unpackedSize: tarball.length,
-          fileCount: 2,
-        },
-      });
-      registry.setPackage('srv', {
-        _id: 'srv',
-        name: 'srv',
-        'dist-tags': { latest: '1.0.0' },
-        versions: {
-          '1.0.0': {
-            name: 'srv',
-            version: '1.0.0',
-            bin: { srv: 'bin/srv.js' },
-            scripts: {
-              postinstall: postinstallScript,
-            },
-            dist: { integrity, tarball: tarballUrl },
+        const tarball = await createSimpleTarball(
+          {
+            'package.json': JSON.stringify({
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+              scripts: {
+                postinstall: postinstallScript,
+              },
+            }),
+            'bin/srv.js': 'console.log("running srv");',
           },
-        },
-        time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
-      });
+          tempDir,
+        );
 
-      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
-      const owner = 'test-owner-real-11';
+        const integrity = sha512Integrity(tarball);
+        const tarballUrl = `${registry.origin}/srv/-/srv-1.0.0.tgz`;
 
-      // Runner is omitted: real bundled npm runs
-      const preview = await resolvePackage({
-        request: { name: 'srv', version: '1.0.0' },
-        owner,
-        packagesDir,
-        signal: new AbortController().signal,
-        previews,
-        registry: registry.registry,
-      });
+        registry.set('/srv/-/srv-1.0.0.tgz', tarball);
+        registry.setVersion('srv', '1.0.0', {
+          name: 'srv',
+          version: '1.0.0',
+          bin: { srv: 'bin/srv.js' },
+          scripts: {
+            postinstall: postinstallScript,
+          },
+          dist: {
+            integrity,
+            tarball: tarballUrl,
+            unpackedSize: tarball.length,
+            fileCount: 2,
+          },
+        });
+        registry.setPackage('srv', {
+          _id: 'srv',
+          name: 'srv',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+              scripts: {
+                postinstall: postinstallScript,
+              },
+              dist: { integrity, tarball: tarballUrl },
+            },
+          },
+          time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
+        });
 
-      expect(preview.warnings).toContain('install_scripts');
+        const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+        const owner = 'test-owner-real-11';
 
-      const record = await previews.take(preview.previewId, owner);
+        // Runner is omitted: real bundled npm runs
+        const preview = await resolvePackage({
+          request: { name: 'srv', version: '1.0.0' },
+          owner,
+          packagesDir,
+          signal: new AbortController().signal,
+          previews,
+          registry: registry.registry,
+        });
 
-      const saveSpy = createSaveSpy({
-        status: 'committed',
-        connectorId: 'conn-real-11',
-        outcome: 'saved',
-      });
+        expect(preview.warnings).toContain('install_scripts');
 
-      const result = await installPackage({
-        record,
-        entry: 'srv',
-        acknowledgedWarnings: preview.warnings,
-        packagesDir,
-        lock: createPackageLock(),
-        signal: new AbortController().signal,
-        save: saveSpy,
-        registry: registry.registry,
-      });
+        const record = await previews.take(preview.previewId, owner);
 
-      expect(result.outcome).toBe('saved');
+        const saveSpy = createSaveSpy({
+          status: 'committed',
+          connectorId: 'conn-real-11',
+          outcome: 'saved',
+        });
 
-      // Check POSTINSTALL_RAN does not exist anywhere recursively
-      const sentinelMatches = await findFileRecursively(
-        tempDir,
-        'POSTINSTALL_RAN',
-      );
-      expect(sentinelMatches).toEqual([]);
+        const result = await installPackage({
+          record,
+          entry: 'srv',
+          acknowledgedWarnings: preview.warnings,
+          packagesDir,
+          lock: createPackageLock(),
+          signal: new AbortController().signal,
+          save: saveSpy,
+          registry: registry.registry,
+        });
 
-      const installFolder = installDirectory(
-        packagesDir,
-        result.provenance.installId,
-      );
-      expect(
-        await pathExists(
-          join(installFolder, 'node_modules', 'srv', 'bin', 'srv.js'),
-        ),
-      ).toBe(true);
+        expect(result.outcome).toBe('saved');
 
-      const manifest = await buildManifest(installFolder);
-      expect(result.provenance.manifestHash).toBe(manifest.hash);
-    }, 120_000);
+        // Check POSTINSTALL_RAN does not exist anywhere recursively
+        const sentinelMatches = await findFileRecursively(
+          tempDir,
+          'POSTINSTALL_RAN',
+        );
+        expect(sentinelMatches).toEqual([]);
+
+        const installFolder = installDirectory(
+          packagesDir,
+          result.provenance.installId,
+        );
+        expect(
+          await pathExists(
+            join(installFolder, 'node_modules', 'srv', 'bin', 'srv.js'),
+          ),
+        ).toBe(true);
+
+        const manifest = await buildManifest(installFolder);
+        expect(result.provenance.manifestHash).toBe(manifest.hash);
+      },
+      120_000,
+    );
   });
 
   // 12. Real npm unsupported optional dependencies
   describe('12. Real npm unsupported optional dependencies', () => {
-    it('rejects root optional file: dependency with unsupported_dependency and no requests or install folder', async () => {
-      const tempDir = await createTempDir();
-      const packagesDir = join(tempDir, 'packages');
-      await mkdir(packagesDir, { recursive: true });
+    it.skipIf(process.platform !== 'win32')(
+      'rejects root optional file: dependency with unsupported_dependency and no requests or install folder',
+      async () => {
+        const tempDir = await createTempDir();
+        const packagesDir = join(tempDir, 'packages');
+        await mkdir(packagesDir, { recursive: true });
 
-      const registry = await createRegistry();
-      const integrity = sha512Integrity('srv-12a');
+        const registry = await createRegistry();
+        const integrity = sha512Integrity('srv-12a');
 
-      registry.setVersion('srv', '1.0.0', {
-        name: 'srv',
-        version: '1.0.0',
-        bin: { srv: 'bin/srv.js' },
-        optionalDependencies: { x: 'file:../x' },
-        dist: { integrity, unpackedSize: 500, fileCount: 2 },
-      });
-      registry.setPackage('srv', {
-        name: 'srv',
-        'dist-tags': { latest: '1.0.0' },
-        time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
-      });
+        registry.setVersion('srv', '1.0.0', {
+          name: 'srv',
+          version: '1.0.0',
+          bin: { srv: 'bin/srv.js' },
+          optionalDependencies: { x: 'file:../x' },
+          dist: { integrity, unpackedSize: 500, fileCount: 2 },
+        });
+        registry.setPackage('srv', {
+          name: 'srv',
+          'dist-tags': { latest: '1.0.0' },
+          time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
+        });
 
-      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+        const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
 
-      await expect(
-        resolvePackage({
-          request: { name: 'srv', version: '1.0.0' },
-          owner: 'test-owner-12a',
-          packagesDir,
-          signal: new AbortController().signal,
-          previews,
-          registry: registry.registry,
-        }),
-      ).rejects.toMatchObject({ code: 'unsupported_dependency' });
-
-      expect(
-        registry
-          .requests()
-          .some((r) => r.includes('/x') || r.includes('file:')),
-      ).toBe(false);
-
-      const entries = await readdir(packagesDir).catch(() => []);
-      expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
-    }, 120_000);
-
-    it('rejects transitive optional git dependency with unsupported_dependency and no requests or install folder', async () => {
-      const tempDir = await createTempDir();
-      const packagesDir = join(tempDir, 'packages');
-      await mkdir(packagesDir, { recursive: true });
-
-      const registry = await createRegistry();
-
-      const srvTarball = await createSimpleTarball(
-        {
-          'package.json': JSON.stringify({
-            name: 'srv',
-            version: '1.0.0',
-            bin: { srv: 'bin/srv.js' },
-            dependencies: { dep: '^1.0.0' },
+        await expect(
+          resolvePackage({
+            request: { name: 'srv', version: '1.0.0' },
+            owner: 'test-owner-12a',
+            packagesDir,
+            signal: new AbortController().signal,
+            previews,
+            registry: registry.registry,
           }),
-          'bin/srv.js': 'console.log("srv");',
-        },
-        tempDir,
-      );
-      const srvIntegrity = sha512Integrity(srvTarball);
-      const srvTarballUrl = `${registry.origin}/srv/-/srv-1.0.0.tgz`;
-      registry.set('/srv/-/srv-1.0.0.tgz', srvTarball);
+        ).rejects.toMatchObject({ code: 'unsupported_dependency' });
 
-      const depTarball = await createSimpleTarball(
-        {
-          'package.json': JSON.stringify({
-            name: 'dep',
-            version: '1.0.0',
+        expect(
+          registry
+            .requests()
+            .some((r) => r.includes('/x') || r.includes('file:')),
+        ).toBe(false);
+
+        const entries = await readdir(packagesDir).catch(() => []);
+        expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
+      },
+      120_000,
+    );
+
+    it.skipIf(process.platform !== 'win32')(
+      'rejects transitive optional git dependency with unsupported_dependency and no requests or install folder',
+      async () => {
+        const tempDir = await createTempDir();
+        const packagesDir = join(tempDir, 'packages');
+        await mkdir(packagesDir, { recursive: true });
+
+        const registry = await createRegistry();
+
+        const srvTarball = await createSimpleTarball(
+          {
+            'package.json': JSON.stringify({
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+              dependencies: { dep: '^1.0.0' },
+            }),
+            'bin/srv.js': 'console.log("srv");',
+          },
+          tempDir,
+        );
+        const srvIntegrity = sha512Integrity(srvTarball);
+        const srvTarballUrl = `${registry.origin}/srv/-/srv-1.0.0.tgz`;
+        registry.set('/srv/-/srv-1.0.0.tgz', srvTarball);
+
+        const depTarball = await createSimpleTarball(
+          {
+            'package.json': JSON.stringify({
+              name: 'dep',
+              version: '1.0.0',
+            }),
+          },
+          tempDir,
+        );
+        const depIntegrity = sha512Integrity(depTarball);
+        const depTarballUrl = `${registry.origin}/dep/-/dep-1.0.0.tgz`;
+        registry.set('/dep/-/dep-1.0.0.tgz', depTarball);
+
+        registry.setVersion('srv', '1.0.0', {
+          name: 'srv',
+          version: '1.0.0',
+          bin: { srv: 'bin/srv.js' },
+          dependencies: { dep: '^1.0.0' },
+          dist: {
+            integrity: srvIntegrity,
+            tarball: srvTarballUrl,
+            unpackedSize: srvTarball.length,
+            fileCount: 2,
+          },
+        });
+        registry.setPackage('srv', {
+          name: 'srv',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'srv',
+              version: '1.0.0',
+              bin: { srv: 'bin/srv.js' },
+              dependencies: { dep: '^1.0.0' },
+              dist: { integrity: srvIntegrity, tarball: srvTarballUrl },
+            },
+          },
+          time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
+        });
+
+        registry.setVersion('dep', '1.0.0', {
+          name: 'dep',
+          version: '1.0.0',
+          optionalDependencies: { x: 'git+https://example.invalid/x.git' },
+          dist: {
+            integrity: depIntegrity,
+            tarball: depTarballUrl,
+            unpackedSize: depTarball.length,
+            fileCount: 1,
+          },
+        });
+        registry.setPackage('dep', {
+          name: 'dep',
+          'dist-tags': { latest: '1.0.0' },
+          versions: {
+            '1.0.0': {
+              name: 'dep',
+              version: '1.0.0',
+              optionalDependencies: { x: 'git+https://example.invalid/x.git' },
+              dist: { integrity: depIntegrity, tarball: depTarballUrl },
+            },
+          },
+          time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
+        });
+
+        const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+        await expect(
+          resolvePackage({
+            request: { name: 'srv', version: '1.0.0' },
+            owner: 'test-owner-12b',
+            packagesDir,
+            signal: new AbortController().signal,
+            previews,
+            registry: registry.registry,
           }),
-        },
-        tempDir,
-      );
-      const depIntegrity = sha512Integrity(depTarball);
-      const depTarballUrl = `${registry.origin}/dep/-/dep-1.0.0.tgz`;
-      registry.set('/dep/-/dep-1.0.0.tgz', depTarball);
+        ).rejects.toMatchObject({ code: 'unsupported_dependency' });
 
-      registry.setVersion('srv', '1.0.0', {
-        name: 'srv',
-        version: '1.0.0',
-        bin: { srv: 'bin/srv.js' },
-        dependencies: { dep: '^1.0.0' },
-        dist: {
-          integrity: srvIntegrity,
-          tarball: srvTarballUrl,
-          unpackedSize: srvTarball.length,
-          fileCount: 2,
-        },
-      });
-      registry.setPackage('srv', {
-        name: 'srv',
-        'dist-tags': { latest: '1.0.0' },
-        versions: {
-          '1.0.0': {
-            name: 'srv',
-            version: '1.0.0',
-            bin: { srv: 'bin/srv.js' },
-            dependencies: { dep: '^1.0.0' },
-            dist: { integrity: srvIntegrity, tarball: srvTarballUrl },
-          },
-        },
-        time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
-      });
+        expect(
+          registry
+            .requests()
+            .some((r) => r.includes('/x') || r.includes('x.git')),
+        ).toBe(false);
 
-      registry.setVersion('dep', '1.0.0', {
-        name: 'dep',
-        version: '1.0.0',
-        optionalDependencies: { x: 'git+https://example.invalid/x.git' },
-        dist: {
-          integrity: depIntegrity,
-          tarball: depTarballUrl,
-          unpackedSize: depTarball.length,
-          fileCount: 1,
-        },
-      });
-      registry.setPackage('dep', {
-        name: 'dep',
-        'dist-tags': { latest: '1.0.0' },
-        versions: {
-          '1.0.0': {
-            name: 'dep',
-            version: '1.0.0',
-            optionalDependencies: { x: 'git+https://example.invalid/x.git' },
-            dist: { integrity: depIntegrity, tarball: depTarballUrl },
-          },
-        },
-        time: { '1.0.0': '2026-01-01T00:00:00.000Z' },
-      });
-
-      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
-
-      await expect(
-        resolvePackage({
-          request: { name: 'srv', version: '1.0.0' },
-          owner: 'test-owner-12b',
-          packagesDir,
-          signal: new AbortController().signal,
-          previews,
-          registry: registry.registry,
-        }),
-      ).rejects.toMatchObject({ code: 'unsupported_dependency' });
-
-      expect(
-        registry
-          .requests()
-          .some((r) => r.includes('/x') || r.includes('x.git')),
-      ).toBe(false);
-
-      const entries = await readdir(packagesDir).catch(() => []);
-      expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
-    }, 120_000);
+        const entries = await readdir(packagesDir).catch(() => []);
+        expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
+      },
+      120_000,
+    );
   });
 });

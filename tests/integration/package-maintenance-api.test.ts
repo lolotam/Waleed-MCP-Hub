@@ -258,12 +258,16 @@ async function login(hub: Awaited<ReturnType<typeof createHubServer>>) {
   };
 }
 
+// The poll of a job: the read-only package routes answer 429 after six
+// hundred requests a minute, so the poll waits longer and longer until the
+// job is over.
 async function waitForJobApi(
   hub: Awaited<ReturnType<typeof createHubServer>>,
   jobId: string,
   headers: Record<string, string>,
 ): Promise<PackageJob> {
   const deadline = Date.now() + 20_000;
+  let wait = 25;
   while (Date.now() < deadline) {
     const res = await hub.app.inject({
       method: 'GET',
@@ -274,7 +278,8 @@ async function waitForJobApi(
       const job = res.json<PackageJob>();
       if (job.completedAt) return job;
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    wait = Math.min(wait * 2, 1000);
   }
   throw new Error(`Job ${jobId} timed out waiting for completion`);
 }
@@ -289,7 +294,7 @@ describe('package-maintenance-api', { timeout: 60_000 }, () => {
 
   beforeAll(async () => {
     sharedTls = await createTestTls();
-  });
+  }, 60_000);
 
   afterAll(async () => {
     if (sharedTls) await sharedTls.dispose();

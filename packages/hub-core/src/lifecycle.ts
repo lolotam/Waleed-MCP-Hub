@@ -6,7 +6,7 @@ import {
   type Job,
   type OperationPreview,
 } from '@waleed/contracts';
-import { HubError } from './errors.js';
+import { HubError, RevisionConflictError } from './errors.js';
 import type { StateStore } from './state.js';
 import {
   createMemorySafetyLedger,
@@ -379,8 +379,7 @@ export function createLifecycle(
         if (!draft || draft.owner !== owner)
           throw new HubError('not_found', 'Preview is missing or expired.');
         if ((await store.read()).revision !== draft.input.expectedRevision)
-          throw new HubError(
-            'conflict',
+          throw new RevisionConflictError(
             'Inventory changed. Create a new preview.',
           );
         if (jobs.size >= 100) {
@@ -426,6 +425,14 @@ export function createLifecycle(
       } finally {
         accepting = false;
       }
+    },
+    // The removal of a draft that will never be applied. Only the owner of
+    // the draft can drop it, and nothing else happens: no job, no state and
+    // no file.
+    discard(previewId: string, owner: string): void {
+      const draft = drafts.get(previewId);
+      if (!draft || draft.owner !== owner) return;
+      drafts.delete(previewId);
     },
     // The internal replacement of an installed package. Only the package
     // service calls it; it is never exposed through an HTTP route.
@@ -515,6 +522,7 @@ export function createLifecycle(
     const host: PackageHost = {
       preview: (raw, owner, context) => lifecycle.preview(raw, owner, context),
       apply: (previewId, owner) => lifecycle.apply(previewId, owner),
+      discard: (previewId, owner) => lifecycle.discard(previewId, owner),
       replacePackage: (input, owner) => lifecycle.replacePackage(input, owner),
       drain: () => lifecycle.drain(),
       job: (id, owner) => lifecycle.job(id, owner),

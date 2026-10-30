@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type {
@@ -21,7 +21,7 @@ import {
   type RegistryTarget,
 } from './npm.js';
 import { PREVIEW_TTL_MS, type PreviewStore } from './previews.js';
-import { jobDirectory, removeTree } from './store.js';
+import { jobDirectory, readOwnedFile, removeTree } from './store.js';
 import {
   WATCHDOG_MAX_BYTES,
   WATCHDOG_MAX_FILES,
@@ -46,7 +46,9 @@ const REGISTRY_SPEC_TYPES = new Set(['range', 'version', 'tag']);
 const MAX_ABBREVIATED_BYTES = 8 * 1024 * 1024;
 const MAX_VERSION_DOCUMENT_BYTES = 2 * 1024 * 1024;
 const MAX_FULL_PACKUMENT_BYTES = 32 * 1024 * 1024;
-const MAX_LOCK_BYTES = 16 * 1024 * 1024;
+// The cap of the frozen lock. The install writes the very same bytes, so it
+// caps them the same way.
+export const MAX_LOCK_BYTES = 16 * 1024 * 1024;
 const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_UNPACKED_BYTES = 500 * 1024 * 1024;
 const MAX_FILE_COUNT = 50_000;
@@ -101,7 +103,9 @@ const asNumber = (value: unknown): number | null => {
 // because a tag-shaped spec such as "tool.tgz" is a file to npm.
 export const isRegistrySpec = (spec: string): boolean => {
   if (typeof spec !== 'string') return false;
-  if (spec.length === 0 || spec.length > 256) return false;
+  // An empty range is the range "*": npm reads it as every release of the
+  // registry, so it is a registry range and not a file.
+  if (spec.length > 256) return false;
   let type: string;
   try {
     type = npa.resolve('placeholder', spec).type;
@@ -469,10 +473,8 @@ export const resolvePackage = async (
 
     // The frozen lock.
     const lockPath = join(paths.project, 'package-lock.json');
-    const info = await lstat(lockPath);
-    if (!info.isFile() || info.nlink !== 1 || info.size > MAX_LOCK_BYTES)
-      throw new PackageFault('install_failed');
-    const lockBytes = await readFile(lockPath);
+    const lockBytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES);
+    if (!lockBytes) throw new PackageFault('install_failed');
     let lock: unknown;
     try {
       lock = JSON.parse(lockBytes.toString('utf8'));

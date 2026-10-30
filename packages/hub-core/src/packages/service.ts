@@ -14,7 +14,7 @@ import {
   type PackageProvenance,
   type PackageWarning,
 } from '@waleed/contracts';
-import { HubError } from '../errors.js';
+import { HubError, isRevisionConflict } from '../errors.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
 import {
   packageArguments,
@@ -90,6 +90,9 @@ export interface PackageHost {
     context?: RegistryContext,
   ): Promise<OperationPreview>;
   apply(previewId: string, owner: string): Promise<Job>;
+  // The removal of a draft that will never be applied. It removes only the
+  // caller's own draft and does nothing else.
+  discard(previewId: string, owner: string): void;
   // The internal replacement of an installed package. Only the service calls
   // it; it is never exposed through an HTTP route.
   replacePackage(input: PackageReplaceInput, owner: string): Promise<Job>;
@@ -176,9 +179,6 @@ export function createPackageService(
   // the first job runs npm. The test starts lazily, so creating the service
   // stays synchronous and cheap.
   let selfTestPromise: Promise<void> | null = null;
-  // The folder of the self-test stays protected for the life of the service:
-  // the reconciliation pass never deletes it while the test runs.
-  let selfTestStarted = false;
 
   // The real self-test: the bundled npm in its own job folder, which is
   // removed again when the test is over.
@@ -207,7 +207,6 @@ export function createPackageService(
     adapter.selfTest ?? (adapter.runner === undefined ? bundledSelfTest : null);
 
   const startSelfTest = (): Promise<void> => {
-    selfTestStarted = true;
     return Promise.resolve().then(() => selfTest!());
   };
 
@@ -488,11 +487,14 @@ export function createPackageService(
     const env: Record<string, string> = { ...request.env };
     const connectorId = `package-${randomUUID()}`;
     // The slot is taken before the first await, so two installs never pass the
-    // check at the same time.
-    if (installs >= MAX_INSTALLS)
-      throw new HubError('busy', 'A package install is already running.');
-    installs += 1;
+    // check at the same time. The refusal is inside the scope that blanks the
+    // values: a busy install keeps no credential value in memory.
+    let slotTaken = false;
     try {
+      if (installs >= MAX_INSTALLS)
+        throw new HubError('busy', 'A package install is already running.');
+      installs += 1;
+      slotTaken = true;
       const names = Object.keys(env);
       if (names.length > MAX_ENV_NAMES)
         throw new HubError(
@@ -532,7 +534,7 @@ export function createPackageService(
       }
       reserve();
     } catch (error) {
-      installs -= 1;
+      if (slotTaken) installs -= 1;
       blank(rawEnv);
       blank(env);
       blank(request.env);
@@ -581,23 +583,42 @@ export function createPackageService(
       );
       const context = contextFor(provenance);
       let busy = false;
+      // The draft of the save. It is built once and applied again while the
+      // registry is busy, so a retry never leaves an unused draft behind.
+      let previewId: string | null = null;
       for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
         let applied: Job;
         try {
-          const current = await host.inventory();
-          const preview = await host.preview(
-            {
-              kind: 'create_connector',
-              expectedRevision: current.revision,
-              definition: saved,
-            },
-            owner,
-            context,
-          );
-          applied = await host.apply(preview.id, owner);
+          if (previewId === null) {
+            const current = await host.inventory();
+            const preview = await host.preview(
+              {
+                kind: 'create_connector',
+                expectedRevision: current.revision,
+                definition: saved,
+              },
+              owner,
+              context,
+            );
+            previewId = preview.id;
+          }
+          applied = await host.apply(previewId, owner);
         } catch (error) {
+          // A busy mutation committed nothing: the same draft is applied
+          // again, so the retry costs no second preview.
           if (error instanceof HubError && error.code === 'busy') {
             busy = true;
+            await delay(SAVE_RETRY_MS);
+            continue;
+          }
+          // The inventory moved between the inventory read and the apply:
+          // nothing was committed, so the save is tried again with the
+          // revision of the moment, exactly like a busy runtime. The stale
+          // draft is dropped before the new one is built.
+          if (isRevisionConflict(error)) {
+            busy = true;
+            if (previewId !== null) host.discard(previewId, owner);
+            previewId = null;
             await delay(SAVE_RETRY_MS);
             continue;
           }
@@ -845,8 +866,9 @@ export function createPackageService(
       if (entry.folderId) active.add(entry.folderId);
     }
     for (const id of previews.jobIds()) active.add(id);
-    // The folder of the self-test is never deleted by the reconciliation.
-    if (selfTestStarted) active.add(SELF_TEST_JOB_ID);
+    // The folder of the self-test is never deleted by the reconciliation: it
+    // counts as active from the start, not only while the test runs.
+    active.add(SELF_TEST_JOB_ID);
     return active;
   };
 
