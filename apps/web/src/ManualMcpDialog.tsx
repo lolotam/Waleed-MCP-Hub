@@ -143,7 +143,7 @@ export function ManualMcpDialog({
         id="manual-type"
         value={type}
         // Leaving the npm flow mid-job would drop the job's result.
-        disabled={packageRunning}
+        disabled={busy || packageRunning}
         onChange={(event) => {
           clear();
           setType(event.target.value as typeof type);
