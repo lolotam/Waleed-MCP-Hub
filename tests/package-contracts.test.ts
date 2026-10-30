@@ -439,15 +439,20 @@ describe('F01 package contracts', () => {
       ).toBe(true);
     });
 
-    it.each(['^1.2.3', '~1.9.0', '>=1.0.0 <2.0.0', '1.x', 'next', 'beta-2'])(
-      'accepts the range or dist-tag %s',
-      (version) => {
-        expect(
-          PackageResolveRequestSchema.safeParse({ name: 'srv', version })
-            .success,
-        ).toBe(true);
-      },
-    );
+    it.each([
+      '^1.2.3',
+      '~1.9.0',
+      '>=1.0.0 <2.0.0',
+      '1.x',
+      'next',
+      'beta-2',
+      '123beta',
+      '_canary',
+    ])('accepts the range or dist-tag %s', (version) => {
+      expect(
+        PackageResolveRequestSchema.safeParse({ name: 'srv', version }).success,
+      ).toBe(true);
+    });
 
     it.each([
       '1.0.0-01',

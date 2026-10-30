@@ -29,20 +29,24 @@ import {
   withWatchdog,
 } from './watchdog.js';
 
-// The semver and the spec parser of the bundled npm: the hub never depends on
-// copies of its own, so the pinned npm is the only source of the spec rules.
+// The semver, the spec parser and the release picker of the bundled npm: the
+// hub never depends on copies of its own, so the pinned npm is the only source
+// of the spec rules and of the choice of a release.
 const npmRequire = createRequire(import.meta.url);
 const bundledRequire = createRequire(npmRequire.resolve('npm/package.json'));
 interface SemverModule {
   satisfies(version: string, range: string): boolean;
-  validRange(range: string): string | null;
-  maxSatisfying(versions: string[], range: string): string | null;
 }
+type PickManifest = (
+  packument: unknown,
+  wanted: string,
+) => { version?: unknown };
 interface NpaModule {
   resolve(name: string, spec: string): { type: string };
 }
 const semver = bundledRequire('semver') as SemverModule;
 const npa = bundledRequire('npm-package-arg') as NpaModule;
+const pickManifest = bundledRequire('npm-pick-manifest') as PickManifest;
 const REGISTRY_SPEC_TYPES = new Set(['range', 'version', 'tag']);
 
 const MAX_ABBREVIATED_BYTES = 8 * 1024 * 1024;
@@ -104,19 +108,23 @@ const asNumber = (value: unknown): number | null => {
 // semver range or a dist-tag. A file, a link, a workspace, an alias, a git
 // reference, an URL and a path are all refused. npm's own parser decides,
 // because a tag-shaped spec such as "tool.tgz" is a file to npm.
-export const isRegistrySpec = (spec: string): boolean => {
-  if (typeof spec !== 'string') return false;
+// The kind npm gives a spec, or null when it is not a registry release.
+const registrySpecType = (spec: string): string | null => {
+  if (typeof spec !== 'string') return null;
   // An empty range is the range "*": npm reads it as every release of the
   // registry, so it is a registry range and not a file.
-  if (spec.length > 256) return false;
-  let type: string;
+  if (spec.length > 256) return null;
   try {
-    type = npa.resolve('placeholder', spec).type;
+    const type = npa.resolve('placeholder', spec).type;
+    return REGISTRY_SPEC_TYPES.has(type) ? type : null;
   } catch {
-    return false;
+    return null;
   }
-  if (!REGISTRY_SPEC_TYPES.has(type)) return false;
-  return type !== 'tag' || DIST_TAG.test(spec);
+};
+
+export const isRegistrySpec = (spec: string): boolean => {
+  const type = registrySpecType(spec);
+  return type !== null && (type !== 'tag' || DIST_TAG.test(spec));
 };
 
 // The name behind a lock key: "node_modules/a/node_modules/@scope/b" is
@@ -360,13 +368,16 @@ export const resolvePackage = async (
     ...(registry.ca === undefined ? {} : { ca: registry.ca }),
   });
 
-  // The release: an exact version as given; otherwise the abbreviated
-  // packument picks it the way npm does. A dist-tag (latest when none is given)
-  // names its release; for a range, the latest tag when it satisfies the range,
-  // else the highest version that does. Then the full version document.
+  // The release: an exact version as given; otherwise the picker of the
+  // bundled npm chooses it from the abbreviated packument, as npx would: a
+  // dist-tag (latest when none is given) names its release; for a range it
+  // prefers the latest tag, then releases that are not deprecated and whose
+  // engines match. The selector is only a key into that document and never
+  // reaches npm. Then the full version document of the picked release.
   let version = request.version ?? 'latest';
   if (!exactVersion.safeParse(version).success) {
-    if (!isRegistrySpec(version)) throw new PackageFault('version_not_found');
+    if (registrySpecType(version) === null)
+      throw new PackageFault('version_not_found');
     const packument = asRecord(
       await fetcher.getJson(registryPath(name), {
         maxBytes: MAX_ABBREVIATED_BYTES,
@@ -375,21 +386,11 @@ export const resolvePackage = async (
       }),
     );
     if (!packument) throw new PackageFault('package_not_found');
-    const tags = asRecord(packument['dist-tags']);
-    const range = semver.validRange(version);
     let picked: unknown;
-    if (range === null) picked = tags?.[version];
-    else {
-      const latest = tags?.latest;
-      const versions = Object.keys(asRecord(packument.versions) ?? {}).filter(
-        (key) => exactVersion.safeParse(key).success,
-      );
-      picked =
-        typeof latest === 'string' &&
-        versions.includes(latest) &&
-        semver.satisfies(latest, range)
-          ? latest
-          : semver.maxSatisfying(versions, range);
+    try {
+      picked = pickManifest(packument, version).version;
+    } catch {
+      throw new PackageFault('version_not_found');
     }
     if (typeof picked !== 'string' || !exactVersion.safeParse(picked).success)
       throw new PackageFault('version_not_found');

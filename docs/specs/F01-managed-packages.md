@@ -168,10 +168,12 @@ no redirects to other hosts, and size limits.
    version documents do not carry `hasInstallScript`; that field belongs to
    abbreviated metadata and is not used from there.) For anything but an exact
    version, first read the abbreviated packument (≤ 8 MiB) and pick the release
-   the way npm does: a dist-tag names it (`latest` when none is given); for a
-   range, `latest` when it satisfies the range, else the highest release that
-   does. The selector must also be a registry spec to npm's own parser, so a
-   tag-shaped file name such as `tool.tgz` is refused. Only the picked exact
+   the way npx would, with the picker of the bundled npm (`npm-pick-manifest`):
+   a dist-tag names it (`latest` when none is given); for a range it prefers
+   `latest`, then releases that are not deprecated and whose `engines` match.
+   The selector must also be a registry range or tag to npm's own parser, so a
+   tag-shaped file name such as `tool.tgz` is refused; any tag npm accepts is
+   accepted. The selector is only a key into the packument and never reaches npm. Only the picked exact
    version goes on: the frozen lock never holds a range. Release date comes from the
    full packument's `time[version]` (≤ 32 MiB, streamed); if that is too large or
    missing, the preview shows "release date unknown" as a warning.

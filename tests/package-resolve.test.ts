@@ -1394,6 +1394,7 @@ describe('package-resolve', { timeout: 60_000 }, () => {
         'dist-tags': {
           latest: '1.0.0',
         },
+        versions: { '1.0.0': { version: '1.0.0' } },
         time: {
           '1.0.0': '2026-01-01T00:00:00.000Z',
         },
@@ -1446,8 +1447,10 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       expect(abbreviatedReqHeader).toBeDefined();
     });
 
-    // A packument with four releases, latest 1.4.0 and next 2.0.0-rc.1, and
-    // the lookup of one selector: the picked release, or the fault.
+    // A packument with latest 1.4.0, next 2.0.0-rc.1, a deprecated 1.9.2, a
+    // 1.9.3 for no Node at all, and tags npm accepts but a narrow grammar would
+    // not; the lookup of one selector: the picked release, or the fault.
+    const longTag = 'a'.repeat(80);
     const resolveSelector = async (
       version: string,
       picked: string,
@@ -1456,12 +1459,32 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       const packagesDir = join(tempDir, 'packages');
       await mkdir(packagesDir, { recursive: true });
       const registry = await createRegistry();
-      const releases = ['1.2.0', '1.4.0', '1.9.1', '2.0.0-rc.1'];
+      const releases = [
+        '1.2.0',
+        '1.4.0',
+        '1.9.1',
+        '1.9.2',
+        '1.9.3',
+        '2.0.0-rc.1',
+      ];
       registry.set('/srv', {
         name: 'srv',
-        'dist-tags': { latest: '1.4.0', next: '2.0.0-rc.1' },
+        'dist-tags': {
+          latest: '1.4.0',
+          next: '2.0.0-rc.1',
+          '123beta': '1.2.0',
+          _canary: '1.2.0',
+          [longTag]: '1.2.0',
+        },
         versions: Object.fromEntries(
-          releases.map((release) => [release, { version: release }]),
+          releases.map((release) => [
+            release,
+            {
+              version: release,
+              ...(release === '1.9.2' ? { deprecated: 'broken' } : {}),
+              ...(release === '1.9.3' ? { engines: { node: '<1' } } : {}),
+            },
+          ]),
         ),
       });
       for (const release of releases)
@@ -1506,9 +1529,17 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       expect((await resolveSelector('^1.2.0', '1.4.0')).version).toBe('1.4.0');
     });
 
-    it('resolves a range the latest tag misses to its highest release', async () => {
+    it('resolves a range the latest tag misses to its highest usable release', async () => {
+      // 1.9.3 runs on no Node and 1.9.2 is deprecated: npm skips both.
       expect((await resolveSelector('~1.9.0', '1.9.1')).version).toBe('1.9.1');
     });
+
+    it.each(['123beta', '_canary', longTag])(
+      'resolves the dist-tag %s, which npm accepts',
+      async (tag) => {
+        expect((await resolveSelector(tag, '1.2.0')).version).toBe('1.2.0');
+      },
+    );
 
     it('resolves a dist-tag to the release it names', async () => {
       expect((await resolveSelector('next', '2.0.0-rc.1')).version).toBe(

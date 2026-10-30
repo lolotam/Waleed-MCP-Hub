@@ -25,7 +25,9 @@ const VersionSelectorSchema = z
   .string()
   .min(1)
   .max(256)
-  .regex(/^[0-9A-Za-z*^~<>=](?:[0-9A-Za-z.*+~^<>=| -]*[0-9A-Za-z.*+~^<>=|-])?$/)
+  .regex(
+    /^[0-9A-Za-z_*^~<>=](?:[0-9A-Za-z_.*+~^<>=| -]*[0-9A-Za-z_.*+~^<>=|-])?$/,
+  )
   .refine(
     (value) =>
       /\s/.test(value) ||
