@@ -99,8 +99,11 @@ or rename that `node_modules`; reinstalling won't help.
 
 ## A package connector says its definition does not match its package record
 
-An environment value starts with `NODE_` or is an OpenSSL variable; that is the
-only cause of this message. Remove that binding under **Edit**. The row also
+An environment variable name starts with `NODE_` or is an OpenSSL variable name
+(`OPENSSL_CONF`, `OPENSSL_MODULES`, `OPENSSL_ENGINES`, `SSL_CERT_FILE`,
+`SSL_CERT_DIR`); that is the only cause of this message. Check the names, not the
+values. Remove that binding under **Edit**, then **Approve execution** again and
+run **Test capabilities**. The row also
 offers **Reinstall** and mentions a moved hub folder, but neither applies here:
 reinstalling won't help. (A moved hub folder shows a different symptom, see the
 [next section](#a-package-connector-stopped-starting-after-i-moved-the-hub-folder).)
@@ -115,9 +118,11 @@ files** still passes (the installed files did not change), and **Reinstall** is
 not offered.
 
 - If **Check for update** finds a newer version, **Update to x.y.z** installs it
-  on the current `node.exe`. Approve it again.
-- Otherwise, remove the connector and install the package again, then re-enter
-  its protected values. Moving the hub folder back also works.
+  on the current `node.exe`. **Approve execution** again, then run **Test
+  capabilities**.
+- Otherwise, remove the connector and install the package again, re-enter its
+  protected values, then **Approve execution** and run **Test capabilities**.
+  Moving the hub folder back also works.
 
 The install folder itself lives in `%LOCALAPPDATA%\WaleedMcpHub\packages\` and does
 not move with the hub folder.
