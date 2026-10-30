@@ -5,9 +5,17 @@ import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
+  ListToolsResultSchema,
+  CallToolResultSchema,
+  ToolListChangedNotificationSchema,
+  ErrorCode,
+  McpError,
+  type CallToolResult,
+  type ListToolsResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -25,15 +33,138 @@ import { ContainedStdioTransport } from '../adapters/mcp/stdio.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
 import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
 import { approved, definitionHash, hashData } from '../runtime/registry.js';
+import { RuntimeFault } from '../runtime/capabilities.js';
+import { readBootRecord } from '../runtime/boot.js';
 import { dockerAgentTransport } from './docker-transport.js';
 import { packagesRoot } from '../packages/store.js';
 import { verifyPackage } from '../packages/verify.js';
+import {
+  createSessionPool,
+  type OperationLease,
+  type SessionPool,
+} from './session-pool.js';
 
 export interface BridgePeer {
   client: Client;
   dispose(): Promise<void>;
   assertPublic(value: unknown): void;
+  // The earliest expiry of the peer's lease, when it resolved one.
+  notAfter?: number;
+  // The peer's operation window (session mode only).
+  beginOperation?(): void;
+  endOperation?(): void;
 }
+
+// The three texts an agent ever receives. No diagnostic, argument, result or
+// server output ever reaches the agent.
+const registryUnavailableText =
+  'The managed hub registry is unavailable. Inspect local recovery.';
+const refreshToolsText = 'Refresh the hub tool list before using this tool.';
+const connectorUnavailableText =
+  'The connector is unavailable, changed, disabled, or requires authentication. Inspect the hub and refresh tools.';
+
+// The operation deadlines of the spec: a call may take a minute, a listing
+// twenty seconds per connector.
+const callTimeout = 60_000;
+const listTimeout = 20_000;
+// The lease ends thirty seconds before the peer may serve another request.
+const leaseMargin = 30_000;
+// The shutdown sequence gives the pooled peers five seconds to go away.
+const poolCloseDeadline = 5_000;
+// A hub that restarts again during one operation ends it: the peer is replaced
+// a few times at most.
+const maxReplacements = 3;
+
+export interface BridgeSnapshot {
+  seq: number;
+  state: HubState;
+  bootId: string;
+}
+
+export interface BridgeSession {
+  // Serialised, numbered reads. `inside` runs synchronously inside the same
+  // mutex right after the read (successful or failed), before the next read.
+  snapshot(
+    inside?: (result: BridgeSnapshot | { seq: number; failed: true }) => void,
+  ): Promise<BridgeSnapshot>;
+  // The full, cancellable package verification of a managed connector.
+  verify(connector: Connector, signal: AbortSignal): Promise<void>;
+  now(): number;
+  setTimer(callback: () => void, ms: number): unknown;
+  clearTimer(handle: unknown): void;
+}
+
+export type BridgeConnect = (
+  connector: Connector,
+  signal: AbortSignal,
+  died?: () => void,
+) => Promise<BridgePeer>;
+
+// The bridge the agent talks to. It is the SDK server plus the reconciliation
+// the watcher triggers.
+export interface AgentBridgeServer extends Server {
+  reconcile(): Promise<void>;
+}
+
+// One pooled native peer: the peer itself and the stamps it was authorised
+// with.
+interface PooledPeer {
+  peer: BridgePeer;
+  definitionHash: string;
+  credentials: string;
+  bootId: string;
+}
+
+// The registry could not be read: the bridge fails closed.
+class RegistryUnavailable extends Error {
+  constructor() {
+    super(registryUnavailableText);
+  }
+}
+
+// A peer may not serve this request any more: it is invalidated.
+class PeerRefused extends Error {}
+
+// The agent used a tool of a definition that is no longer current. The peer
+// stays; only this request is refused.
+class StaleTool extends Error {}
+
+// The peer answered the request with a JSON-RPC error: an ordinary tool
+// failure, so the peer keeps serving.
+class PeerAnswered extends Error {}
+
+// Every other failure (timeout, closed connection, a result that fails its
+// schema, a refused validation) ends the peer.
+const peerAnswered = (error: unknown) =>
+  error instanceof McpError &&
+  error.code !== ErrorCode.RequestTimeout &&
+  error.code !== ErrorCode.ConnectionClosed;
+
+// The credential stamp of a connector: the sorted, de-duplicated ids of its
+// secret and header bindings with the reference state that authorised them.
+// A missing reference is null; the stamp never carries a secret value.
+function credentialStamp(connector: Connector, state: HubState) {
+  const ids = [
+    ...new Set([
+      ...Object.values(connector.secretBindings),
+      ...Object.values(connector.headerBindings),
+    ]),
+  ].sort();
+  return JSON.stringify(
+    ids.map((id) => {
+      const reference = state.secretReferences.find((item) => item.id === id);
+      if (!reference) return null;
+      return {
+        id,
+        adapter: reference.adapter,
+        present: reference.present,
+        kind: reference.kind ?? null,
+        owned: reference.ownerIds.includes(connector.id),
+      };
+    }),
+  );
+}
+
 // Provider cleanup diagnostics can contain credentials. Recovery evidence stays
 // local; a failed peer must never expose a raw SDK/process error to an agent.
 async function disposePeer(peer: BridgePeer | undefined) {
@@ -80,9 +211,345 @@ export function bridgeToolName(
   const suffix = `_${hashData([connector.id, tool]).slice(0, 6)}`;
   return `${name.slice(0, toolNameLimit - suffix.length).replace(/[_-]+$/, '')}${suffix}`;
 }
+
+// The session mode of the bridge: one pool of native peers, the validation
+// before every dispatch and the reconciliation the watcher triggers.
+interface SessionBridge {
+  // The numbered registry snapshot; it fails closed.
+  snapshot(): Promise<BridgeSnapshot>;
+  // The pooled listing of one native connector.
+  list(
+    connector: Connector,
+    signal: AbortSignal,
+    budget: number,
+  ): Promise<Tool[]>;
+  // The pooled call of one native connector.
+  call(
+    connector: Connector,
+    expectedHash: string,
+    tool: string,
+    args: unknown,
+    signal: AbortSignal,
+  ): Promise<CallToolResult>;
+  // Reconciles the pooled peers with the registry.
+  reconcile(): Promise<void>;
+  // Closes the pool.
+  close(): Promise<void>;
+}
+
+function createSessionBridge(
+  session: BridgeSession,
+  connect: BridgeConnect,
+  server: Server,
+): SessionBridge {
+  let closed = false;
+  // The peer's own tool list changes reach the agent, at most once a second.
+  let changedAt = Number.NEGATIVE_INFINITY;
+  let changedTimer: unknown;
+  const changed = () => {
+    if (closed) return;
+    const now = session.now();
+    const wait = 1000 - (now - changedAt);
+    if (wait <= 0) {
+      changedAt = now;
+      void server.sendToolListChanged().catch(() => undefined);
+      return;
+    }
+    if (changedTimer === undefined)
+      changedTimer = session.setTimer(() => {
+        changedTimer = undefined;
+        changedAt = session.now();
+        void server.sendToolListChanged().catch(() => undefined);
+      }, wait);
+  };
+  const pool: SessionPool<PooledPeer> = createSessionPool<PooledPeer>({
+    // The startup authorisation: a fresh stable snapshot decides, before any
+    // secret is resolved and any process starts. The peer is started from
+    // that snapshot's definition and carries its stamps for its whole life.
+    async start(key, lifetime, died) {
+      if (closed) throw new PeerRefused();
+      const snapshot = await session.snapshot();
+      lifetime.throwIfAborted();
+      const connector = snapshot.state.connectors.find(
+        (item) => item.id === key,
+      );
+      if (
+        !connector ||
+        connector.executionMode !== 'native' ||
+        !connector.enabled ||
+        !approved(connector)
+      )
+        throw new PeerRefused();
+      // The handshake's window stays open: `initialize` counts against the
+      // first operation, which closes it.
+      const peer = await connect(connector, lifetime, died);
+      peer.client.setNotificationHandler(
+        ToolListChangedNotificationSchema,
+        () => {
+          changed();
+        },
+      );
+      return {
+        peer: {
+          peer,
+          definitionHash: definitionHash(connector),
+          credentials: credentialStamp(connector, snapshot.state),
+          bootId: snapshot.bootId,
+        },
+        ...(peer.notAfter === undefined ? {} : { notAfter: peer.notAfter }),
+        seq: snapshot.seq,
+      };
+    },
+    async dispose(pooled) {
+      await disposePeer(pooled.peer);
+    },
+    now: () => session.now(),
+    setTimer: (callback, ms) => session.setTimer(callback, ms),
+    clearTimer: (handle) => session.clearTimer(handle),
+  });
+
+  // The validation before one SDK request. A boot mismatch is not a failure:
+  // the peer is replaced and the caller dispatches on the fresh one.
+  const dispatch = async <T>(
+    connector: Connector,
+    expectedHash: string,
+    lease: OperationLease<PooledPeer>,
+    admission: boolean,
+    send: (peer: BridgePeer, signal: AbortSignal) => Promise<T>,
+  ): Promise<{ replaced: false; value: T } | { replaced: true }> => {
+    try {
+      // The agent's tool belongs to the definition it listed; a peer of a
+      // newer definition never serves it, even after a replacement. The
+      // serving peer's definition is immutable, so this is decided first and
+      // a stale caller never touches a healthy peer.
+      if (lease.peer.definitionHash !== expectedHash) throw new StaleTool();
+      // 1. A reused managed package is verified once per operation.
+      if (
+        admission &&
+        !lease.fresh &&
+        connector.executionMode === 'native' &&
+        connector.package
+      )
+        await session.verify(connector, lease.signal);
+      // 2. The registry snapshot.
+      let snapshot: BridgeSnapshot;
+      try {
+        snapshot = await session.snapshot();
+      } catch {
+        throw new RegistryUnavailable();
+      }
+      const pooled = lease.peer;
+      const current = snapshot.state.connectors.find(
+        (item) => item.id === connector.id,
+      );
+      // 3-6. The connector, its definition, its credentials and its lease.
+      if (!current || !current.enabled || !approved(current))
+        throw new PeerRefused();
+      if (definitionHash(current) !== pooled.definitionHash)
+        throw new PeerRefused();
+      if (credentialStamp(current, snapshot.state) !== pooled.credentials)
+        throw new PeerRefused();
+      if (
+        pooled.peer.notAfter !== undefined &&
+        pooled.peer.notAfter - session.now() <= leaseMargin
+      )
+        throw new PeerRefused();
+      // 7. The hub restarted under this peer.
+      if (snapshot.bootId !== pooled.bootId) {
+        await lease.replace();
+        return { replaced: true };
+      }
+      // 8. The request itself. The pool sees a peer's JSON-RPC answer as a
+      // result, so it does not count as a failure of the peer.
+      const outcome = await lease.request(
+        snapshot.seq,
+        admission,
+        async (signal): Promise<{ value: T } | { answered: true }> => {
+          try {
+            return { value: await send(lease.peer.peer, signal) };
+          } catch (error) {
+            if (peerAnswered(error)) return { answered: true };
+            // A request that timed out inside the SDK ends the peer: the server
+            // may keep working.
+            if (
+              error instanceof McpError &&
+              error.code === ErrorCode.RequestTimeout
+            )
+              throw new RuntimeFault('timed_out');
+            throw error;
+          }
+        },
+      );
+      if ('answered' in outcome) throw new PeerAnswered();
+      const value = outcome.value;
+      // A result that carries a credential never leaves the bridge and the
+      // peer that produced it is closed below.
+      lease.peer.peer.assertPublic(value);
+      return { replaced: false, value };
+    } catch (error) {
+      // Anything but a stale tool or a JSON-RPC error the peer answered ends
+      // the entry: a refused validation, an unreadable registry, a modified
+      // package, a protocol failure or an echoed credential.
+      if (!(error instanceof StaleTool) && !(error instanceof PeerAnswered))
+        lease.invalidate();
+      throw error;
+    }
+  };
+
+  const list = async (
+    connector: Connector,
+    signal: AbortSignal,
+    budget: number,
+  ): Promise<Tool[]> => {
+    const collected: Tool[] = [];
+    // The tools are registered under the definition of the listing snapshot.
+    const expectedHash = definitionHash(connector);
+    await pool.use(connector.id, signal, listTimeout, async (lease) => {
+      // The operation window covers every request of this operation, on
+      // whichever peer serves it.
+      let windowPeer = lease.peer.peer;
+      windowPeer.beginOperation?.();
+      try {
+        let admission = true;
+        let cursor: string | undefined;
+        let replacements = 0;
+        for (let page = 0; page < 8; page++) {
+          const outcome = await dispatch<ListToolsResult>(
+            connector,
+            expectedHash,
+            lease,
+            admission,
+            (peer, requestSignal) =>
+              peer.client.request(
+                {
+                  method: 'tools/list',
+                  params: cursor ? { cursor } : {},
+                },
+                ListToolsResultSchema,
+                { signal: requestSignal, timeout: listTimeout },
+              ),
+          );
+          if (outcome.replaced) {
+            // The hub restarted: the partial pages are discarded and the
+            // connector is listed once more on the fresh peer.
+            if (++replacements > maxReplacements) throw new PeerRefused();
+            windowPeer.endOperation?.();
+            windowPeer = lease.peer.peer;
+            windowPeer.beginOperation?.();
+            admission = true;
+            cursor = undefined;
+            collected.length = 0;
+            page = -1;
+            continue;
+          }
+          admission = false;
+          for (const tool of outcome.value.tools) {
+            if (collected.length >= budget) break;
+            collected.push(tool);
+          }
+          if (!outcome.value.nextCursor || collected.length >= budget) break;
+          cursor = outcome.value.nextCursor;
+        }
+      } finally {
+        windowPeer.endOperation?.();
+      }
+    });
+    return collected;
+  };
+
+  const call = async (
+    connector: Connector,
+    expectedHash: string,
+    tool: string,
+    args: unknown,
+    signal: AbortSignal,
+  ): Promise<CallToolResult> =>
+    pool.use(connector.id, signal, callTimeout, async (lease) => {
+      // The operation window covers the request of this operation, on
+      // whichever peer serves it.
+      let windowPeer = lease.peer.peer;
+      windowPeer.beginOperation?.();
+      try {
+        for (let attempt = 0; attempt <= maxReplacements; attempt++) {
+          const outcome = await dispatch<CallToolResult>(
+            connector,
+            expectedHash,
+            lease,
+            true,
+            (peer, requestSignal) =>
+              peer.client.request(
+                {
+                  method: 'tools/call',
+                  params: { name: tool, arguments: args },
+                },
+                CallToolResultSchema,
+                { signal: requestSignal, timeout: callTimeout },
+              ),
+          );
+          if (!outcome.replaced) return outcome.value;
+          windowPeer.endOperation?.();
+          windowPeer = lease.peer.peer;
+          windowPeer.beginOperation?.();
+        }
+        throw new PeerRefused();
+      } finally {
+        windowPeer.endOperation?.();
+      }
+    });
+
+  return {
+    async snapshot() {
+      try {
+        return await session.snapshot();
+      } catch {
+        throw new RegistryUnavailable();
+      }
+    },
+    list,
+    call,
+    async reconcile() {
+      await session
+        .snapshot((result) => {
+          const failed = 'failed' in result;
+          pool.reconcile(result.seq, (entry, pooled) => {
+            // A failed read invalidates every idle entry; a busy one fails at
+            // its own next validation, which takes a later snapshot.
+            if (failed) return entry.busy ? 'keep' : 'invalidate';
+            if (!pooled) return 'invalidate';
+            const snapshot = result as BridgeSnapshot;
+            const connector = snapshot.state.connectors.find(
+              (item) => item.id === entry.key,
+            );
+            // Revocation is checked against this generation's own stamps and
+            // wins over a graceful boot retirement.
+            if (!connector || !connector.enabled || !approved(connector))
+              return 'invalidate';
+            if (definitionHash(connector) !== pooled.definitionHash)
+              return 'invalidate';
+            if (
+              credentialStamp(connector, snapshot.state) !== pooled.credentials
+            )
+              return 'invalidate';
+            if (snapshot.bootId !== pooled.bootId) return 'retire';
+            return 'keep';
+          });
+        })
+        .catch(() => undefined);
+      await server.sendToolListChanged().catch(() => undefined);
+    },
+    async close() {
+      closed = true;
+      if (changedTimer !== undefined) session.clearTimer(changedTimer);
+      changedTimer = undefined;
+      await pool.close(poolCloseDeadline);
+    },
+  };
+}
+
 export function createAgentBridge(
   read: () => Promise<HubState>,
-  connect: (connector: Connector, signal: AbortSignal) => Promise<BridgePeer>,
+  connect: BridgeConnect,
+  session?: BridgeSession,
 ) {
   const server = new Server(
     { name: 'waleed-mcp-hub', version: '0.1.0' },
@@ -93,16 +560,18 @@ export function createAgentBridge(
     { connectorId: string; hash: string; name: string }
   >();
   let active = 0;
+  // Set synchronously when the bridge closes: no request is admitted and no
+  // peer is launched afterwards.
+  let closing = false;
   const readState = async () => {
     try {
       return await read();
     } catch {
-      throw new Error(
-        'The managed hub registry is unavailable. Inspect local recovery.',
-      );
+      throw new Error(registryUnavailableText);
     }
   };
   const admitted = async <T>(action: () => Promise<T>) => {
+    if (closing) throw new Error(connectorUnavailableText);
     if (active >= 2) throw new Error('Hub request concurrency limit reached.');
     active++;
     try {
@@ -111,62 +580,82 @@ export function createAgentBridge(
       active--;
     }
   };
+  const bridge = session
+    ? createSessionBridge(session, connect, server)
+    : undefined;
+  // The bridge tool name of one tool, and the route it belongs to.
+  const register = (connector: Connector, tool: Tool, tools: Tool[]) => {
+    const name = bridgeToolName(connector, tool.name, new Set(names.keys()));
+    names.set(name, {
+      connectorId: connector.id,
+      hash: definitionHash(connector),
+      name: tool.name,
+    });
+    tools.push({
+      ...tool,
+      name,
+      description: `${connector.name}: ${tool.description ?? tool.name}`.slice(
+        0,
+        1000,
+      ),
+    });
+  };
   server.setRequestHandler(ListToolsRequestSchema, (_request, extra) =>
     admitted(async () => {
       const signal = AbortSignal.any([
         extra.signal,
         AbortSignal.timeout(45000),
       ]);
-      const state = await readState();
+      const snapshot = bridge ? await bridge.snapshot() : undefined;
+      const state = snapshot ? snapshot.state : await readState();
       const tools: Tool[] = [];
       names.clear();
       for (const connector of state.connectors.filter(
         (item) => item.enabled && approved(item),
       )) {
         if (signal.aborted) break;
-        let peer: BridgePeer | undefined;
-        try {
-          const peerSignal = AbortSignal.any([
-            signal,
-            AbortSignal.timeout(20000),
-          ]);
-          peer = await connect(connector, peerSignal);
-          let cursor: string | undefined;
-          for (let page = 0; page < 8; page++) {
-            const result = await peer.client.listTools(
-              cursor ? { cursor } : {},
-              { signal: peerSignal, timeout: 20000 },
-            );
-            peer.assertPublic(result);
-            for (const tool of result.tools) {
-              if (tools.length >= 256) break;
-              const name = bridgeToolName(
-                connector,
-                tool.name,
-                new Set(names.keys()),
-              );
-              names.set(name, {
-                connectorId: connector.id,
-                hash: definitionHash(connector),
-                name: tool.name,
-              });
-              tools.push({
-                ...tool,
-                name,
-                description:
-                  `${connector.name}: ${tool.description ?? tool.name}`.slice(
-                    0,
-                    1000,
-                  ),
-              });
-            }
-            if (!result.nextCursor || tools.length >= 256) break;
-            cursor = result.nextCursor;
+        if (bridge && snapshot && connector.executionMode === 'native') {
+          // A pooled native peer: one process for the whole listing.
+          let listed: Tool[];
+          try {
+            listed = await bridge.list(connector, signal, 256 - tools.length);
+          } catch {
+            // Isolate unavailable/auth-required peers; never reflect
+            // diagnostics.
+            listed = [];
           }
-        } catch {
-          /* Isolate unavailable/auth-required peers; never reflect diagnostics. */
-        } finally {
-          await disposePeer(peer);
+          for (const tool of listed) {
+            if (tools.length >= 256) break;
+            register(connector, tool, tools);
+          }
+        } else {
+          let peer: BridgePeer | undefined;
+          try {
+            const peerSignal = AbortSignal.any([
+              signal,
+              AbortSignal.timeout(20000),
+            ]);
+            if (closing) throw new Error();
+            peer = await connect(connector, peerSignal);
+            let cursor: string | undefined;
+            for (let page = 0; page < 8; page++) {
+              const result = await peer.client.listTools(
+                cursor ? { cursor } : {},
+                { signal: peerSignal, timeout: 20000 },
+              );
+              peer.assertPublic(result);
+              for (const tool of result.tools) {
+                if (tools.length >= 256) break;
+                register(connector, tool, tools);
+              }
+              if (!result.nextCursor || tools.length >= 256) break;
+              cursor = result.nextCursor;
+            }
+          } catch {
+            /* Isolate unavailable/auth-required peers; never reflect diagnostics. */
+          } finally {
+            await disposePeer(peer);
+          }
         }
         if (tools.length >= 256) break;
       }
@@ -182,10 +671,78 @@ export function createAgentBridge(
           content: [
             {
               type: 'text' as const,
-              text: 'Refresh the hub tool list before using this tool.',
+              text: refreshToolsText,
             },
           ],
         };
+      if (bridge) {
+        // Session mode: the snapshot decides the route and the pooled peer
+        // serves the call.
+        let snapshot: BridgeSnapshot;
+        try {
+          snapshot = await bridge.snapshot();
+        } catch {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: registryUnavailableText,
+              },
+            ],
+          };
+        }
+        const connector = snapshot.state.connectors.find(
+          (item) => item.id === target.connectorId,
+        );
+        // The tool the agent used is stale: the connector changed since the
+        // listing.
+        if (!connector || definitionHash(connector) !== target.hash)
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: refreshToolsText,
+              },
+            ],
+          };
+        if (session && connector.executionMode === 'native') {
+          // The call's deadline runs on the session clock and ends with the
+          // call: a finished request leaves no deadline that could fire later.
+          const deadline = new AbortController();
+          const timer = session.setTimer(() => {
+            deadline.abort();
+          }, callTimeout);
+          try {
+            const result = await bridge.call(
+              connector,
+              target.hash,
+              target.name,
+              request.params.arguments,
+              AbortSignal.any([extra.signal, deadline.signal]),
+            );
+            return result;
+          } catch (error) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text' as const,
+                  text:
+                    error instanceof RegistryUnavailable
+                      ? registryUnavailableText
+                      : error instanceof StaleTool
+                        ? refreshToolsText
+                        : connectorUnavailableText,
+                },
+              ],
+            };
+          } finally {
+            session.clearTimer(timer);
+          }
+        }
+      }
       let peer: BridgePeer | undefined;
       try {
         const state = await readState();
@@ -202,6 +759,7 @@ export function createAgentBridge(
           extra.signal,
           AbortSignal.timeout(60000),
         ]);
+        if (closing) throw new Error();
         peer = await connect(connector, signal);
         // Recheck approval after startup, immediately before the explicit call.
         const latest = (await readState()).connectors.find(
@@ -229,7 +787,7 @@ export function createAgentBridge(
           content: [
             {
               type: 'text' as const,
-              text: 'The connector is unavailable, changed, disabled, or requires authentication. Inspect the hub and refresh tools.',
+              text: connectorUnavailableText,
             },
           ],
         };
@@ -238,7 +796,30 @@ export function createAgentBridge(
       }
     }),
   );
-  return server;
+  const bridgeServer = server as AgentBridgeServer;
+  bridgeServer.reconcile = async () => {
+    await bridge?.reconcile();
+  };
+  // The pooled peers go first: their budget is the shutdown budget.
+  const closeServer = server.close.bind(server);
+  server.close = async () => {
+    closing = true;
+    await bridge?.close();
+    await closeServer();
+  };
+  return bridgeServer;
+}
+async function readProtectedText(path: string) {
+  await assertNoLinks(path);
+  const info = await lstat(path);
+  if (!info.isFile() || info.nlink !== 1 || info.size > 4 * 1024 * 1024)
+    throw new Error();
+  const bytes = await readFile(path);
+  try {
+    return bytes.toString('utf8');
+  } finally {
+    bytes.fill(0);
+  }
 }
 async function readProtectedJson(path: string) {
   await assertNoLinks(path);
@@ -255,10 +836,10 @@ async function readProtectedJson(path: string) {
 export async function runAgentBridge(registry: string, agentId: string) {
   IntegrationAgentIdSchema.parse(agentId);
   const directory = dirname(registry);
+  const safetyPath = join(directory, 'safety.json');
+  const bootPath = join(directory, 'boot.json');
   const read = async () => {
-    const ledger = SafetyStateSchema.parse(
-      await readProtectedJson(join(directory, 'safety.json')),
-    );
+    const ledger = SafetyStateSchema.parse(await readProtectedJson(safetyPath));
     if (
       ledger.operations.some(
         (item) => item.phase === 'prepared' || item.phase === 'needs_review',
@@ -270,10 +851,77 @@ export async function runAgentBridge(registry: string, agentId: string) {
       throw new Error();
     return state;
   };
+  // The ledger as raw text: two reads of the same file must be identical.
+  const readLedger = async () => {
+    const text = await readProtectedText(safetyPath);
+    const ledger = SafetyStateSchema.parse(JSON.parse(text));
+    if (
+      ledger.operations.some(
+        (item) => item.phase === 'prepared' || item.phase === 'needs_review',
+      )
+    )
+      throw new Error();
+    return text;
+  };
+  // One stable snapshot: the ledger, the registry, the boot record and the
+  // ledger again. A ledger that changed during the read is read once more.
+  const readStable = async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const first = await readLedger();
+      const state = StateSchema.parse(await readProtectedJson(registry));
+      if (!state.integrations?.some((item) => item.agentId === agentId))
+        throw new Error();
+      const boot = await readBootRecord(directory);
+      const second = await readLedger();
+      if (first === second) return { state, bootId: boot.bootId };
+    }
+    throw new Error();
+  };
+  // One snapshot at a time: the sequence number follows the completion order.
+  let sequence = 0;
+  let tail: Promise<void> = Promise.resolve();
+  const takeSnapshot = async (
+    inside?: (result: BridgeSnapshot | { seq: number; failed: true }) => void,
+  ): Promise<BridgeSnapshot> => {
+    const previous = tail;
+    let release!: () => void;
+    tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      let snapshot: BridgeSnapshot;
+      try {
+        const read = await readStable();
+        sequence += 1;
+        snapshot = { seq: sequence, state: read.state, bootId: read.bootId };
+      } catch {
+        sequence += 1;
+        inside?.({ seq: sequence, failed: true });
+        throw new RegistryUnavailable();
+      }
+      inside?.(snapshot);
+      return snapshot;
+    } finally {
+      release();
+    }
+  };
+  const session: BridgeSession = {
+    snapshot: takeSnapshot,
+    async verify(connector, signal) {
+      await verifyPackage(connector, packagesRoot(directory), signal);
+    },
+    now: () => Date.now(),
+    setTimer: (callback, ms) => setTimeout(callback, ms),
+    clearTimer: (handle) => {
+      clearTimeout(handle as ReturnType<typeof setTimeout>);
+    },
+  };
   let backend: ReturnType<typeof windowsSecretStore> | undefined;
   const connect = async (
     connector: Connector,
     signal: AbortSignal,
+    diedCallback?: () => void,
   ): Promise<BridgePeer> => {
     let lease: SecretLease | undefined;
     const client = new Client(
@@ -285,7 +933,7 @@ export async function runAgentBridge(registry: string, agentId: string) {
       // A managed install is verified before the secret is resolved and before
       // any process starts.
       if (connector.executionMode === 'native' && connector.package)
-        await verifyPackage(connector, packagesRoot(directory));
+        await verifyPackage(connector, packagesRoot(directory), signal);
       const bound =
         Object.keys(connector.secretBindings).length ||
         Object.keys(connector.headerBindings).length;
@@ -315,27 +963,109 @@ export async function runAgentBridge(registry: string, agentId: string) {
           allowedExecutables: [connector.executable],
           workingDirectory: directory,
           concurrency: 1,
+          // A pooled peer keeps its process for the whole session.
+          session: true,
+          maxTimeoutMs: 3_660_000,
         });
-        await client.connect(
-          new ContainedStdioTransport(
-            runner,
-            {
-              executable: connector.executable,
-              arguments: isolatedNativeArguments(connector),
-              environment: {
-                ...connector.environmentLiterals,
-                ...lease?.environment,
-              },
-              timeoutMs: 120000,
-              outputLimitBytes: 1024 * 1024,
+        const transport = new ContainedStdioTransport(
+          runner,
+          {
+            executable: connector.executable,
+            arguments: isolatedNativeArguments(connector),
+            environment: {
+              ...connector.environmentLiterals,
+              ...lease?.environment,
             },
-            signal,
-          ),
-          { timeout: 20000 },
+            timeoutMs: 3_660_000,
+            outputLimitBytes: 64 * 1024 * 1024,
+            session: { inputLimitBytes: 16 * 1024 * 1024 },
+          },
+          signal,
         );
+        // The window opens before the handshake, so `initialize` counts against
+        // the first operation. It stays open until the first operation ends.
+        let windowOpen = false;
+        const beginOperation = () => {
+          if (windowOpen) return;
+          transport.beginOperation();
+          windowOpen = true;
+        };
+        const endOperation = () => {
+          if (!windowOpen) return;
+          transport.endOperation();
+          windowOpen = false;
+        };
+        const sessionTransport: Transport = {
+          onmessage: undefined,
+          onerror: undefined,
+          onclose: undefined,
+          setProtocolVersion: (version) =>
+            transport.setProtocolVersion?.(version),
+          async start() {
+            await transport.start();
+            beginOperation();
+          },
+          async send(message) {
+            await transport.send(message);
+          },
+          async close() {
+            await transport.close();
+          },
+        };
+        transport.onmessage = (message, extra) =>
+          sessionTransport.onmessage?.(message, extra);
+        // The death of the transport is observed before the handshake, and
+        // only once.
+        let died = false;
+        const signalDeath = () => {
+          if (died) return;
+          died = true;
+          diedCallback?.();
+        };
+        transport.onerror = (error) => {
+          signalDeath();
+          sessionTransport.onerror?.(error);
+        };
+        transport.onclose = () => {
+          signalDeath();
+          sessionTransport.onclose?.();
+        };
+        // A protocol error the SDK raises (an unknown response id, a malformed
+        // notification) ends the session as a transport error does, from the
+        // handshake on.
+        client.onerror = () => {
+          signalDeath();
+        };
+        await client.connect(sessionTransport, { timeout: 20000 });
+        return {
+          client,
+          ...(lease?.notAfter === undefined
+            ? {}
+            : { notAfter: lease.notAfter }),
+          beginOperation,
+          endOperation,
+          async dispose() {
+            try {
+              await client.close();
+            } finally {
+              try {
+                await docker?.dispose();
+              } finally {
+                lease?.dispose();
+              }
+            }
+          },
+          assertPublic(value) {
+            assertNoCredentialEcho(value, [
+              ...Object.values(lease?.environment ?? {}),
+              ...Object.values(lease?.headers ?? {}),
+            ]);
+          },
+        };
       }
       return {
         client,
+        ...(lease?.notAfter === undefined ? {} : { notAfter: lease.notAfter }),
         async dispose() {
           try {
             await client.close();
@@ -368,19 +1098,47 @@ export async function runAgentBridge(registry: string, agentId: string) {
     }
   };
   await read();
-  const server = createAgentBridge(read, connect);
+  const server = createAgentBridge(read, connect, session);
   await server.connect(new StdioServerTransport());
   const changed = () => {
-    void server.sendToolListChanged().catch(() => undefined);
+    void server.reconcile();
   };
   watchFile(registry, { interval: 1000, persistent: false }, changed);
-  const close = () => {
+  watchFile(safetyPath, { interval: 1000, persistent: false }, changed);
+  watchFile(bootPath, { interval: 1000, persistent: false }, changed);
+  // One shutdown sequence: the watchers stop, the pooled peers go first and
+  // the process leaves.
+  let stopping = false;
+  const stop = (code: number) => {
+    if (stopping) return;
+    stopping = true;
     unwatchFile(registry, changed);
-    void server.close();
+    unwatchFile(safetyPath, changed);
+    unwatchFile(bootPath, changed);
+    void server.close().then(
+      () => {
+        process.exit(code);
+      },
+      () => {
+        process.exit(code);
+      },
+    );
   };
-  process.stdin.once('end', close);
-  process.once('SIGINT', close);
-  process.once('SIGTERM', close);
+  process.stdin.once('end', () => {
+    stop(0);
+  });
+  process.once('SIGINT', () => {
+    stop(0);
+  });
+  process.once('SIGTERM', () => {
+    stop(0);
+  });
+  process.once('uncaughtException', () => {
+    stop(1);
+  });
+  process.once('unhandledRejection', () => {
+    stop(1);
+  });
 }
 if (
   process.argv[1] &&

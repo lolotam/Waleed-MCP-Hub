@@ -76,7 +76,10 @@ export interface SessionPool<P> {
   // once (marking only; disposal runs afterwards).
   reconcile(
     seq: number,
-    decide: (entry: EntryInfo) => 'keep' | 'retire' | 'invalidate',
+    decide: (
+      entry: EntryInfo,
+      peer: P | undefined,
+    ) => 'keep' | 'retire' | 'invalidate',
   ): void;
   close(deadlineMs: number): Promise<void>;
   readonly size: number;
@@ -765,7 +768,10 @@ export function createSessionPool<P>(
     },
     reconcile(
       seq: number,
-      decide: (entry: EntryInfo) => 'keep' | 'retire' | 'invalidate',
+      decide: (
+        entry: EntryInfo,
+        peer: P | undefined,
+      ) => 'keep' | 'retire' | 'invalidate',
     ) {
       // A starting entry is authorised by its own startup snapshot and by
       // dispatch validation before its first request.
@@ -774,7 +780,7 @@ export function createSessionPool<P>(
       );
       const decisions = targets.map((entry) => ({
         entry,
-        decision: decide(toInfo(entry)),
+        decision: decide(toInfo(entry), entry.peer),
       }));
       for (const { entry, decision } of decisions) {
         if (decision === 'retire') retireEntry(entry);
