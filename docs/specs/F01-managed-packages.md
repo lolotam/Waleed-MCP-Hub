@@ -172,8 +172,13 @@ no redirects to other hosts, and size limits.
    a dist-tag names it (`latest` when none is given); for a range it prefers
    `latest`, then releases that are not deprecated and whose `engines` match.
    The selector must also be a registry range or tag to npm's own parser, so a
-   tag-shaped file name such as `tool.tgz` is refused; any tag npm accepts is
-   accepted. The selector is only a key into the packument and never reaches npm. Only the picked exact
+   tag-shaped file name such as `tool.tgz` is refused. The contract keeps
+   its own narrower grammar on top: a selector starts with a letter, a digit,
+   `_` or a range operator and uses only letters, digits, `_ . * + ~ ^ < > = | -`
+   and inner spaces. A tag npm would also accept but that uses other characters
+   (`!`, `'`, `(`, `)`, or a leading `.` or `-`) is refused, and so is an
+   import naming one; such tags are rare, and the narrow grammar keeps every
+   scheme, path and alias character out. The selector is only a key into the packument and never reaches npm. Only the picked exact
    version goes on: the frozen lock never holds a range. Release date comes from the
    full packument's `time[version]` (≤ 32 MiB, streamed); if that is too large or
    missing, the preview shows "release date unknown" as a warning.
