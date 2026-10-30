@@ -1,8 +1,167 @@
 # Waleed MCP Hub — Actual Project Status
 
-Updated: 2026-10-29
+Updated: 2026-10-30
 
 ## Completed in this project
+
+- Task 20: final native launcher and portable distribution verification.
+  `node scripts/build-launcher.mjs` rebuilt root `WaleedMcpHub.exe` (16,896 bytes,
+  2026-10-30 01:34:21 UTC); its tray self-test exited 0 with exactly
+  `wmh-tray-v1:Open Waleed MCP Hub|Check Health|Exit`.
+  Root executable SHA-256:
+  `09B20A82CA08225BF411618519FFC37BD9089B782902BBE010A476C06D015DA4`.
+  The old running desktop was closed through its Settings shutdown control before
+  replacement, without force-killing it or changing startup registration. It was
+  not automatically restarted.
+  Final portable folder:
+  `desktop-builds/Waleed-MCP-Hub-2026-10-30T01-58-57-852Z-12be17d4/`.
+  Its `desktop-integrity.json` covers 7,841 files; inventory SHA-256:
+  `A7D1B3E19EF34482A096802F46F82E38E09E0126F2855205F3260CBFDF4E6E8C`.
+  `node scripts/verify-desktop-package.mjs <that-folder>` passes full inventory/
+  byte/hash checks before and after disposable copying, launcher/source manifest
+  checks, bundled Node/compiled JobObject tree cancellation and timeout with an
+  unrelated process surviving, unauthenticated refusal/authenticated bootstrap,
+  UI serving, tray self-test, read-only startup status and graceful lock release.
+  No personal agent configuration, pilot, shortcut or startup setting was changed.
+  Generated executables, identity manifests and portable folders remain ignored
+  artifacts; maintained source, tests and evidence are committed instead.
+  The approved OpenCode helpers now take explicit session/prompt-file/CLI inputs;
+  synthetic boundary checks passed without contacting a live session. Inspection
+  defaults to metadata and requires an explicit content opt-in. Four new inventory
+  regression cases reject modified, extra, missing and linked portable artifacts.
+  The initial full browser gate passed 65/66: a speculative TCP connection and
+  keep-alive connection becoming idle during drain could retain writer locks
+  beyond the unchanged five-second desktop assertion. A real-socket reproduction
+  confirmed the delay. Shutdown now drops only pre-request connections and reaps
+  newly idle connections after response completion; active requests still drain.
+  The regression verifies both prompt closure and completion of an accepted
+  response. The unchanged desktop browser test then passed three consecutive runs.
+  This final portable folder was rebuilt and reverified with that fix.
+  The post-fix `npm run check` passes 1,039 tests across 86 files, typecheck/lint,
+  browser/data-only boundaries, credential scan, production build and compiled
+  Windows process/DPAPI smokes. `npm run format:check` and `git diff --check` pass.
+  Vite retains its non-blocking advisory for the 503.82 kB main browser chunk;
+  the bundle gate passes.
+  These checks are not code signing, live Edge/shortcut verification, real-account
+  provider/agent certification, deployment or native macOS/Linux release verification.
+
+- Task 19: macOS/Linux readiness interfaces and adapters. The lazy platform
+  credential factory selects DPAPI/Keychain/libsecret, uses distinct persisted
+  references, and refuses inaccessible keyrings without a plaintext/ephemeral
+  fallback. Keychain/libsecret commands use scoped IDs and stdin values, bounded
+  buffers, write/delete verification and metadata-only diagnostics. The existing
+  Windows DPAPI scope/entropy/ciphertext implementation is unchanged. Platform
+  runtime/config/cache roots and all 17 agent targets are resolved with native
+  path semantics; Windows locations remain compatible. ProcessRunner now has a
+  platform factory: Windows still uses ProcessHost/JobObject; POSIX uses detached
+  process-group cleanup with negative-pid termination. Settings exposes selected
+  storage, probe health and the containment distinction. Native macOS/Linux
+  verification and release packaging remain pending; POSIX installers and OAuth
+  rotation are not enabled by readiness abstractions.
+  Verified with `npm run check`: 1,034 tests across 85 files, build/boundary/secret
+  checks, and compiled Windows process/DPAPI smokes. `npm run test:e2e`: 66 passed,
+  including 1440px/390px storage diagnostics for all three selected backends.
+  The separate 17-scope Windows integration/private-backup/DPAPI bridge smoke and
+  `git diff --check` pass. Keychain/libsecret/process-group tests simulate OS
+  responses; the byte-for-byte existing-vault DPAPI test runs natively on Windows.
+
+- Task 18: Bearer-authenticated loopback `/mcp` with SDK Streamable HTTP sessions,
+  POST/GET SSE/DELETE, per-request token/session ownership checks, and the existing
+  bridge for tools/resources/prompts, policy, profiles/search and logs. Token profiles
+  narrow live agent scope. Private atomic `http-tokens.json` stores SHA-256 hashes
+  and metadata only; browser APIs retain session/Origin/CSRF. Settings provides
+  one-time token/config copy, optional expiry, masked listing and revocation.
+  Sessions are bounded (64 total/8 per token), close on expiry/revoke/shutdown, and
+  suppress pending results. A failed revocation write remains denied in-process but
+  requires a successful retry for durable revocation. No tool effects are undone.
+  Verification: `npm run check` passes 1,002 tests across 80 files plus compiled
+  Windows process/DPAPI smokes; `npm run test:e2e` passes 63 tests, including
+  1440px/390px HTTP settings and a live SDK client. The stale-window tool-search
+  browser test uses a click rather than check(): refusal can roll back the
+  controlled checkbox before Playwright's checked-state assertion. Its refusal,
+  disabled-state and final persisted-state checks remain intact.
+
+- Task 17: 17 Windows configuration targets, adding Windsurf/Cline/Roo Code/Zed/
+  Gemini CLI/Goose/JetBrains AI/Warp; 24-row contract bounds and all-agent profile/
+  search/log identities. Scoped JSONC and bounded YAML range edits retain unrelated
+  settings; path+content fingerprints refuse stale relocations. Responsive agent
+  cards, per-client scope/reconnect guidance, all-eight API/bridge/policy tests and
+  expanded disposable protected-file smoke. Actual client connections remain
+  client-controlled, not inferred from configuration. JetBrains is an existing
+  shared-JSON compatibility scope; Goose protected adoption remains unsupported.
+
+- Task 16: four-step inline first-run tour, explicit scan/integration/MCP entry
+  points, persisted revision-checked completion/skip/reset with legacy preference
+  migration, and Settings rerun. Searchable local help drawer derives categorized
+  topics from the shipped guides and safely renders Markdown without HTML/script
+  execution or arbitrary file endpoints. Existing guide inaccuracies were updated;
+  Security & Privacy, exit-code and re-auth guidance added. Responsive keyboard,
+  preference persistence/CAS, source-integrity and malicious-link coverage included.
+
+- Task 15: strict bounded setup bundles, secret-placeholder export, known-credential
+  echo refusal, owner-scoped expiring import review, skip/overwrite semantics and
+  DPAPI credential entry with read-back, journaled rollback and exact state checks.
+  Responsive Settings download/upload/drop/review/apply UI, real atomic-state/DPAPI
+  confidentiality and rollback/API/browser coverage. Unreadable protected backends
+  fail export; Docker credential conversion is deliberately unsupported rather than
+  weakening the reference-only gateway. Credential-free Docker definitions transfer.
+
+- Task 14: bounded Hub tool overrides, revision-checked/journaled saves/resets,
+  agent aliases/custom descriptions/merged annotations and search ranking across
+  alias/original/custom text. Original tool identity still drives scope, Ask/Block,
+  credentials, containment and metadata-only logs. Runtime collision/tombstone
+  guards and metadata rechecks prevent stale or retargeted alias dispatch. Responsive
+  Customize/reset UI, live HTTP MCP and real DPAPI/JobObject alias coverage included.
+
+- Task 13: health/auth metadata evaluation, discovery-only on-demand and opt-in
+  periodic checks, live Needs Re-auth badges/actions and revision-checked lifecycle
+  preferences. Strict own-launcher HKCU Run registration, fixed tray commands and
+  background/no-window desktop startup reuse graceful shutdown. Compiled launcher
+  tests exercise NotifyIcon/menu construction and disposable HKCU mutations; the
+  real HKCU Run query is read-only. Real Edge window/tray interaction across Windows
+  shells remains a manual compatibility check, not a claim from synthetic tests.
+
+- Task 12: managed resources/list, resources/read, resources/templates/list,
+  prompts/list and prompts/get with strict per-agent scope, opaque resource and
+  template handles, collision-safe prompt names and embedded-resource routing.
+  Startup/queue/result revalidation, decoded binary credential-echo refusal and
+  fixed provider-error suppression preserve existing execution boundaries.
+  Scoped list-change notifications invalidate catalogs; subscriptions are disabled.
+
+- Task 11: confirmed Playground with schema review, stale-review checks, the
+  shared managed execution/DPAPI/JobObject boundary, and temporary owner-scoped
+  redacted output. Strict metadata-only 500-record ring and bounded local IPC
+  aggregate agent calls into a responsive live request table. Observational logs
+  are memory-only, not a tamper-proof audit; unavailable collection is explicit.
+
+- Task 10: optional per-agent tool-search mode, lean two-meta-tool catalogs,
+  bounded ranked discovery and schema-bearing results, and secured meta-call
+  dispatch. Revision-safe toggle/status UI and real production bridge coverage
+  verify DPAPI injection, lazy startup and JobObject process-tree cleanup.
+
+- Task 9: per-agent profile/tool-set assignments with strict bounded contracts,
+  journaled revision-safe writes, scoped catalogs/calls and session invalidation.
+  Unassigned agents retain all enabled approved connectors; assigned empty/disabled
+  profiles fail closed. Agents UI selectors/counts, stale-window recovery and real
+  argv-target bridge notification coverage are included. Mappings survive disconnect.
+
+- Task 8: journaled, revision-checked per-tool Allow / Ask / Block settings;
+  blocked catalog omission and stale-call denial, one-call MCP form confirmation,
+  post-confirmation/dispatch revalidation, and responsive Tools & Permissions UI.
+  Unsupported elicitation clients fail closed; a Hub-window approval queue is not
+  implemented. Unchanged runtime approvals/discovery remain valid after policy saves.
+
+- Task 7: bounded, inert `.mcpb` review and installation, typed configuration forms,
+  DPAPI-only environment values, journaled rollback/recovery, bundle integrity
+  receipts, separately approved contained execution and persistent bridge support.
+  Supports the documented strict Windows manifest subset; no package/runtime
+  download, setup hooks, platform overrides or sensitive command-line arguments.
+
+## Foundation checkpoint (historical)
+
+The P1–P9 notes below describe the original baseline. Tasks 1–19 above and the
+dated task evidence below supersede its original limitations (including import
+apply, persistent sessions, resources/prompts and the original nine-agent scope).
 
 - Full specification saved.
 - Implementation plan saved.
@@ -78,7 +237,7 @@ Updated: 2026-10-29
 - P9 portable-folder packaging with bundled Node 24/production dependencies,
   Windows launchers/shortcut installer, named-pipe single instance and protected shutdown.
 
-## Not implemented
+## Remaining release limitations
 
 - No real-account Linear OAuth consent verification yet. Protocol/DCR/PKCE, denial,
   timeout and refresh are exercised with a disposable local provider, not a user account.
@@ -90,8 +249,8 @@ Updated: 2026-10-29
   compatibility remains unverified; Docker profile materialization is unchanged.
 - The process runner deliberately rejects
   `.cmd`/`.bat` shims until a dedicated safe adapter is verified.
-- No secret-backed import save or adoption apply. P4 normalization stays data-only;
-  P5 no-secret saving is a distinct registry operation, not runtime approval.
+- Protected agent import/apply is implemented in Task 5. Legacy Docker-pilot
+  adoption remains separate and disabled; import never grants runtime approval.
 - P3 adoption preview remains metadata-only, not an approved executable definition
   or a claim of complete source/profile equivalence. It is not silently fed into P4.
 - Native/wrapper version metadata may be unknown. P7 documents current Kilo/Kimi
@@ -100,8 +259,9 @@ Updated: 2026-10-29
   stores. P5 tests compensate known Docker/file states only; uncertainty blocks.
 - No verified live Docker image MCP execution or real Chrome launch. Synthetic
   protocol peers and ownership/cleanup fault tests do not claim provider compatibility.
-- Generated native sessions are bounded to 120 seconds/1 MiB, not unlimited persistent
-  gateways. Shell/shim recipes and real installed-agent reconnect remain unverified.
+- Direct materialized native sessions keep their 120-second/1 MiB bounds. Task 2
+  managed peers use bounded persistent sessions, not unlimited gateways.
+  Shell/shim recipes and real installed-agent reconnect remain unverified.
 - No automatic job replay/resumption, recovery override, or guided stale-lock/backup
   restore interface. Ambiguous changes deliberately stay blocked for inspection.
 - No MCP usage metrics. Per-project/per-agent/CLI traffic accounting is recorded
@@ -116,15 +276,15 @@ Updated: 2026-10-29
 | --------------------------------------- | --------------------------------------------------------------------------------------------- |
 | P0 specification/design/planning        | Complete                                                                                      |
 | P1 foundation/contracts/test harness    | Verified                                                                                      |
-| P2 local security/persistence/jobs      | In progress — local-only subset verified                                                      |
+| P2 local security/persistence/jobs      | Enabled local-only subset verified                                                            |
 | P3 read-only discovery/adoption preview | Verified read-only baseline; explicit version/config scope gaps remain                        |
 | P4 safe import/normalization            | Verified data-only normalization; P5 adds separate no-secret registry saves                   |
 | P5 connector/profile/runtime lifecycle  | Verified enabled no-secret subset; live image execution remains unverified                    |
 | P6 secrets/supported authentication     | Implemented and verified enabled subset; real-account OAuth consent exit gate remains pending |
-| P7 agent adapters/synchronization       | Implemented; disposable nine-scope and independent DPAPI bridge verified; real agents pending |
+| P7 agent adapters/synchronization       | Implemented; disposable 17-scope and independent DPAPI bridge verified; real agents pending   |
 | P8 functional frontend                  | Scanner/manual-MCP workflows implemented; full release UI gate remains pending                |
 | P9 Windows startup/recovery             | Portable folder/launchers implemented; real Edge/shortcut manual gates remain pending         |
-| P10 final validation/rollout            | Not started                                                                                   |
+| P10 final validation/rollout            | Task 20 automated build/package gates; manual rollout limits remain                           |
 
 ## Existing pilot — separate from this project's completion
 
@@ -141,7 +301,8 @@ Verify each installed agent's effective scope, trust/reconnect and MCP tool disc
 only with explicit configuration-change consent. Exercise real Edge App Mode and the
 shortcut installer. Retain live-account OAuth, second-login DPAPI and live Docker
 image cleanup gates. No pilot adoption apply or automated recovery is enabled;
-project/agent usage metrics stay R2. There is no Git repository, commit or deployment.
+project/agent usage metrics stay R2. Source is maintained in Git; automated local
+release verification does not imply deployment or live-account certification.
 
 ## P7–P9 scope and verification evidence (2026-10-28–29)
 
@@ -155,7 +316,8 @@ project/agent usage metrics stay R2. There is no Git repository, commit or deplo
   on the first attempt for this final build, within the unchanged readiness bound.
   Start its `scripts/start-desktop.bat`; no real window/shortcut is claimed verified.
 
-- The integration contract has nine requested targets, separate from P3's eight
+- The integration contract now has seventeen targets (nine from P7 plus eight in
+  Task 17), separate from P3's eight
   legacy discovery observations. VS Code uses current user `mcp.json` / `servers`,
   not legacy `settings.json`. Kimi uses `.kimi-code/mcp.json` / `KIMI_CODE_HOME`;
   Kilo uses `.config/kilo/kilo.json` / `mcp`. Ambiguous layers and custom
@@ -165,7 +327,7 @@ project/agent usage metrics stay R2. There is no Git repository, commit or deplo
   ownership without rewriting unchanged files; reconnect/trust may still be needed.
 - Manual save uses P6 one-way storage. A partial credential/approval/sync failure
   returns `partially_saved` and its saved connector ID, never a retry-as-new prompt.
-- Compiled `test:windows-integrations` passes nine disposable file scopes, private
+- Compiled `test:windows-integrations` now passes seventeen disposable file scopes, private
   backups/read-back/disconnect and an independent DPAPI-backed native MCP bridge:
   zero tool calls during listing, one explicit synthetic call, environment isolation
   and rejection after disabling. No real config/pilot was changed.
@@ -199,11 +361,81 @@ project/agent usage metrics stay R2. There is no Git repository, commit or deplo
   browser fixture. It now uses a visibly synthetic spaced value; generated
   `desktop-builds/` joins other generated-output exclusions. Maintained source and
   fixtures continue through the unchanged credential signatures.
-- Bridge supports tools only, at most two simultaneous requests, 256 aggregated
+- At this historical checkpoint the bridge supported tools only, at most two simultaneous requests, 256 aggregated
   tools/eight pages per peer, bounded HTTP/native/Docker sessions, secret-echo refusal
   and isolated cleanup diagnostics. Secretless Docker transport exists but live
-  image execution/cleanup is unverified; keychain-backed Docker execution and
-  resource/prompt forwarding remain unsupported.
+  image execution/cleanup was unverified; resource/prompt forwarding was unsupported
+  until Task 12 above.
+  The subsequent Task 1 work below adds a reference-only keychain-backed bridge path.
+
+## Task 1 — Docker-secret-backed bridge (2026-10-29)
+
+- Docker binding resolution validates generated IDs, ownership, presence, adapter,
+  environment names and actual secret metadata without introducing a plaintext-read
+  seam. Header bindings, OAuth bundles and literal/credential overrides fail closed.
+- The bridge skips Windows credential initialization for Docker peers and delegates
+  reference resolution to Docker Gateway 0.44.2. Each peer uses an owned temporary
+  catalog containing exactly one approved image, with dynamic management disabled,
+  tool-call logging disabled and gateway secret filtering enabled. No existing
+  profile, agent config, registry definition or credential is rewritten.
+- Cleanup selects only the per-launch gateway server nonce, verifies Docker's exact
+  labels on immutable container IDs and checks absence. Changed catalog files and
+  uncertain cleanup are preserved for recovery. Port-published secret-backed images
+  and gateway-interpreted templates/variables remain refused.
+- Synthetic tests cover the seven SSH connector names exposing 77 tools, discovery
+  without tool invocation, explicit forwarding/revocation, reference-only artifacts,
+  missing/foreign/unsafe secrets, cancellation, drift and scoped cleanup. These do
+  not claim live Docker-image or remote-account verification. The seven local SSH
+  definitions observed during this task are native launchers; they are not migrated.
+- Direct keychain-backed **Test capabilities** remains a separate adapter limitation.
+- A real opt-in `test:disposable-docker-bridge` smoke passes against the compiled
+  bridge: a pinned cached Node image receives a fresh synthetic Docker secret,
+  exposes one tool and accepts an explicit call after discovery/reconnect. Scoped
+  container/file cleanup and secret absence are checked; no image pull, personal
+  connector migration, existing-secret change or remote SSH request is performed.
+- This smoke exposed a Windows environment snapshot bug: `ProgramFiles` and
+  `ProgramData` were lost by case-sensitive lookup after converting `process.env`
+  to a plain object. The Docker command adapter now handles allowlisted keys
+  case-insensitively, with regression coverage. SDK smoke clients explicitly pass
+  the reviewed OS allowlist because SDK defaults omit `ProgramData`.
+- Final `npm run check` passes: **327 tests across 36 files**, typecheck, lint,
+  browser/data-only boundaries, credential scan, production build/bundle checks
+  and compiled Windows process-host and DPAPI/native-launcher smokes. Changed
+  executable-source formatting and `git diff --check` also pass.
+
+## Task 2 — Persistent connector sessions (2026-10-29)
+
+- A bridge-scoped peer pool reuses native, HTTP/SSE and Docker connections across
+  discovery and sequential calls. Connector operations are serialized; separate
+  bridge/MCP sessions never share peers or credential leases. Defaults are 32 peers,
+  five-minute idle expiry and a one-hour hard lifetime, with earlier OAuth expiry.
+- Approval, definition and declared credential metadata are revalidated after
+  startup/queueing, before each operation. Registry and safety-ledger changes retire
+  stale peers without waiting for another call. Cancellations, transport/protocol
+  failures and secret echoes retire uncertain sessions; calls are never replayed.
+- Native bridge processes opt into a bounded duplex session mode without extending
+  ordinary command deadlines. Graceful stdin EOF precedes owned-job cancellation;
+  the Windows host still reaps descendants after root exit. Stream output is no
+  longer retained a second time, and transient duplex buffers are zeroed. Legacy
+  native profile launchers explicitly copy asynchronous output before it is zeroed.
+- Secret-backed Docker gateways use long-lived server mode and permit multiple
+  active owned peers in the same bridge. Foreign/stale Docker artifacts still fail
+  closed; cleanup never adopts or deletes another bridge's artifacts. Uncertain
+  cleanup retains evidence. Force-killing a bridge is not a guarantee that the Docker
+  daemon has removed its containers; inspect retained recovery markers in that case.
+- Streamable HTTP teardown sends session DELETE before closing transport. One-shot
+  checks and direct materialized native profile launchers keep their existing bounds.
+- Regression tests cover state preservation, isolation, idle/lifetime expiry, queued
+  calls, cancellation, revocation, provider/credential error sanitization, startup
+  during shutdown and cache bounds. Real local fixtures verify HTTP session reuse
+  and DELETE, native graceful EOF plus complete descendant cleanup, and state retained
+  across two calls through the compiled Docker-secret-backed bridge. These fixtures
+  use synthetic credentials/programs, not personal SSH sessions or browser sign-ins.
+- Final unchanged-source verification passes **353 tests across 39 files**,
+  typecheck, lint, browser/data-only boundaries, credential scan, production build
+  and both compiled Windows runtime/DPAPI smokes (`npm run check`). The separate
+  compiled Docker-secret smoke also passes retained state across two calls and
+  owned cleanup. Changed-source formatting and `git diff --check` pass.
 
 ## P6 verification evidence (2026-10-28)
 

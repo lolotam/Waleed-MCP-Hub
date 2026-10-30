@@ -539,6 +539,331 @@ pass. Startup failures clean owned locks and disconnect IPC; the port-conflict
 regression proves the unrelated listener survives. Tool result/cleanup/parser
 diagnostics remain non-reflecting, including JSON-escaped credential echoes.
 
+## D024 — Profile-scoped resource/prompt forwarding (2026-10-29)
+
+Task 12 supersedes D021's original tools-only limitation. Resource/list/template
+and prompt/list discovery use the same per-agent managed peer pool as tool calls.
+Reads/gets recheck the route's execution, credential and profile fingerprint before
+dispatch and after response. Duplicate raw URIs/names never choose a connector:
+resource URIs are opaque per-bridge handles, prompt handles are connector-prefixed
+and collision-safe, and templates expose query variables without upstream literals.
+Embedded prompt resources and links stay scoped to their owning connector.
+
+SDK MCP schemas validate wire payloads. Resource/template/prompt metadata is bounded,
+and partial catalogs carry a static truncation marker. Unsupported peers degrade
+independently. Provider errors/data never leave the boundary; known credentials are
+checked in text and decoded base64 payloads. Only routing metadata is retained, not
+prompt arguments or returned bodies. Registry and scoped upstream list-change
+notifications invalidate routes. Resource subscriptions stay explicitly false and
+direct subscribe/unsubscribe requests fail without contacting a provider. Production
+argv sessions, real DPAPI/JobObject tests and browser-driven profile reassignment
+cover live read/get routing and stale/out-of-scope refusal.
+
+## D025 — Opt-in health scheduling and current-user desktop lifecycle (2026-10-30)
+
+Task 13 extends D023 without installing a service or silently enabling startup.
+Health metadata may inspect approved OAuth references through DPAPI; only expiry/
+status scalars survive and read buffers are zeroed. A metadata request can therefore
+initialize the protected backend, superseding the earlier dashboard-no-DPAPI
+assumption. Connector discovery runs only on explicit health/check actions or after
+opting into five-minute scheduling; health never calls tools/reads resources/gets
+prompts or installs packages. Existing approval/recovery/containment limits apply.
+
+HKCU Run has one fixed value and the compiled launcher derives its own quoted
+background command. Boolean/expected-state APIs never accept executable paths or
+registry locations. A current-user mutex plus exact command/read-back checks refuse
+stale and other-installation values. Build identity verification refuses missing,
+linked or stale launcher artifacts; it is not code signing against same-user code.
+Packaging compiles the reviewed launcher; packaging alone registers nothing.
+
+Tray menus use static stdin/owned IPC commands, not arbitrary URLs or shell input.
+Open obtains a fresh fragment launch, Check Health invokes only the health queue,
+and Exit drains the backend and writer locks. Owned Edge window/PID/start-time
+observation can stop the manager when keeping it in the tray is disabled. An
+unobserved/reused Edge handoff never authorizes process killing or inferred window
+closure. Native tray/menu construction and isolated registry mutations are tested;
+visible tray/window behavior across Windows shells still needs manual verification.
+
+## D026 — Tool overrides are metadata, not execution grants (2026-10-30)
+
+Task 14 stores optional bounded overrides outside connector execution definitions,
+keyed by connector ID and original tool name. Saving/resetting uses the normal
+registry journal and CAS checks without invalidating approval, observations or
+managed sessions. Annotations merge over provider hints and cannot authorize calls.
+Direct snapshots/native snapshot launchers refuse active overrides rather than
+silently bypassing customized metadata.
+
+Explicit aliases are exact identifiers up to 64 characters; default generated Hub
+handles retain 40 characters. Alias/original/generated-handle resolution shares the
+same original-name policy and dispatch path. Raw original names are accepted only
+when customized, discovered and unambiguous. Known collisions are rejected without
+provider startup; unseen metadata is checked during discovery and before dispatch.
+Live bridges never retarget a previously owned name to a different tool. Changed
+metadata invalidates stale catalog/confirmation/queued/result reviews; reconnect
+may be required to reuse a retired alias for another target. Logs retain only the
+original provider tool identity. UI text warns that persisted metadata is not a
+credential store. Search sees aliases/original names/custom text, not new authority.
+
+## D027 — Portable setups carry definitions, never credentials or approval (2026-10-30)
+
+Task 15 uses a separate strict version 1 format instead of overloading ordinary
+connector paste. Portable connector types project command/url/args/runtime data,
+allowlisted environment literals, required field specifications and original-name
+policies. Tool overrides use deterministic `connectorId/originalToolName` record
+keys; credential inputs use `connectorId/target/key`. Neither is a file path.
+The bounded JSON parser rejects duplicate/prototype keys before schema validation.
+Command validation reuses normal imports; traversal and embedded credentials fail
+closed. Unknown environment values become required fields. Export inspects every
+known present credential for cross-field/encoded echoes and refuses if that safety
+check is unavailable. It does not claim to classify arbitrary unknown passwords
+hidden in free text. OAuth accounts, approval and installation receipts never travel.
+
+Owner-scoped previews expire after five minutes, cap at eight, carry a full safe
+definition review and pin both revision and state hash. Apply consumes the preview,
+takes the shared mutation lock, checks exact required inputs, writes new immutable
+DPAPI values with plaintext read-back verification and makes one atomic registry
+commit. The external journal precedes writes. Only an exact before-state permits
+compensation; exact after-state means success without replay. Unknown outcomes or
+failed cleanup remain blocking recovery. Buffers and input fields are cleared;
+no private credential backup path is introduced. Existing credentials are retained.
+
+Skip preserves existing entries/overrides/assignments and ignores their required
+inputs. Overwrite replaces matching definitions and overrides, invalidates approval,
+touches affected profiles and requests new credentials; other local definitions and
+unsupplied assignments remain. Affected direct snapshots must be dematerialized.
+Name/alias collisions remain errors, never implicit ID remaps. Metadata changes do
+not execute providers or rewrite agent config.
+
+Docker remains reference-only: its write-only secrets cannot be confidentiality-
+scanned, so those exports are refused. DPAPI import does not invent a Docker binding
+adapter: credential-bound Docker imports are refused, with explicit Settings/docs
+guidance to transfer definitions without credential fields and bind Docker secrets
+separately. Native/package/remote credential fields use Windows DPAPI. This limit is
+intentional and visible, not a claim of automatic cross-vault conversion.
+
+UI reference lock: preserve LifecycleSettings' white bordered panels, Segoe UI,
+teal action-only accent and responsive density. Borrow ImportDialog's explicit
+review/consent/apply separation; use Refero craft-details for labelled password
+inputs, paste support, keyboard focus and 44px targets. Upload/drop is an alternate
+entry point, never an automatic apply. Desktop uses paired summary columns; mobile
+stacks them without horizontal scroll. No new visual language or media is needed.
+
+## D028 — Onboarding is a preference, not execution approval (2026-10-30)
+
+Task 16 adds `onboardingCompleted` to the existing atomic lifecycle preferences,
+defaulting false for legacy files without writing during read. The dedicated
+onboarding endpoint changes only that flag under the settings mutation guard and
+revision check; existing lifecycle UI requests may omit it without resetting it.
+Finish/Skip mark complete and explicit Settings rerun marks incomplete. Completion
+wins over empty connector inventory to avoid a perpetual first-run loop. Existing
+workspaces with an unset flag are offered the tour too. No browser storage or
+portable setup state is used.
+
+The tour is an inline Connectors panel rather than a blocking modal. Step changes
+do not scan or mutate anything. Agent discovery/1-click integration reuse the
+existing component, config fingerprint, consent and protected mutation chain.
+Registry/Smart Paste/Managed Packages open existing review dialogs; they do not
+silently create, install or approve. All set describes tour completion, not live
+provider success. Help and Playground are navigational actions only.
+
+Help sources are literal build-time imports of allowlisted guide files, not dynamic
+filesystem reads or a copied content database. Sections and search derive from the
+same Markdown. The renderer emits escaped React text for unsupported HTML, checked
+known-guide/HTTPS links, inert code, lists and tables; there is no dangerous HTML
+sink, script evaluation or image loading. External links are explicit with
+noopener/noreferrer. Search stays local. An on-demand local chunk keeps guide text
+off the initial bundle; a scoped error boundary preserves the workspace if an
+old-build chunk is missing.
+
+Reference lock: preserve the current white panels, Segoe UI, thin borders, teal
+action accent and 8px panel language. LifecycleSettings owns persistence/status
+patterns; ImportDialog owns review/consent separation; AgentIntegrations owns the
+connection workflow. Refero craft-details supplies visible keyboard focus and
+labelled 44px controls. The wizard's numbered progress is informational, not an
+approval indicator. Help uses topic/content columns on desktop and stacked,
+independently scrollable regions on mobile. No decorative media or redesign.
+
+## D029 — Seventeen agent identities share one reviewed integration chain (2026-10-30)
+
+Task 17 expands IntegrationAgentId to seventeen and bounds mapping/record/tool-set
+collections at 24. Targets, requests, bridge argv and metadata-only logs all use
+that same enum. Existing profile/search and Allow/Ask/Block dispatch remain unchanged;
+new adapters never grant trust, auto-approval or execution privileges in the client.
+
+Current upstream format research: [Zed](https://zed.dev/docs/ai/mcp) uses flat
+command/args in `context_servers`; [Gemini CLI](https://geminicli.com/docs/tools/mcp-server/)
+uses user `settings.json`; [Goose](https://github.com/block/goose/blob/main/documentation/docs/guides/config-files.md)
+uses YAML extensions with `cmd`, plus a Roaming Windows config path; [Warp](https://docs.warp.dev/agents/capabilities/mcp/)
+uses global `.warp/.mcp.json`. Requested alternate paths are explicit compatibility
+candidates, never a reason to write multiple files. Equivalent Windows paths are
+deduplicated. Both content and normalized scope enter the fingerprint, closing the
+same-bytes relocation loophole. Multiple actual candidates/layouts fail closed.
+
+[JetBrains](https://www.jetbrains.com/help/ai-assistant/mcp.html) documents IDE
+Add/Import JSON but not a guaranteed shared `%APPDATA%/JetBrains/mcp.json` file.
+The requested shared file is writable only if already present, with explicit client
+verification/import guidance. No absent file is invented, and no IDE-version XML or
+project state is touched. Cline/Roo likewise require existing default VS Code
+extension scopes rather than confusing `code.exe` with an installed extension.
+Windsurf's requested scope is legacy Cascade, not an automatic Devin migration.
+
+JSONC modification omits whole-line formatting so unrelated inline settings retain
+their exact bytes. Goose uses pinned `yaml` 2.9.1 for bounded data-only parsing and
+range-based owned-entry edits, not whole-document serialization. Anchors, aliases,
+merge/prototype/non-string/duplicate keys, custom tags, multi-documents, non-finite
+scalars and unsupported flow parents fail closed. Generated Goose extensions use
+stdio cmd/args, enabled/name and no credentials; provider/permission/secret files
+are unchanged. Existing Goose extensions are not silently passed into the JSON
+protected-adoption adapter; that separate import capability is explicitly disabled.
+
+All clients retain the same atomic private backup/CAS/read-back/journal adapter.
+Pre-effect failures abort; uncertain external effects preserve backups and block for
+review rather than blindly restore private contents. Configuration-only success is
+not proof an installed client consumed the file or connected. Synthetic tests and
+disposable Windows smokes must not be reported as real-agent compatibility tests.
+
+UI reference lock: retain the existing Agents/Onboarding consent and feedback
+patterns, white surfaces, Segoe UI, thin borders, teal action roles and 44px controls.
+Use two-column cards at desktop and a single column at 390px; local vector icons
+and textual client-type/detection badges add identity without remote assets or
+implying trust. Per-client reconnect/scope guidance stays visible before integration.
+
+## D030 — Loopback Bearer sessions reuse the secured bridge (2026-10-30)
+
+Task 18 adds only `/mcp` POST/GET/DELETE to a route-metadata Bearer-auth boundary.
+Exact Host/Origin/cross-site checks remain shared. Real socket peers must be
+127.0.0.1/::1 (including IPv4-mapped 127.0.0.1); proxy headers are not authority.
+Production binding remains 127.0.0.1. The browser session/Origin/CSRF chain is
+unchanged for token-management and other APIs. Session IDs alone never authorize
+a request, and a valid token cannot use another token's session.
+
+Token entropy is 32 random bytes with a `wmh_live_` prefix. A separate private
+atomic/CAS/readback file contains only SHA-256 hashes and masked metadata, outside
+setup exports. All fixed-length hashes are compared using timingSafeEqual without
+an early matching exit. Token mutations share the lifecycle lock; revision conflicts
+require refresh. Revocation denies in-process before disk writes, closes token-owned
+sessions and remains possible during registry recovery. Failed persistence must be
+reported as unconfirmed durable revocation, not a successful deletion. Optional
+expiry and a 256-record limit bound retained metadata.
+
+Each SDK stateful Streamable HTTP session owns a createAgentBridge instance and
+its peer pool. Token-scoped registry snapshots filter connectors, while the bridge
+still evaluates live agent assignments, approvals, policy, tool-search, credentials,
+containment and content dispatch. Token restrictions therefore intersect, never
+replace, agent limits. `http-client` widens only bridge/log identities, not installed
+agent targets or persisted agent bindings. Tool logs and refusal audits never add
+tokens, headers, session IDs, arguments, results or provider errors.
+
+Sessions reserve capacity before awaiting initialization (64 global/8 per token,
+16 requests/session), with 5-minute idle and 1-hour lifetime bounds plus token expiry.
+No replay store is enabled. Revocation closes raw pending JSON responses as well
+as SDK SSE streams: SDK 1.32.2 transport.close clears unresolved JSON responders
+without finishing their Node responses. DELETE is excluded from that forced-response
+path so the SDK can finish its normal termination response. Shutdown closes sessions
+in Fastify preClose, before waiting for SSE connections to drain. No automatic call
+replay or claim to undo dispatched side effects is made.
+
+Settings reference lock: reuse the existing LifecycleSettings/SetupSettings surfaces,
+Segoe UI, thin borders, teal action role and 44px controls. The generation form uses
+a native focus-trapping dialog; one-time disclosure provides selectable/copyable
+token and HTTP snippet, then returns to a preview-only list. Plaintext lives only
+in component memory until dismiss/navigation/reload or five minutes, never browser
+storage. Clipboard retention is explicitly outside the Hub. Responsive token rows
+and wrapping code fields preserve the existing 390px layout, without a new theme.
+
+## D031 — Platform-native storage and execution seams, without a Windows migration (2026-10-30)
+
+Task 19 is readiness, not a claim of verified macOS/Linux deployment. Existing
+Windows `SecretBackend` and `ProcessRunner` implementations remain the adapters
+behind platform factories. DPAPI still uses the same CurrentUser scope, entropy,
+private files, `scope.json`, reference IDs (`windows`) and cross-process OAuth
+rotation lock. The native C#/PowerShell host and its JobObject policy are unchanged.
+
+New keyring references explicitly identify `keychain` or `libsecret`; neither is
+an alias for `windows`. Binding resolution and credential transactions select the
+configured backend, retaining the existing ownership/revision/journal checks and
+zero-filled leases. A moved registry cannot open Windows references through an OS
+keyring. No automatic credential migration, plaintext or ephemeral fallback exists.
+
+Keychain uses service `WaleedMcpHub`, scoped generated accounts and the security
+CLI's add/find/delete-generic-password contract. Secret-bearing add commands are
+sent through non-TTY stdin, not argv or files. Upstream's
+[security.c](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/security.c)
+and [readline.c](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/readline.c)
+show a fixed 4096-byte interactive buffer and no command-history writer in that
+path: oversized encoded commands must fail before the store, not be truncated.
+[secret-tool](https://manpages.debian.org/testing/libsecret-tools/secret-tool.1.en.html)
+stores from stdin with application/scope/id attributes and looks up/clears the
+same tuple. Base64 envelopes preserve newline/Unicode values; they are encoding,
+not encryption. Both adapters rely on the OS keyring, verify mutations and zero
+their owned buffers. Only a random nonsecret namespace is atomically published to
+a private 0600 file under a 0700 directory; it never travels in setup exports.
+
+Status is lazy and metadata-only. An explicit session/Origin/CSRF-protected probe
+checks a generated absent ID and reports the last observed state. It does not add
+a canary credential or claim all items are unlocked. Missing commands, locked
+keyrings and denied sessions remain unavailable; provider/native errors are not
+returned. OAuth rotation remains DPAPI-only until equivalent reviewed keyring
+locking/replacement and native tests are available. POSIX installers likewise fail
+before attempting Windows installer tooling or weakening receipt/venv validation.
+
+Platform directory/agent target resolution shares the existing descriptor/format
+definitions, not a second dispatch implementation. Windows comparison stays
+case-insensitive; POSIX preserves case. Existing-file and ambiguous-scope guards
+remain shared. macOS GUI config roots use Application Support, CLI scopes use
+config-home; Linux uses absolute XDG roots with documented defaults. Runtime data
+overrides are absolute, and the historical Windows missing-LOCALAPPDATA fallback
+is retained. Approved package receipts remain under the selected runtime directory.
+
+POSIX execution uses direct exec, a detached process group, explicit environments,
+bounded I/O/concurrency/deadlines and group termination on exit/cancel/limits.
+There is no uncontained fallback. This is lifecycle cleanup, **not** a sandbox or
+Windows JobObject guarantee: session-detaching children and manager SIGKILL remain
+known limits. Construction/runtime tests simulate darwin/linux system responses;
+they must not be reported as real keychain, D-Bus or native process-tree validation.
+
+UI reference lock: keep the existing LifecycleSettings/Runtime safeguards surfaces,
+Segoe UI, white bordered panels and existing action roles/44px controls. Add one
+backend/status/probe panel and accurate text, not a new theme or automatic probe.
+Onboarding/import/setup copy names the native vault rather than claiming DPAPI on
+all operating systems. Backend choice remains platform-owned, not an HTTP option.
+
+## D032 — Final Windows artifacts stay generated; verify inventory and packaged containment (2026-10-30)
+
+Task 20 commits maintained launcher/packaging sources, tests and release evidence,
+not generated executables or `desktop-builds/`. The root launcher and each portable
+launcher are compiled independently; different executable hashes are valid. No
+startup registration, real agent change or pilot migration occurs during packaging.
+
+Every new portable folder includes `desktop-integrity.json`: a complete relative
+file inventory with byte counts and SHA-256 hashes, excluding the inventory itself.
+The verifier checks both source and disposable copy before execution, refuses
+links/non-file entries and mismatches, and matches launcher/source hashes to the
+launcher manifest. This is reproducible integrity checking, not signed provenance
+or protection against hostile replacement of both the inventory and artifacts.
+
+Verification runs bundled Node outside the workspace with empty PATH and cleared
+NODE_OPTIONS/NODE_PATH. The bundled compiled core/JobObject host cancels and times
+out synthetic parent/child trees while an unrelated synthetic process survives.
+The backend additionally proves session refusal/authentication, UI serving, tray
+self-test, read-only startup metadata and graceful writer-lock release. Real Edge
+interaction, shortcut installation, live agents/providers and native POSIX release
+certification are distinct gates and remain explicitly unclaimed.
+
+The final browser gate exposed a shutdown edge case: Node's initial idle sweep
+can leave browser preconnect sockets and connections becoming idle after that
+sweep waiting on normal timeouts. The server tracks connections until their first
+HTTP request, retires only those on pre-close, and sweeps newly idle connections
+after response completion while draining. It does not force-close active requests
+or loosen the existing five-second writer-lock assertion. A real-socket regression
+checks an accepted response still completes alongside an unused TCP connection.
+
+Approved local OpenCode helpers are retained as source-only explicit-input tools:
+session, UTF-8 prompt file and optional CLI executable replace machine paths and
+embedded task context. Inspection defaults to metadata; content needs opt-in.
+Tests use synthetic CLI responses and never submit a live prompt. These developer
+tools use CLI argv and must not carry credentials.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint

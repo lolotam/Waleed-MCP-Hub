@@ -24,45 +24,68 @@ of servers; P1 items make daily use better; P2 items widen who can use the app.
 
 What this hub already does better than most: DPAPI-protected credentials that are
 never shown again, explicit approval bound to the exact definition, atomic agent
-file edits with private backups and read-back, a recovery journal, and nine agent
+file edits with private backups and read-back, a recovery journal, and seventeen agent
 targets from one screen.
 
 ## P0 — connect any server
 
-1. **Run npm and Python packages directly.** Most servers are published as
-   `npx -y pkg` or `uvx pkg`, and today users must install them by hand
-   ([guide](guides/adding-mcps.md#npm-package-npx)). Add a managed installer: the
-   hub resolves an exact version, installs it into its own cache, shows the package
-   and version for approval, and runs `node.exe` or the tool's `.exe`. Pinned
-   versions keep the "approve exactly what runs" rule.
-2. **General OAuth for remote servers.** Only Linear read-only works today. Implement
-   the MCP authorization spec: protected-resource metadata discovery, PKCE, client
-   ID metadata documents with dynamic client registration as fallback
-   ([spec change summary](https://den.dev/blog/mcp-november-authorization-spec/)),
-   token refresh, and a "connected accounts" list with revoke. This unblocks
-   Notion, Atlassian, Sentry, GitHub and most hosted servers.
-3. **Keep connector sessions alive.** The bridge starts a fresh native process for
-   every tool call, so stateful servers break: SSH sessions, browser automation,
-   database transactions. Keep one peer per agent session with an idle timeout,
-   still revalidating approval before each call.
-4. **Browse and add from the official MCP Registry.** Search
+1. **Run npm and Python packages directly — implemented (Task 3, Windows subset).**
+   Managed exact-version npm/uv installation uses an isolated cache, separate
+   installation/execution consent, receipt validation and contained launch.
+   POSIX installer validation remains unavailable; see the
+   [guide](guides/adding-mcps.md#npm-package-npx).
+2. **General OAuth for remote servers — implemented (Task 4, reviewed subset).**
+   Protected-resource/authorization metadata discovery, S256 PKCE, public dynamic
+   registration or an explicitly configured client metadata URL when advertised,
+   refresh and connected-account revoke
+   are supported with origin/issuer pinning and explicit consent. This does not
+   certify arbitrary providers or hosted client metadata documents; live-account
+   verification and POSIX stable-reference rotation remain release work.
+3. **Keep connector sessions alive — implemented (Task 2).** The managed bridge
+   reuses one peer per connector per bridge/MCP session, with five-minute idle expiry,
+   a one-hour hard lifetime, per-connector serialization and approval/credential
+   revalidation before use. Native Job Objects, long-lived Docker gateways, HTTP
+   session DELETE and shutdown/EOF cleanup preserve containment. Direct materialized
+   profile launchers and capability checks remain separately bounded, one-shot paths.
+4. **Browse and add from the official MCP Registry — implemented (Task 5).** Search
    [registry.modelcontextprotocol.io](https://modelcontextprotocol.io/community/working-groups/registry),
    read each `server.json` (packages, remotes, required env vars), and prefill the
-   add form, so users fill in only their keys.
-5. **Import from agents you already use.** Read `mcpServers` from Claude Desktop,
+   add form. Registry listings are untrusted suggestions: exact versions, package
+   executable names, missing arguments, credentials and execution approval still
+   require review. Only fixed official-registry metadata requests are made.
+5. **Import from agents you already use — implemented (Task 5).** Read `mcpServers` from Claude Desktop,
    Cursor, VS Code, Codex TOML and OpenCode JSONC, convert `npx`/`uvx` entries via
-   item 1, and move secrets into the protected store. The adoption preview exists
-   but apply is disabled.
-6. **Local HTTP servers (opt-in).** Allow `http://127.0.0.1:<port>` endpoints after
-   explicit confirmation, for servers that run locally over HTTP.
-7. **Install `.mcpb` bundles.** Claude Desktop's
+   item 1, and move selected secrets into the protected store. Reviewed apply binds
+   enabled Hub profiles, removes only selected source AST entries and inserts the
+   managed bridge. Recovery copies are encrypted via DPAPI, never ordinary plaintext
+   agent backups. Unpinned packages need an explicit exact version. Source drift and
+   uncertain external writes fail closed. Legacy Docker-pilot adoption stays separate
+   and disabled; unsupported agent/runtime fields are not silently dropped.
+6. **Local HTTP servers (opt-in) — implemented (Task 6).** Support literal
+   `http://127.0.0.1:<port>` and `http://localhost:<port>` with explicit consent bound
+   to the connector's execution hash. Localhost must resolve exclusively to
+   `127.0.0.1`/`::1`, with addresses rechecked/pinned on each request. LAN/metadata
+   addresses, aliases, non-loopback HTTP and redirects remain denied. Local SSE and
+   Streamable HTTP reuse managed host-bridge sessions; Docker profile snapshots
+   are not used for host loopback endpoints.
+7. **Install `.mcpb` bundles — implemented (Task 7, strict Windows subset).** Claude Desktop's
    [bundle format](https://www.anthropic.com/engineering/desktop-extensions) is a
    zip with `manifest.json` describing the runtime, tools and user config, which
-   maps directly onto a hub connector plus a credentials form.
+   maps onto a managed native connector plus a protected configuration form.
+   File/drop review accepts bounded stored/deflated ZIPs (25 MiB compressed,
+   50 MiB extracted, 500 entries), rejects unsafe paths/links/collisions, and runs
+   no archive code or dependency installers. Node, local Python and bundled `.exe`
+   entry points use JobObject containment and persistent bridge sessions after
+   separate execution approval. All environment configuration is DPAPI-backed;
+   protected argument substitution and unsupported execution fields fail closed.
 
-8. **Smart add, then agent-driven add.** First a single paste box that recognises a
-   URL, an `npx`/`uvx` command, a Docker image, a JSON block or a registry name and
-   prefills the form (plain code, no AI needed). Then expose a small hub tool set
+8. **Smart add, then agent-driven add — Smart Paste implemented (Task 6).** A
+   single data-only paste box recognizes HTTPS/opt-in loopback URLs, simple
+   `npx`/`uvx` commands, Docker images/run commands and supported JSON blocks.
+   Instant detection never executes; reviewed input pre-fills Add MCP or creates a
+   sanitized private import draft. Shell chaining/expansion, inherited env vars and
+   unsupported Docker runtime flags are refused. Registry names remain handled by
+   the separate registry browser. Next expose a small hub tool set
    (`hub_draft_connector`, `hub_test_connector`) so the agents people already use
    can say "add the Notion MCP": the agent drafts, the hub window asks the user to
    approve the exact definition and opens sign-in when needed. The agent may only
@@ -85,35 +108,86 @@ targets from one screen.
 
 ## P1 — control and daily use
 
-9. **Per-tool Allow / Ask / Block** (in progress). Block hides the tool; Ask
-   prompts inside the agent when it supports MCP elicitation, otherwise in the hub
-   window. Read-only tools default to Allow.
-10. **Per-agent tool sets.** Choose which connectors each agent sees (like MetaMCP
-    namespaces, MCPHub groups, Docker profiles, 1MCP presets). Profiles already
-    exist and could map to agents.
-11. **Tool-search mode for big catalogs.** Expose a small `search_tools` +
-    `call_tool` pair instead of hundreds of schemas, for agents without native tool
-    search. Large catalogs cost [tens of thousands of tokens](https://www.wati.io/en/blog/lazy-loading-mcp-tools-explained/)
-    before any work starts.
-12. **Tool playground and request log.** Call a tool from the hub with explicit
-    confirmation, and keep a local log of agent calls (tool, agent, duration,
-    result size; never arguments that may hold secrets).
-13. **Forward resources and prompts**, not only tools.
-14. **Health and lifecycle.** Tray icon, start with Windows, background re-tests,
-    and a clear "needs re-auth" badge.
-15. **Tool overrides.** Rename a tool or edit its description and annotations, as
-    in MetaMCP.
+9. **Per-tool Allow / Ask / Block — implemented (Task 8).** Block omits the
+   tool's metadata from the managed bridge catalog and refuses stale calls. Ask
+   uses a one-call MCP form elicitation confirmation; unsupported clients fail
+   closed, with a Hub-window approval queue left as a future enhancement. Existing
+   unconfigured tools, including read-only tools, retain Allow. Tools & Permissions
+   provides revision-checked per-tool settings. Policies are rechecked after
+   confirmation and before dispatch; restrictive policies cannot be bypassed by
+   direct profile snapshots.
+10. **Per-agent tool sets — implemented (Task 9).** Map each integrated agent to
+    an existing Hub profile, or explicitly keep All Connectors (Default). The
+    managed bridge filters discovery and rechecks calls, pending confirmations,
+    startup and queued dispatch against that agent's current assignment. Empty or
+    disabled profiles expose nothing; assigned profiles require reassignment before
+    deletion. Revision-checked mapping changes write no agent files. The Agents UI
+    shows eligible connector counts and policy-aware discovered-tool estimates;
+    running bridges notify clients when membership or assignments change.
+11. **Tool-search mode for big catalogs — implemented (Task 10).** Optional,
+    revision-checked per-agent mode exposes only `search_tools` + `call_tool`.
+    Metadata discovery is deferred until search/call, with ranked name/description/
+    keyword matching, bounded results and explicit partial-catalog indicators.
+    `call_tool` reuses the full profile/approval/Ask/Block/credential/containment
+    chain. Disabled by default; normal catalogs remain backward compatible. This
+    avoids sending hundreds of schemas before an agent needs them.
+12. **Tool playground and request log — implemented (Task 11).** Explicit
+    one-call confirmation and stale-review checks use the same contained,
+    credential-protected runtime as agent bridges. A responsive live table shows
+    at most 500 memory-only call records (tool, agent, duration, result size and
+    status; never arguments, result bodies or provider errors). Bounded local IPC
+    collects agent-process metadata; temporary owner-scoped output is redacted.
+13. **Forward resources and prompts — implemented (Task 12).** Profile-scoped,
+    approval-checked catalogs, opaque resource/template URIs, collision-safe prompt
+    handles and managed reads/gets. Embedded resource links are namespaced; stale
+    routes and credential echoes fail closed. List changes invalidate catalogs.
+    Subscriptions remain explicitly disabled, not silently forwarded.
+14. **Health and lifecycle — implemented (Task 13).** Metadata-only health/auth
+    inspection, on-demand checks and opt-in five-minute background re-tests, a
+    collapsed-row Needs Re-auth badge and direct sign-in action. The compiled
+    Windows launcher provides tray Open/Check Health/Exit and optional owned-window
+    close shutdown. Opt-in HKCU Run uses only its own verified launcher; conflicting
+    entries and arbitrary executable/key inputs fail closed.
+15. **Tool overrides — implemented (Task 14).** Revision-checked aliases,
+    descriptions and merged annotations customize managed agent catalogs/search.
+    Original tool identity still authorizes every dispatch. Reserved/known alias
+    collisions are rejected; newly discovered collisions and stale reviews fail
+    closed. Tools & Permissions provides Customize, Overridden and Reset to Default.
 
 ## P2 — reach more people
 
-16. **Export / import setups without secrets**, so people can share a working
-    configuration and only re-enter their own keys.
-17. **In-app help and a first-run wizard** that link to [the guides](guides/README.md).
-18. **More agents:** Windsurf, Cline, Roo Code, Zed, Gemini CLI, Goose, JetBrains AI,
-    Warp.
-19. **An HTTP endpoint for the hub itself** (Streamable HTTP with a per-client
-    token), for clients that only accept a URL.
-20. **macOS and Linux** support (Keychain / libsecret instead of DPAPI).
+16. **Export / import setups without secrets — implemented with conservative
+    backend limits (Task 15).** Versioned projected JSON, owner-scoped expiring
+    review, collision strategies, DPAPI credential fields and one atomic journaled
+    registry transaction. Settings provides download/upload/drop, review and Apply
+    Setup. Approval/OAuth accounts/installations never transfer. Unreadable protected
+    credentials block export; credential-bound Docker conversion remains refused
+    to preserve its reference-only gateway (bind Docker credentials separately).
+17. **In-app help and a first-run wizard — implemented (Task 16).** Four inline
+    steps reuse reviewed agent/MCP flows; Finish/Skip persist completion and Settings
+    provides explicit rerun. A searchable accessible drawer bundles the actual
+    [guides](guides/README.md), with escaped Markdown, checked links and no provider
+    requests. Empty completed workspaces never reopen the tour automatically.
+18. **More agents — implemented (Task 17).** Windsurf, Cline, Roo Code, Zed,
+    Gemini CLI, Goose, JetBrains AI and Warp bring configuration targets to 17.
+    Scoped JSONC/YAML edits, private backups, path+content stale handles and shared
+    profile/search/permission dispatch apply to all. Ambiguous/unsupported client
+    scopes fail closed; JetBrains shared JSON requires existing scope/client import
+    verification, not an assumed live connection.
+19. **An HTTP endpoint for the hub itself — implemented (Task 18).** Loopback
+    `/mcp` POST/GET/DELETE uses per-client Bearer tokens, token-owned SDK sessions
+    and the existing secured bridge. Private hash-only persistence, browser-protected
+    management APIs, one-time Settings disclosure, profile intersection, revocation,
+    expiry and bounded session cleanup are included. Legacy SSE-only clients and
+    non-loopback deployment are not supported.
+20. **macOS and Linux readiness abstraction — implemented (Task 19).** Platform
+    credential storage selects existing Windows DPAPI, macOS Keychain or Linux
+    Secret Service/libsecret, without a plaintext fallback. Platform directory and
+    17-agent target resolution, a POSIX process-group runner, and protected Settings
+    diagnostics are included. This is readiness, not a native release claim:
+    macOS/Linux system-keyring/agent/packaging verification, POSIX installers,
+    OAuth rotation and desktop lifecycle remain release work. Windows keeps its
+    existing DPAPI format and JobObject implementation.
 
 ## Later — teams
 
