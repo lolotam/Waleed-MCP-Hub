@@ -88,8 +88,9 @@ async function fakePackageApi(
     failResolve?: boolean;
     losePolls?: number;
     loseStart?: boolean;
-    refuseStart?: boolean;
+    refuseStart?: string;
     forgetJob?: boolean;
+    stallReload?: boolean;
   } = {},
 ) {
   const state: {
@@ -108,6 +109,12 @@ async function fakePackageApi(
       body: JSON.stringify(body),
     });
   };
+  // After an install was asked for, the connector list never answers.
+  if (options.stallReload)
+    await page.route('**/api/connectors', async (route) => {
+      if (state.installBody) return;
+      await route.continue();
+    });
   await page.route('**/api/packages/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -124,10 +131,7 @@ async function fakePackageApi(
       if (options.refuseStart) {
         await answer(
           route,
-          {
-            error: 'unavailable',
-            message: 'Managed packages are not available.',
-          },
+          { error: options.refuseStart, message: 'Refused.' },
           503,
         );
         return;
@@ -514,7 +518,7 @@ test('a 503 refusal of the start returns to Look up with its fixed sentence', as
   page,
 }) => {
   await page.goto(await launch());
-  await fakePackageApi(page, { refuseStart: true });
+  await fakePackageApi(page, { refuseStart: 'unavailable' });
   await installDemo(page);
   await expect(page.getByRole('alert')).toHaveText(
     'Managed packages are not available.',
@@ -539,4 +543,29 @@ test('a job the hub forgot is not offered for another check', async ({
   await expect(
     page.getByRole('button', { name: 'Close', exact: true }),
   ).toBeVisible();
+});
+
+test('a 503 with an unknown code leaves the outcome unknown', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await fakePackageApi(page, { refuseStart: 'internal_error' });
+  await installDemo(page);
+  await expect(page.getByRole('alert')).toContainText(
+    'its answer was lost, so the outcome is unknown',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Look up', exact: true }),
+  ).toHaveCount(0);
+});
+
+test('a stalled list reload never locks the dialog', async ({ page }) => {
+  await page.goto(await launch());
+  await fakePackageApi(page, { loseStart: true, stallReload: true });
+  await installDemo(page);
+  await expect(page.getByRole('alert')).toContainText('the outcome is unknown');
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Close', exact: true }),
+  ).toHaveCount(0);
 });

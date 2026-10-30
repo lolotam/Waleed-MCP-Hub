@@ -52,6 +52,11 @@ function parseJsonField(
   }
 }
 
+// The codes of a 503 the hub sends before it creates any job: managed
+// packages are off, or the refusal could not be audited. Any other 503 may
+// follow a job, so it leaves the outcome unknown.
+const PRE_START_REFUSALS = new Set(['unavailable', 'audit_unavailable']);
+
 export function PackageInstall({
   seed,
   close,
@@ -98,6 +103,9 @@ export function PackageInstall({
     job: PackageJob;
     label: string;
   } | null>(null);
+  // True while the connector list reloads after an unknown outcome: the job
+  // cannot be checked again until the call that ended still settles.
+  const [reloading, setReloading] = useState(false);
   const running = step === 'resolving' || step === 'installing';
   const reportRunning = useRef(onRunning);
   reportRunning.current = onRunning;
@@ -297,7 +305,8 @@ export function PackageInstall({
         if (
           failure instanceof ApiError &&
           ((failure.status >= 400 && failure.status < 500) ||
-            (failure.status === 503 && failure.code !== undefined))
+            (failure.status === 503 &&
+              PRE_START_REFUSALS.has(failure.code ?? '')))
         ) {
           if (!mounted.current) return;
           setError(packageFailureText(failure));
@@ -378,7 +387,8 @@ export function PackageInstall({
 
   // The outcome of a job whose answer or progress was lost. The view keeps
   // the job, if one was read and the hub still knows it, so it can be checked
-  // again. Nothing is shown before the reload settles, so a retry never runs
+  // again. The result shows at once, so Close never waits on the reload, but
+  // the retry stays disabled until the reload settles, so it never runs
   // beside the call that is still unwinding.
   async function unknownOutcome(
     started: PackageJob | null,
@@ -386,22 +396,23 @@ export function PackageInstall({
     failure: unknown,
   ) {
     const forgotten = failure instanceof ApiError && failure.status === 404;
+    const text = !started
+      ? 'The hub may have started the job, but its answer was lost, so the outcome is unknown. Wait a moment, then check the connector list before installing again.'
+      : forgotten
+        ? 'The hub no longer knows this job (it may have restarted), so its outcome is unknown. Check the connector list before installing again.'
+        : 'The job was started but its progress could not be read, so its outcome is unknown. It may still be running: check the job again, or check the connector list before installing again.';
+    setUnknownJob(started && !forgotten ? { job: started, label } : null);
+    setReloading(true);
+    setStep('result');
+    setError(text);
     const stale = await reload();
     if (!mounted.current) return;
-    setUnknownJob(started && !forgotten ? { job: started, label } : null);
-    setStep('result');
-    setError(
-      (!started
-        ? 'The hub may have started the job, but its answer was lost, so the outcome is unknown. Wait a moment, then check the connector list before installing again.'
-        : forgotten
-          ? 'The hub no longer knows this job (it may have restarted), so its outcome is unknown. Check the connector list before installing again.'
-          : 'The job was started but its progress could not be read, so its outcome is unknown. It may still be running: check the job again, or check the connector list before installing again.') +
-        stale,
-    );
+    setReloading(false);
+    if (stale) setError(text + stale);
   }
 
   async function checkAgain() {
-    if (!unknownJob) return;
+    if (!unknownJob || reloading) return;
     const { job: started, label } = unknownJob;
     setError('');
     setStep('installing');
@@ -681,6 +692,7 @@ export function PackageInstall({
               <button
                 className="primary"
                 type="button"
+                disabled={reloading}
                 onClick={() => void checkAgain()}
               >
                 Check the job again
