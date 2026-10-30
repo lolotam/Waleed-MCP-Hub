@@ -123,6 +123,52 @@ describe('latestRunner outcome', () => {
   });
 });
 
+describe('latestRunner chains', () => {
+  it('gives every call of a chain of three the outcome of the third', async () => {
+    const log: string[] = [];
+    const run = latestRunner(1000);
+    const first = gate();
+    const slow = gate();
+    const third = gate();
+    const a = run(recorder('a', log, first.opened));
+    // The middle call ignores its abort and settles only after the newest
+    // call has finished and nothing is running any more.
+    const b = run({
+      ...recorder('b', log, slow.opened),
+      work: () => slow.opened,
+    });
+    const c = run(recorder('c', log, third.opened));
+    third.open();
+    await expect(c).resolves.toBe(true);
+    slow.open();
+    await expect(b).resolves.toBe(true);
+    await expect(a).resolves.toBe(true);
+    expect(log).toEqual(['a:begin', 'b:begin', 'c:begin', 'c:commit', 'c:end']);
+  });
+
+  it('gives every call of a chain of three the failure of the third', async () => {
+    const log: string[] = [];
+    const run = latestRunner(1000);
+    const slow = gate();
+    const a = run(recorder('a', log, gate().opened));
+    const b = run({
+      ...recorder('b', log, slow.opened),
+      work: () => slow.opened,
+    });
+    const c = run(
+      recorder(
+        'c',
+        log,
+        Promise.reject(new DOMException('down', 'NetworkError')),
+      ),
+    );
+    await expect(c).resolves.toBe(false);
+    slow.open();
+    await expect(b).resolves.toBe(false);
+    await expect(a).resolves.toBe(false);
+  });
+});
+
 describe('untilAborted', () => {
   it('rejects with the abort reason while the promise keeps running', async () => {
     const controller = new AbortController();
