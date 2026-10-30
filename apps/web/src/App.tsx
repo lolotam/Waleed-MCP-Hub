@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useState,
+  useRef,
+  lazy,
+  Suspense,
+} from 'react';
 import {
   BootstrapSchema,
+  OnboardingStatusSchema,
+  type OnboardingStatus,
   type Bootstrap,
   type Profile,
   type AgentObservation,
@@ -11,6 +20,8 @@ import {
   type AdoptionPreview,
   type CapabilityObservation,
   type Materialization,
+  type ImportPreview,
+  type RegistryOption,
 } from '@waleed/contracts';
 import { api, sessionReady } from './api.js';
 import { Icon } from './Icon.js';
@@ -25,12 +36,29 @@ import { ConnectorList, type ManagedConnector } from './ConnectorList.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
+import { RegistryDialog } from './RegistryDialog.js';
+import { Playground } from './Playground.js';
+import { LifecycleSettings } from './LifecycleSettings.js';
+import { CredentialStorageSettings } from './CredentialStorageSettings.js';
+import { SetupSettings } from './SetupSettings.js';
+const HttpEndpoints = lazy(() =>
+  import('./HttpEndpoints.js').then((module) => ({
+    default: module.HttpEndpoints,
+  })),
+);
+import { OnboardingWizard } from './OnboardingWizard.js';
+import { HelpBoundary } from './HelpBoundary.js';
+const HelpDrawer = lazy(() =>
+  import('./HelpDrawer.js').then((module) => ({ default: module.HelpDrawer })),
+);
+import { shouldShowOnboarding, type OnboardingStep } from './onboarding.js';
 
 const pages = [
   'Connectors',
   'Agents',
   'Profiles',
   'Activity',
+  'Playground & Logs',
   'Settings',
 ] as const;
 type Page = (typeof pages)[number];
@@ -39,6 +67,7 @@ const iconNames = [
   'agents',
   'profiles',
   'activity',
+  'playground',
   'settings',
 ] as const;
 const descriptions: Record<Page, string> = {
@@ -46,6 +75,8 @@ const descriptions: Record<Page, string> = {
   Agents: 'Installed, configured, and verified are three different things.',
   Profiles: 'Organize tools around the way you work.',
   Activity: 'A local record of changes. No credentials or raw payloads.',
+  'Playground & Logs':
+    'Review a schema. Confirm one call. Keep only safe request metadata.',
   Settings: 'Your machine. Your configuration. Nothing enabled silently.',
 };
 const agentNames: Record<string, string> = {
@@ -63,6 +94,9 @@ export function App() {
   const [page, setPage] = useState<Page>('Connectors');
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [agentToolSets, setAgentToolSets] = useState<
+    import('@waleed/contracts').AgentToolSets
+  >({ revision: 0, toolSets: [] });
   const [connectors, setConnectors] = useState<ManagedConnector[]>([]);
   const [observations, setObservations] = useState<CapabilityObservation[]>([]);
   const [materializations, setMaterializations] = useState<
@@ -85,7 +119,68 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [manual, setManual] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [pastedImport, setPastedImport] = useState<ImportPreview | null>(null);
+  const [agentImport, setAgentImport] = useState<ImportPreview | null>(null),
+    [browsingRegistry, setBrowsingRegistry] = useState(false),
+    [registrySuggestion, setRegistrySuggestion] = useState<
+      RegistryOption | undefined
+    >();
   const [search, setSearch] = useState('');
+  const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null),
+    [tourStep, setTourStep] = useState<OnboardingStep>(0),
+    [tourBusy, setTourBusy] = useState(false),
+    [tourError, setTourError] = useState(''),
+    [tourNotice, setTourNotice] = useState(''),
+    [helpOpen, setHelpOpen] = useState(false),
+    [manualInitialType, setManualInitialType] = useState<'stdio' | 'npx'>(
+      'stdio',
+    );
+  const tourPending = useRef(false);
+  async function saveOnboarding(completed: boolean) {
+    if (!onboarding || tourPending.current || recoveryBlocked) return;
+    tourPending.current = true;
+    setTourBusy(true);
+    setTourError('');
+    setTourNotice('');
+    try {
+      const result = OnboardingStatusSchema.parse(
+        await api('/api/settings/onboarding', {
+          expectedRevision: onboarding.revision,
+          onboardingCompleted: completed,
+        }),
+      );
+      setOnboarding((current) =>
+        !current || result.revision >= current.revision ? result : current,
+      );
+      if (!completed) {
+        setTourStep(0);
+        setPage('Connectors');
+        setSearch('');
+      } else {
+        setTourNotice(
+          'Tour dismissed. Re-run Onboarding is available in Settings.',
+        );
+        document.getElementById('main')?.focus();
+      }
+    } catch {
+      setTourError(
+        'Onboarding preference was not confirmed. Refresh status before retrying; another window may have changed settings.',
+      );
+      try {
+        const status = OnboardingStatusSchema.parse(
+          await api('/api/settings/onboarding'),
+        );
+        setOnboarding((current) =>
+          !current || status.revision >= current.revision ? status : current,
+        );
+      } catch {
+        /* Do not pretend a failed save completed the tour. */
+      }
+    } finally {
+      tourPending.current = false;
+      setTourBusy(false);
+    }
+  }
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -100,6 +195,8 @@ export function App() {
         security,
         recovery,
         connectorResult,
+        toolSetResult,
+        onboardingResult,
       ] = await Promise.all([
         api('/api/bootstrap'),
         api<{
@@ -117,12 +214,19 @@ export function App() {
           connectors: ManagedConnector[];
           observations: CapabilityObservation[];
         }>('/api/connectors'),
+        api<import('@waleed/contracts').AgentToolSets>('/api/agents/tool-sets'),
+        api('/api/settings/onboarding'),
       ]);
       setBootstrap({
         ...BootstrapSchema.parse(info),
         revision: profileResult.revision,
       });
       setProfiles(profileResult.profiles);
+      setAgentToolSets(toolSetResult);
+      const status = OnboardingStatusSchema.parse(onboardingResult);
+      setOnboarding((current) =>
+        !current || status.revision >= current.revision ? status : current,
+      );
       setConnectors(connectorResult.connectors);
       setObservations(connectorResult.observations);
       setMaterializations(profileResult.materializations);
@@ -211,12 +315,18 @@ export function App() {
             Personal workspace <span className="slash">/</span>{' '}
             <strong>{page}</strong>
           </span>
-          <span className="stage-label">
-            {bootstrap?.capabilities.connectorManagement
-              ? 'Lifecycle build'
-              : 'Foundation build'}{' '}
-            <span className="version">v0.1</span>
-          </span>
+          <div className="topbar-actions">
+            <button type="button" onClick={() => setHelpOpen(true)}>
+              <Icon name="help" size={18} />
+              Help & Guides
+            </button>
+            <span className="stage-label">
+              {bootstrap?.capabilities.connectorManagement
+                ? 'Lifecycle build'
+                : 'Foundation build'}{' '}
+              <span className="version">v0.1</span>
+            </span>
+          </div>
         </header>
         <main id="main" tabIndex={-1}>
           <div className="page-heading">
@@ -238,9 +348,19 @@ export function App() {
               <div className="action-with-help">
                 <button
                   disabled={loading || !!error || recoveryBlocked}
-                  onClick={() => setManual(true)}
+                  onClick={() => {
+                    setRegistrySuggestion(undefined);
+                    setManualInitialType('stdio');
+                    setManual(true);
+                  }}
                 >
                   Add Manual MCP
+                </button>
+                <button
+                  disabled={loading || !!error || recoveryBlocked}
+                  onClick={() => setBrowsingRegistry(true)}
+                >
+                  Browse MCP Registry
                 </button>
                 <button
                   className="primary"
@@ -273,13 +393,70 @@ export function App() {
             <div>
               <strong>A safe starting point.</strong>{' '}
               {bootstrap?.capabilities.discovery
-                ? 'Discovery does not execute connectors. Save, exact execution approval, protected credentials, profile apply and capability checks are separate actions. Pilot adoption and agent synchronization stay disabled.'
+                ? 'Discovery does not execute connectors. Agent-config imports require a separate reviewed apply; exact execution approval and capability checks remain separate. Legacy pilot adoption stays disabled.'
                 : bootstrap?.capabilities.agentApply
                   ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly. Agent integration verifies configuration only; reconnect and trust remain agent-controlled.'
                   : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly. Capability tests use available runtime adapters; agent synchronization remains disabled.'}
             </div>
             <span className="read-only-tag">Explicit actions only</span>
           </div>
+          {bootstrap &&
+            !error &&
+            page === 'Connectors' &&
+            shouldShowOnboarding(onboarding?.onboardingCompleted) && (
+              <OnboardingWizard
+                step={tourStep}
+                setStep={setTourStep}
+                busy={tourBusy}
+                blocked={recoveryBlocked}
+                notice={tourNotice}
+                error={tourError}
+                complete={() => void saveOnboarding(true)}
+                connectAgents={
+                  bootstrap.capabilities.agentApply ? (
+                    <AgentIntegrations
+                      revision={bootstrap.revision}
+                      blocked={recoveryBlocked}
+                      refresh={refresh}
+                      profiles={profiles}
+                      toolSets={agentToolSets}
+                    />
+                  ) : (
+                    <p className="notice">
+                      Agent configuration integration is unavailable in this
+                      runtime. You can still read the connecting-agents guide in
+                      Help and continue the tour.
+                    </p>
+                  )
+                }
+                add={(kind) => {
+                  setRegistrySuggestion(undefined);
+                  if (kind === 'registry') setBrowsingRegistry(true);
+                  else {
+                    setManualInitialType(kind === 'package' ? 'npx' : 'stdio');
+                    setManual(true);
+                  }
+                }}
+                go={(target) => {
+                  setPage(
+                    target === 'playground'
+                      ? 'Playground & Logs'
+                      : 'Connectors',
+                  );
+                  if (target === 'tools')
+                    document
+                      .getElementById('connector-workspace')
+                      ?.scrollIntoView({ block: 'start' });
+                }}
+                help={() => setHelpOpen(true)}
+              />
+            )}
+          {page !== 'Settings' &&
+            onboarding?.onboardingCompleted &&
+            tourNotice && <p role="status">{tourNotice}</p>}
+          {page !== 'Settings' &&
+            onboarding?.onboardingCompleted &&
+            tourError && <p role="alert">{tourError}</p>}
           {error ? (
             <section className="error-panel" role="alert">
               <h2>Unable to load this workspace</h2>
@@ -323,6 +500,7 @@ export function App() {
                 <section
                   className="list-panel"
                   aria-labelledby="connector-list-title"
+                  id="connector-workspace"
                 >
                   <div className="list-toolbar">
                     <h2 id="connector-list-title">
@@ -338,6 +516,7 @@ export function App() {
                   </div>
                   {connectors.length ? (
                     <ConnectorList
+                      revision={bootstrap?.revision ?? 0}
                       connectors={connectors}
                       observations={observations}
                       profiles={profiles}
@@ -571,9 +750,23 @@ export function App() {
               )}
               {page === 'Agents' && bootstrap?.capabilities.agentApply && (
                 <AgentIntegrations
+                  profiles={profiles}
+                  toolSets={agentToolSets}
+                  importPreview={(preview) => {
+                    setAgentImport(preview);
+                    setImporting(true);
+                  }}
                   revision={bootstrap.revision}
                   blocked={recoveryBlocked}
                   refresh={refresh}
+                />
+              )}
+              {page === 'Playground & Logs' && bootstrap && (
+                <Playground
+                  connectors={connectors}
+                  revision={bootstrap.revision}
+                  enabled={!!bootstrap.capabilities.playground}
+                  blocked={recoveryBlocked}
                 />
               )}
               {page === 'Agents' && !bootstrap?.capabilities.agentApply && (
@@ -745,9 +938,10 @@ export function App() {
                 <section className="list-panel integration-guidance">
                   <h2>Windows desktop session</h2>
                   <p>
-                    Closing the app window leaves the same-user manager running.
-                    Use this action to release its locks and shut down
-                    gracefully; independent agent bridges remain agent-owned.
+                    By default, closing the app window leaves the same-user
+                    manager running. Use this action to release its locks and
+                    shut down gracefully; independent agent bridges remain
+                    agent-owned.
                   </p>
                   <button
                     onClick={() => {
@@ -765,6 +959,45 @@ export function App() {
                     Stop desktop manager
                   </button>
                 </section>
+              )}
+              {page === 'Settings' && (
+                <section className="list-panel integration-guidance">
+                  <h2>Onboarding & help</h2>
+                  <p>
+                    Finished or skipped tours stay dismissed, even when no
+                    connectors are configured. Re-run only when you choose.
+                  </p>
+                  <button
+                    disabled={tourBusy || recoveryBlocked || !onboarding}
+                    onClick={() => void saveOnboarding(false)}
+                  >
+                    Re-run Onboarding
+                  </button>
+                  {tourNotice && <p role="status">{tourNotice}</p>}
+                  {tourError && <p role="alert">{tourError}</p>}
+                </section>
+              )}
+              {page === 'Settings' && (
+                <LifecycleSettings
+                  blocked={recoveryBlocked}
+                  desktop={!!bootstrap?.capabilities.desktop}
+                />
+              )}
+              {page === 'Settings' && <CredentialStorageSettings />}
+              {page === 'Settings' && (
+                <SetupSettings
+                  blocked={recoveryBlocked}
+                  revision={bootstrap?.revision ?? 0}
+                  refresh={refresh}
+                />
+              )}
+              {page === 'Settings' && (
+                <Suspense fallback={<p>Loading HTTP endpoint settings…</p>}>
+                  <HttpEndpoints
+                    profiles={profiles}
+                    blocked={recoveryBlocked}
+                  />
+                </Suspense>
               )}
               {page === 'Settings' && (
                 <section className="list-panel settings">
@@ -823,7 +1056,10 @@ export function App() {
                     </div>
                     <div>
                       <dt>Windows sign-in startup</dt>
-                      <dd>Not implemented · no startup entry installed</dd>
+                      <dd>
+                        Opt-in current-user launcher registration · live status
+                        above
+                      </dd>
                     </div>
                   </dl>
                 </section>
@@ -853,10 +1089,19 @@ export function App() {
       {importing && bootstrap && (
         <ImportDialog
           revision={bootstrap.revision}
-          close={() => setImporting(false)}
+          initialPreview={agentImport ?? pastedImport ?? undefined}
+          agentSource={!!agentImport}
+          profiles={profiles}
+          close={() => {
+            setImporting(false);
+            setAgentImport(null);
+            setPastedImport(null);
+          }}
           refresh={refresh}
           savePreview={(preview, definitions) => {
             setImporting(false);
+            setAgentImport(null);
+            setPastedImport(null);
             setOperation({
               title: 'Save connector definitions locally',
               operation: { kind: 'create_connectors', definitions },
@@ -874,6 +1119,16 @@ export function App() {
           refresh={refresh}
         />
       )}
+      {browsingRegistry && (
+        <RegistryDialog
+          close={() => setBrowsingRegistry(false)}
+          select={(option) => {
+            setRegistrySuggestion(option);
+            setBrowsingRegistry(false);
+            setManual(true);
+          }}
+        />
+      )}
       {authentication && bootstrap && (
         <AuthDialog
           connector={authentication}
@@ -884,10 +1139,35 @@ export function App() {
       )}
       {manual && bootstrap && (
         <ManualMcpDialog
+          initialType={manualInitialType}
+          importJson={async (source) => {
+            const preview = await api<ImportPreview>('/api/imports/preview', {
+              expectedRevision: bootstrap.revision,
+              source,
+            });
+            setPastedImport(preview);
+            setAgentImport(null);
+            setManual(false);
+            setImporting(true);
+          }}
+          suggestion={registrySuggestion}
           revision={bootstrap.revision}
           close={() => setManual(false)}
           refresh={refresh}
         />
+      )}
+      {helpOpen && (
+        <HelpBoundary close={() => setHelpOpen(false)}>
+          <Suspense
+            fallback={
+              <p className="help-load-error" role="status">
+                Opening local guides…
+              </p>
+            }
+          >
+            <HelpDrawer close={() => setHelpOpen(false)} />
+          </Suspense>
+        </HelpBoundary>
       )}
     </div>
   );

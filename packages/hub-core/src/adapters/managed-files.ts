@@ -63,7 +63,7 @@ export function managedFiles(roots: Record<FileScope, string>): ManagedFiles {
         const opened = await file.stat();
         if (
           opened.ino !== info.ino ||
-          opened.dev !== info.dev ||
+          (info.dev !== 0 && opened.dev !== info.dev) ||
           opened.size > 1024 * 1024
         )
           throw conflict();

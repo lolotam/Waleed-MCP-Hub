@@ -7,7 +7,10 @@ import {
 } from 'jsonc-parser';
 import {
   EndpointSchema,
+  isLocalHttpEndpoint,
+  PortBindingsSchema,
   ImportDefinitionSchema,
+  PackageSpecSchema,
   type ImportDefinition,
   type ImportEntry,
   type ImportIssue,
@@ -66,15 +69,20 @@ export interface PrivateImport {
   entries: ImportEntry[];
   // Internal write-only draft values. No service method resolves them to callers.
   secrets: Map<string, Buffer>;
+  pendingLocalHttp: Map<string, ImportDefinition>;
   references: ImportPreview['secretReferences'];
 }
 export function clearImport(draft: PrivateImport) {
   for (const value of draft.secrets.values()) value.fill(0);
   draft.secrets.clear();
+  draft.pendingLocalHttp.clear();
 }
 
-function parseSource(source: string): Record<string, unknown> {
-  if (Buffer.byteLength(source, 'utf8') > 48 * 1024) throw invalid();
+export function parseConfigurationJson(
+  source: string,
+  maxBytes = 48 * 1024,
+): Record<string, unknown> {
+  if (Buffer.byteLength(source, 'utf8') > maxBytes) throw invalid();
   const errors: ParseError[] = [];
   const tree = parseTree(source, errors, {
     disallowComments: true,
@@ -83,7 +91,7 @@ function parseSource(source: string): Record<string, unknown> {
   if (errors.length || !tree || tree.type !== 'object') throw invalid();
   let nodes = 0;
   const check = (node: JsonNode, depth: number) => {
-    if (++nodes > 8192 || depth > 20) throw invalid();
+    if (++nodes > Math.max(8192, maxBytes / 4) || depth > 20) throw invalid();
     if (node.type === 'object') {
       const keys = new Set<string>();
       for (const property of node.children ?? []) {
@@ -103,7 +111,7 @@ function parseSource(source: string): Record<string, unknown> {
 }
 
 export function normalizeImport(source: string): PrivateImport {
-  const document = parseSource(source);
+  const document = parseConfigurationJson(source);
   if (!Object.keys(document).length) throw invalid();
   let format: ImportPreview['format'] = 'single';
   let entries: Array<[string, unknown]>;
@@ -153,6 +161,7 @@ export function normalizeImport(source: string): PrivateImport {
     format,
     entries: [],
     secrets: new Map(),
+    pendingLocalHttp: new Map(),
     references: [],
   };
   const privateStrings: string[] = [];
@@ -260,18 +269,25 @@ export function normalizeImport(source: string): PrivateImport {
         'command',
         'args',
         'image',
+        'package',
         'env',
         'environment',
         'environmentLiterals',
         'headers',
         'enabled',
         'disabled',
+        'localHttpOptIn',
+        'portBindings',
       ];
       for (const field of sorted(value).filter(
         (field) => !supported.includes(field),
       ))
         issue('unsupported_fields', fieldLabel(field));
       const has = (field: string) => own(value, field);
+      if (has('localHttpOptIn') && !has('url') && !has('remote'))
+        issue('invalid_entry', 'localHttpOptIn');
+      if (has('portBindings') && !has('image'))
+        issue('invalid_entry', 'portBindings');
       if (
         (has('enabled') && has('disabled')) ||
         (has('enabled') && typeof value.enabled !== 'boolean') ||
@@ -398,10 +414,35 @@ export function normalizeImport(source: string): PrivateImport {
       const modes = [
         has('url') || has('remote'),
         has('image'),
+        has('package'),
         has('command') && !has('image'),
       ].filter(Boolean).length;
       if (modes !== 1) issue('ambiguous_shape', 'executionMode');
-      else if (has('url') || has('remote')) {
+      else if (has('package')) {
+        const spec = PackageSpecSchema.safeParse(value.package);
+        if (!spec.success) issue('invalid_entry', 'package');
+        if (
+          has('command') ||
+          has('url') ||
+          has('image') ||
+          Object.keys(headerBindings).length
+        )
+          issue('ambiguous_shape', 'package');
+        if (has('args') && !argsOk(value.args))
+          issue('invalid_arguments', 'args');
+        if (spec.success)
+          definition = {
+            ...common,
+            executionMode: 'package',
+            transport: 'stdio',
+            package: spec.data,
+            arguments: argsOk(value.args) ? value.args : [],
+          };
+        warnings.add('native_execution_approval');
+        warnings.add('package_download');
+        warnings.add('network_access');
+        warnings.add('host_file_access');
+      } else if (has('url') || has('remote')) {
         if (
           has('command') ||
           has('args') ||
@@ -448,10 +489,25 @@ export function normalizeImport(source: string): PrivateImport {
           executionMode: 'remote',
           transport: transport === 'sse' ? 'sse' : 'streamable_http',
           endpoint: typeof endpoint === 'string' ? endpoint : '',
+          ...(has('localHttpOptIn')
+            ? { localHttpOptIn: value.localHttpOptIn as boolean }
+            : {}),
         };
+        if (has('localHttpOptIn') && typeof value.localHttpOptIn !== 'boolean')
+          issue('invalid_entry', 'localHttpOptIn');
+        if (typeof endpoint === 'string' && isLocalHttpEndpoint(endpoint)) {
+          warnings.add('local_http_opt_in');
+          if (value.localHttpOptIn !== true)
+            issue('local_http_opt_in_required', 'localHttpOptIn');
+        }
         warnings.add('network_access');
         warnings.add('destination_review');
       } else if (has('image')) {
+        if (
+          has('portBindings') &&
+          !PortBindingsSchema.safeParse(value.portBindings).success
+        )
+          issue('invalid_entry', 'portBindings');
         if (
           (value.type !== undefined && value.type !== 'image') ||
           (value.transport !== undefined && value.transport !== 'stdio')
@@ -476,6 +532,10 @@ export function normalizeImport(source: string): PrivateImport {
           image: typeof value.image === 'string' ? value.image : '',
           command: argsOk(value.command) ? value.command : [],
           arguments: argsOk(value.args) ? value.args : [],
+          ...(has('portBindings') &&
+          PortBindingsSchema.safeParse(value.portBindings).success
+            ? { portBindings: PortBindingsSchema.parse(value.portBindings) }
+            : {}),
         };
         warnings.add('image_execution_approval');
         warnings.add('image_pull');
@@ -547,13 +607,36 @@ export function normalizeImport(source: string): PrivateImport {
                 )
               : /^[a-z0-9._-]+==\d+\.\d+\.\d+$/i.test(packageArgs[0] ?? '');
           if (!pinned) warnings.add('unpinned_package');
+          if (pinned) {
+            const token = packageArgs.shift()!;
+            const split =
+              binary === 'npx' ? token.lastIndexOf('@') : token.indexOf('==');
+            const packageName = token.slice(0, split);
+            const spec = PackageSpecSchema.safeParse({
+              manager: binary === 'npx' ? 'npm' : 'uvx',
+              name: packageName,
+              version: token.slice(split + (binary === 'npx' ? 1 : 2)),
+              entryPoint: packageName.split('/').at(-1),
+            });
+            if (spec.success)
+              definition = {
+                ...common,
+                executionMode: 'package',
+                transport: 'stdio',
+                package: spec.data,
+                arguments: packageArgs,
+              };
+          }
           if (
             argsOk(args) &&
             args.some((arg) => /^(?:-c|--call)(?:=|$)/.test(arg))
           )
             issue('invalid_command', 'inline_program');
         }
-        if (/\.(?:cmd|bat|ps1|py|js|mjs)$/i.test(String(executable)))
+        if (
+          definition.executionMode !== 'package' &&
+          /\.(?:cmd|bat|ps1|py|js|mjs)$/i.test(String(executable))
+        )
           warnings.add('script_adapter_pending');
         if (
           /^python(?:\d+(?:\.\d+)?)?$/.test(binary) ||
@@ -608,7 +691,14 @@ export function normalizeImport(source: string): PrivateImport {
                   ...definition.command,
                   ...definition.arguments,
                 ]
-              : [definition.endpoint];
+              : definition.executionMode === 'package'
+                ? [
+                    definition.package.name,
+                    definition.package.version,
+                    definition.package.entryPoint,
+                    ...definition.arguments,
+                  ]
+                : [definition.endpoint];
         if (commandStrings.some(containsSecret))
           issue('credential_in_definition', 'definition');
         if (
@@ -629,6 +719,10 @@ export function normalizeImport(source: string): PrivateImport {
         const parsed = ImportDefinitionSchema.safeParse(definition);
         if (!parsed.success) issue('invalid_entry', 'definition');
         else if (!issues.length) result.definition = parsed.data;
+        else if (
+          issues.every((issue) => issue.code === 'local_http_opt_in_required')
+        )
+          draft.pendingLocalHttp.set(key, parsed.data);
       }
       // Field labels are metadata only. Mask any known extracted value repeated
       // in a property name as well; unknown values never enter the DTO at all.

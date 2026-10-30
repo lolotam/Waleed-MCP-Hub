@@ -20,14 +20,18 @@ if (window.location.hash)
     window.location.pathname + window.location.search,
   );
 
-export async function api<T>(path: string, body?: unknown): Promise<T> {
+export async function api<T>(
+  path: string,
+  body?: unknown,
+  method?: 'DELETE',
+): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
   }
   const response = await fetch(path, {
-    method: body === undefined ? 'GET' : 'POST',
+    method: method ?? (body === undefined ? 'GET' : 'POST'),
     headers,
     credentials: 'same-origin',
     cache: 'no-store',
@@ -44,6 +48,25 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     );
   }
   return response.json() as Promise<T>;
+}
+
+export async function uploadBundle(file: File) {
+  const response = await fetch('/api/bundles/preview', {
+    method: 'POST',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+    },
+    body: file,
+  });
+  if (!response.ok)
+    throw new ApiError(
+      'Bundle could not be inspected. Check the archive limits, manifest and supported launch configuration.',
+      response.status,
+    );
+  return response.json() as Promise<import('@waleed/contracts').McpbPreview>;
 }
 
 // A single promise also prevents React development remounts from consuming twice.

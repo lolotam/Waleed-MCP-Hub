@@ -262,9 +262,14 @@ test('guided native forms preserve inert argument arrays and clear write-only en
     .click();
   const preview = (await (await response).json()) as ImportPreview;
   expect(preview.entries[0]?.definition).toMatchObject({
-    executionMode: 'native',
-    executable: 'uvx',
-    arguments: args,
+    executionMode: 'package',
+    package: {
+      manager: 'uvx',
+      name: 'synthetic',
+      version: '1.2.3',
+      entryPoint: 'synthetic',
+    },
+    arguments: args.slice(1),
     trustApproval: null,
   });
   expect(await page.locator('dialog').innerText()).not.toContain(importSecret);
@@ -359,7 +364,7 @@ test('guided HTTPS preview reports invalid URLs without contacting them', async 
     .getByRole('button', { name: 'Add connector', exact: true })
     .click();
   await page
-    .getByRole('radio', { name: 'HTTPS endpoint', exact: true })
+    .getByRole('radio', { name: 'Remote endpoint', exact: true })
     .check();
   await page
     .getByLabel('Connector name', { exact: true })

@@ -3,6 +3,7 @@ import { createServer, type ServerResponse } from 'node:http';
 export async function mcpHttpFixture(
   requiredAuthorization?: string,
   echoCredential = false,
+  echoArguments = false,
 ) {
   const methods: string[] = [];
   const headers: Array<Record<string, unknown>> = [];
@@ -45,8 +46,53 @@ export async function mcpHttpFixture(
       return {
         resources: [{ uri: 'fixture://resource', name: 'fixture resource' }],
       };
+    if (method === 'resources/templates/list')
+      return {
+        resourceTemplates: [
+          { name: 'fixture template', uriTemplate: 'fixture://resource/{key}' },
+        ],
+      };
+    if (method === 'resources/read')
+      return {
+        contents: [
+          {
+            uri: params.uri,
+            text: `Synthetic resource ${String(params.uri)}`,
+            mimeType: 'text/plain',
+          },
+        ],
+      };
     if (method === 'prompts/list')
-      return { prompts: [{ name: 'fixture_prompt' }] };
+      return {
+        prompts: [
+          {
+            name: 'fixture_prompt',
+            arguments: [{ name: 'topic', required: true }],
+          },
+        ],
+      };
+    if (method === 'prompts/get')
+      return {
+        description: 'Synthetic prompt result',
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Synthetic prompt ${String(params.name)} ${JSON.stringify(params.arguments ?? {})}`,
+            },
+          },
+        ],
+      };
+    if (method === 'tools/call')
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Synthetic ${String(params.name)} execution${echoArguments ? ' ' + JSON.stringify(params.arguments ?? {}) : ''}`,
+          },
+        ],
+      };
     return {};
   }
   const server = createServer(async (request, response) => {

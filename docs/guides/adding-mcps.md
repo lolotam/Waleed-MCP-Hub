@@ -12,14 +12,17 @@ right and this page needs fixing.
 4. **Test capabilities** — the hub connects and lists the server's tools. It never
    calls a tool during a test.
 5. **Connect your agents** once (see [connecting-agents.md](connecting-agents.md)).
-   Every enabled, approved connector then appears in each agent as
+   Eligible, enabled, approved connectors appear in each agent as
    `<connector-name>__<tool-name>`, for example `ssh-prod-mcp__list-connections`.
 
 Editing a connector, changing its credentials, or disabling and re-enabling it
 clears the approval. Approve it again and re-test.
 
-Profiles are optional. Agents connected through the hub see every enabled,
-approved connector; profiles are only for generating Docker profile snapshots.
+Profiles are optional. Unassigned agents see all enabled, approved connectors,
+subject to per-tool policies. In **Agents**, use **Profile / Tool Set** to restrict
+an integrated agent to one profile. Empty or disabled assigned profiles expose
+nothing; **All Connectors (Default)** explicitly restores the unassigned behavior.
+Profile mapping is independent of Docker snapshots and changes no agent files.
 
 ## Which type is my server?
 
@@ -38,16 +41,46 @@ approved connector; profiles are only for generating Docker profile snapshots.
 1. **Connectors → Add Manual MCP**.
 2. **MCP name**: a short name, for example `linear`.
 3. **Connection type**: `Remote HTTP`.
-4. **HTTPS MCP URL**: the server's URL. It must be public `https://`, with no
-   username, password, `?query` or `#fragment` in it.
+4. **MCP endpoint URL**: a public `https://` URL, or an explicitly opted-in local
+   HTTP endpoint as described below. No username, password, `?query` or `#fragment`.
 5. **Protected headers (write-only JSON)**: leave empty if the server needs no key.
    Otherwise see [API keys and tokens](#api-keys-and-tokens).
 6. Tick **I trust this exact … endpoint** if you want it approved now, then
    **Save MCP**.
 7. Open the connector row and choose **Test capabilities**.
 
-`http://localhost` and private-network URLs are refused. The hub pins validated
-public DNS addresses and does not follow redirects.
+The Hub pins validated DNS addresses and does not follow redirects. Private LAN
+and metadata destinations are refused, even when local HTTP is opted in.
+
+### Local HTTP opt-in
+
+For a trusted service running on this computer, use `http://127.0.0.1:3000/mcp`
+or `http://localhost:3000/mcp` (substitute the actual explicit port). Check **I opt
+in to unencrypted local HTTP for this exact loopback endpoint and port**. Changing
+the URL clears local consent and execution approval. The same option works for
+Remote SSE. Localhost DNS must contain only `127.0.0.1`/`::1`; LAN addresses,
+metadata IPs, alternate numeric IP spellings, other HTTP hosts and redirects remain
+blocked. Local connections use the persistent host bridge, not Docker loopback.
+
+Imported local endpoints initially have no normalized definition. Review the local
+address, check the entry's opt-in, and choose **Update preview** before saving or
+applying. Opt-in and execution approval are separate from authentication/testing.
+
+## Smart Paste
+
+Use **Smart paste** in Add Manual MCP or Add connector for a URL, an exact
+`npx -y package@1.2.3 ...` / `uvx package==1.2.3 ...` command, a Docker image/run
+command or a supported JSON object. Quoted arguments stay literal; no shell runs.
+Detection is instant and local. **Review detected input** fills the editable form
+or sanitized draft, then clears the original input. Confirm exact versions/bin
+names, local HTTP consent and permissions before saving. JSON credentials remain
+private; Docker env assignments move into protected write-only fields.
+
+Complex shell commands, env expansion, inherited Docker env vars, mounts, env files,
+privileged/network/TTY flags and command-line credentials are refused rather than
+silently reinterpreted. Put keys in protected env/header fields. Existing AST edits,
+normal private `.bak` integration backups and encrypted adoption recovery remain
+unchanged; no plaintext credential backup is introduced by Smart Paste.
 
 ## Remote SSE
 
@@ -75,22 +108,107 @@ prove it works: approve the connector again and run **Test capabilities**.
 Never put a secret in the name, URL or arguments. The hub rejects URLs that
 contain credentials.
 
+## Import an existing agent configuration
+
+Open **Agents → Scan Installed Agents → Import agent configs** for Claude Desktop,
+Cursor, VS Code, Codex or OpenCode. The preview is sanitized and expires after five
+minutes. Deselect entries you want to keep outside the Hub; fix conflicting names
+and supply exact versions/executable names for unpinned npm/Python packages, then
+**Update preview**. Existing environment substitutions are not resolved from your
+personal environment; replace them explicitly before importing.
+
+Choose enabled Hub profiles, confirm the source-file change and protected import,
+then choose **Apply protected import**. Selected credential values go directly to
+DPAPI, and only the selected source entries are replaced by the Hub bridge. Other
+entries, settings, comments and policies remain untouched. Source changes since
+preview block apply. Saving does not install packages, run tools, grant execution
+approval or verify authentication. Approve each exact connector separately and
+reconnect the agent when ready.
+
+Adoption never makes the ordinary plaintext `.bak` copy. Recovery chunks and a
+manifest are protected in the vault; the receipt returns their generated reference
+IDs, not contents. An uncertain write leaves a blocking recovery journal and does
+not restore plaintext source keys or replay the import. Old backups created before
+adoption are not automatically modified. Unsupported runtimes/fields fail rather
+than silently changing behavior. The older Docker-pilot preview remains read-only.
+
+Pasted JSON previews can use the same **Apply protected import** action without
+editing any agent file. An enabled Hub profile is required.
+
+## Browse the official MCP Registry
+
+Open **Connectors → Browse MCP Registry**, search, and choose a connection option.
+The Hub fetches bounded metadata only from `registry.modelcontextprotocol.io` and
+pre-fills **Add Manual MCP** with an HTTPS remote or exact npm/PyPI package spec.
+Review the package executable name and any unresolved arguments. Required env/header
+names are shown, but publisher defaults and credential values are never copied.
+Enter your own credentials in the write-only protected fields. Saving still does
+not grant approval, download packages or start a server. Inactive entries, unsafe
+URLs, custom package registries and unsupported/unpinned package options are omitted
+or shown as requiring manual setup. Registry presence is not a trust endorsement.
+
 ## OAuth sign-in
 
-The hub has a built-in OAuth flow only for **Linear (read-only)**:
+The hub retains a curated OAuth flow for **Linear (read-only)**:
 `https://mcp.linear.app/mcp/readonly`, scope `read`. Add it as Remote HTTP, approve
 it, then **Authentication → Sign in and verify → Continue to verified provider**.
 
-Other OAuth-only servers show **auth_required** after a test. Until general OAuth
-support lands (see [ROADMAP](../ROADMAP.md)), check whether the provider also
-accepts a personal access token or API key in a header. If it does, use
-[API keys and tokens](#api-keys-and-tokens).
+For another remote MCP server, approve its exact HTTPS endpoint, then open
+**Authentication → Discover OAuth provider**. Review the issuer, resource and
+requested scopes. Approve those permissions, choose **Sign in with discovered
+provider**, and continue to the provider in a separate tab. Capability discovery
+must pass before the Hub reports success. Changing scopes clears consent.
+
+Standard protected-resource/authorization metadata, PKCE S256, and public-client
+registration are required. Providers requiring a fixed client, confidential secret,
+or nonstandard flow may remain unsupported; a provider name alone does not prove
+compatibility. If supported by the provider, a manually configured API key remains
+an alternative. No existing browser/agent account credentials are imported.
+
+The persistent bridge refreshes expiring tokens automatically and stores rotating
+access/refresh tokens only in the DPAPI vault. Open Authentication again to view
+the connected provider and scopes. **Revoke and disconnect** requests provider
+revocation when advertised. **Disconnect locally only** removes local credentials
+but leaves provider authorization intact; use the provider's account settings to
+remove it. Remove other/materialized credential consumers first. Neither action
+retries a failed tool call.
+
+## Managed packages (npx / uvx)
+
+Use **Add Manual MCP → npm / npx — pinned package** or **Python / uvx — pinned
+package**. Enter the publisher's package name, an exact pinned version, the
+executable/bin name and literal JSON arguments. Smart Paste can prefill an exact
+`npx -y package@1.2.3` or `uvx package==1.2.3` command without running a shell.
+
+Saving a definition does not install it. Review and approve the exact package, then
+explicitly consent to installation when testing capabilities. The reviewed adapter
+installs into the Hub's managed cache; running uses the contained resolved runtime,
+not an arbitrary shell shim. Credentials go in protected environment fields.
+Registry presence is not a trust endorsement. Version ranges and install hooks
+outside the reviewed adapter are not silently accepted.
+
+The manual installation alternatives below remain useful when you already manage
+an executable yourself.
+
+## MCP bundles (.mcpb)
+
+In **Add Manual MCP** or **Add connector**, expand **Install a .mcpb bundle**.
+Choose/drop a bundle, review its manifest, typed configuration and requested
+environment fields, then explicitly confirm **Install reviewed bundle**. Publisher
+metadata is untrusted. The supported Windows subset never runs arbitrary setup
+hooks or downloads dependencies. Sensitive configuration goes to DPAPI.
+
+Installation saves an unapproved connector and a local integrity receipt; it does
+not run the provider or grant execution approval. Review and approve the exact
+definition, then explicitly test capabilities. Setup JSON exports do not copy
+bundle installation files or receipts, so reinstall on another machine.
 
 ## npm package (npx)
 
-The hub never runs `npx`, `npm`, `.cmd` or `.bat` files, because they can download
-and run different code each time. Install the package once into a folder you
-control, then point the hub at `node.exe` and the package's entry script.
+For a manually managed native definition, the Hub never launches `npx`, `npm`,
+`.cmd` or `.bat` shell shims directly. Install a pinned package into a folder you
+control, then point the Hub at `node.exe` and the package's entry script. For
+automatic managed-cache installation use **Managed packages** above instead.
 
 1. Install a pinned version into its own folder:
 
@@ -191,12 +309,25 @@ they can run. JSONC (comments) and TOML are not accepted; remove comments first.
 
 ## Current limits worth knowing
 
-- **Each tool call starts a fresh process** for native connectors. Servers that keep
-  state between calls (open SSH sessions, browser tabs, database transactions) lose
-  that state after every call. Single-call tools work normally.
-- Native sessions are capped at 120 seconds and 1 MiB of output per call.
-- Agents see **tools only**: resources and prompts are not forwarded.
-- At most 256 tools are exposed across all connectors.
+- The managed bridge retains one connection per connector per bridge/MCP session.
+  SSH sessions, browser tabs and database transactions survive sequential calls.
+  Separate bridge instances never share peers or credentials.
+- Peers expire after **five idle minutes** or a **one-hour hard lifetime**. Approval,
+  credential metadata changes, expiring OAuth tokens and shutdown also close peers.
+  Native/Docker sessions retain a **1 MiB cumulative output limit**. Calls that fail
+  are not replayed automatically; after expiration, reopen stateful upstream sessions.
+- The pool allows up to **32 peers** and serializes operations on the same connector.
+  Direct materialized native profile launchers (outside the managed bridge) retain
+  the older 120-second lifetime; capability discovery checks are one-shot.
+- Agents can list/read resources, list resource templates and list/get prompts from
+  enabled, approved connectors in their assigned profile. Use the exact Hub URI or
+  prompt name returned by discovery, not an upstream identifier. Resource URIs and
+  templates are opaque per-session handles; prompt names are connector-prefixed.
+- Resource subscriptions are disabled. Scoped list-change notifications ask clients
+  to rediscover; old/out-of-scope handles fail closed rather than guessing a route.
+- Normal tools and each resource/template/prompt catalog expose at most 256 entries
+  across all connectors; tool-search mode has its separate larger metadata budget.
+  Resource/prompt catalogs mark incomplete results in `_meta["wmh/truncated"]`.
 
 ## When something fails
 

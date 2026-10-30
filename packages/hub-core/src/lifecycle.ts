@@ -1,6 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import {
+  createClientTokens,
+  memoryClientTokenStore,
+  type ClientTokenStore,
+} from './http/tokens.js';
+import { createAgentBridge } from './integrations/bridge.js';
+import type { CredentialStorageDiagnostics } from './auth/secrets.js';
+import { unconfiguredCredentialStorage } from './adapters/secrets/platform.js';
+import { createMcpbService } from './integrations/mcpb.js';
+import { createSetupService } from './setup/service.js';
+import type { McpbAdapter } from './adapters/mcpb.js';
+import {
+  createPlayground,
+  type PlaygroundConnect,
+} from './integrations/playground.js';
+import { createRequestLog } from './integrations/request-log.js';
+import { startRequestLogServer } from './integrations/request-log-ipc.js';
+import {
   RegistryOperationSchema,
+  IntegrationAgentIdSchema,
   type RegistryOperation,
   type Job,
   type OperationPreview,
@@ -15,6 +33,12 @@ import {
 import { publicError } from './diagnostics.js';
 import { planRegistry, type RegistryPlan } from './runtime/registry.js';
 import { createRuntimeChecks } from './runtime/checks.js';
+import { createConnectorHealth } from './runtime/health.js';
+import {
+  createLifecycleSettings,
+  type LifecyclePreferencesStore,
+  type StartupRegistration,
+} from './runtime/lifecycle-settings.js';
 import {
   MaterializationFault,
   type Materializer,
@@ -26,6 +50,8 @@ import { createAuthService } from './auth/service.js';
 import type { SecretBackends } from './auth/secrets.js';
 import type { OAuthRecipe } from './auth/oauth-flow.js';
 import type { beginOAuth, refreshOAuth } from './auth/oauth-flow.js';
+import type { discoverOAuth } from './auth/oauth-discovery.js';
+import { createAdoptionEngine } from './integrations/adoption.js';
 import {
   createIntegrationEngine,
   type IntegrationAdapters,
@@ -38,6 +64,13 @@ interface Draft {
   external?: MaterializationPlan;
 }
 export interface LifecycleAdapters {
+  credentialStorage?: CredentialStorageDiagnostics;
+  clientTokens?: ClientTokenStore;
+  lifecyclePreferences?: LifecyclePreferencesStore;
+  startup?: StartupRegistration;
+  playgroundConnect?: PlaygroundConnect;
+  requestLogDirectory?: string;
+  bundles?: McpbAdapter;
   integrations?: IntegrationAdapters;
   materializer?: Materializer;
   runtime?: CapabilityRuntime;
@@ -45,6 +78,7 @@ export interface LifecycleAdapters {
   oauthRecipes?: readonly OAuthRecipe[];
   oauthTimeoutMs?: number;
   oauthFlows?: { begin: typeof beginOAuth; refresh: typeof refreshOAuth };
+  oauthDiscovery?: typeof discoverOAuth;
 }
 export function createLifecycle(
   store: StateStore,
@@ -102,7 +136,115 @@ export function createLifecycle(
     now,
     adapters.oauthTimeoutMs,
     adapters.oauthFlows,
+    adapters.oauthDiscovery,
   );
+  const settings = createLifecycleSettings(
+    adapters.lifecyclePreferences,
+    adapters.startup,
+    () => safety.assertWritable(),
+  );
+  const health = createConnectorHealth(
+    store,
+    safety,
+    checks,
+    adapters.secrets ?? {},
+    settings,
+    auth.healthRefreshFailed,
+    now,
+  );
+  const adoption = createAdoptionEngine(
+    store,
+    safety,
+    mutation,
+    adapters.secrets ?? {},
+    adapters.integrations,
+    checks.invalidate,
+    now,
+  );
+  const bundles = createMcpbService(
+    store,
+    safety,
+    mutation,
+    adapters.secrets ?? {},
+    adapters.bundles,
+    now,
+  );
+  const requestLog = createRequestLog({ now });
+  const setup = createSetupService(
+    store,
+    safety,
+    mutation,
+    adapters.secrets ?? {},
+    checks.invalidate,
+    now,
+  );
+  const playgroundRead = async () => {
+    if (closed) throw new HubError('unavailable', 'Lifecycle is closed.');
+    await safety.assertWritable();
+    return store.read();
+  };
+  const playground = createPlayground(
+    playgroundRead,
+    requestLog,
+    adapters.playgroundConnect,
+    now,
+  );
+  const httpTokens = createClientTokens({
+    store: adapters.clientTokens ?? memoryClientTokenStore(),
+    registry: store,
+    mutation,
+    assertWritable: () => safety.assertWritable(),
+    now,
+  });
+  const httpBridges = new Set<ReturnType<typeof createAgentBridge>>();
+  const http = {
+    tokens: httpTokens,
+    async bridge(tokenId: string) {
+      if (!adapters.playgroundConnect)
+        throw new HubError('unavailable', 'HTTP bridge is unavailable.');
+      const token = await httpTokens.requireActive(tokenId);
+      const read = async () => {
+        const current = await httpTokens.requireActive(tokenId);
+        const state = await playgroundRead();
+        if (!current.profileId) return state;
+        const profile = state.profiles.find(
+          (item) => item.id === current.profileId && item.enabled !== false,
+        );
+        // Filter a snapshot only. The bridge still applies live agent-profile limits,
+        // tool policies, approvals and credentials, so this cannot widen a binding.
+        return {
+          ...state,
+          connectors: state.connectors.filter((connector) =>
+            profile?.connectorIds.includes(connector.id),
+          ),
+        };
+      };
+      const bridge = createAgentBridge(
+        read,
+        adapters.playgroundConnect,
+        token.agentId ?? 'http-client',
+        {},
+        requestLog,
+      );
+      httpBridges.add(bridge);
+      return { bridge, release: () => httpBridges.delete(bridge) };
+    },
+  };
+  let agentLogChannel: 'available' | 'unavailable' | 'not_configured' =
+    adapters.requestLogDirectory ? 'unavailable' : 'not_configured';
+  const collector = adapters.requestLogDirectory
+    ? startRequestLogServer(
+        adapters.requestLogDirectory,
+        requestLog,
+        playgroundRead,
+      ).then(
+        (server) => {
+          agentLogChannel = 'available';
+          return server;
+        },
+        () => undefined,
+      )
+    : Promise.resolve(undefined);
   const prune = () => {
     for (const [id, draft] of drafts)
       if (Date.parse(draft.preview.expiresAt) <= now()) drafts.delete(id);
@@ -121,15 +263,32 @@ export function createLifecycle(
     profile.dockerProfileId = external.record?.dockerProfileId ?? null;
   };
   return {
+    credentialStorage:
+      adapters.credentialStorage ?? unconfiguredCredentialStorage(),
     safety,
     checks,
+    settings,
+    health,
     auth,
     integrations,
+    adoption,
+    bundles,
+    setup,
+    playground,
+    http,
+    requestLog,
+    requestLogSnapshot: () => ({
+      records: requestLog.records(),
+      capacity: 500 as const,
+      agentLogChannel,
+    }),
     capabilities: {
       materialization: !!adapters.materializer,
       runtimeChecks: !!adapters.runtime,
       secrets: credentials.enabled,
       agentApply: integrations.enabled,
+      playground: playground.enabled,
+      startup: settings.startupAvailable,
     },
     inventory: () => store.read(),
     async preview(raw: unknown, owner: string): Promise<OperationPreview> {
@@ -138,12 +297,20 @@ export function createLifecycle(
       await safety.assertWritable();
       const state = await store.read();
       const targetId =
-        'profileId' in input
-          ? input.profileId
-          : 'connectorId' in input
-            ? input.connectorId
-            : randomUUID();
-      const plan = planRegistry(input, state, targetId, timestamp());
+        'agentId' in input
+          ? input.agentId
+          : 'profileId' in input
+            ? input.profileId
+            : 'connectorId' in input
+              ? input.connectorId
+              : randomUUID();
+      const plan = planRegistry(
+        input,
+        state,
+        targetId,
+        timestamp(),
+        input.kind === 'set_tool_override' ? await checks.observations() : [],
+      );
       let external: MaterializationPlan | undefined;
       if (
         input.kind === 'materialize_profile' ||
@@ -189,13 +356,19 @@ export function createLifecycle(
           : plan.warnings,
         affectedProfiles: plan.affectedProfiles,
         affectedAgents: [
-          ...new Set(
-            (state.agentBindings ?? [])
+          ...new Set([
+            ...(state.agentBindings ?? [])
               .filter((binding) =>
                 plan.affectedProfiles.includes(binding.profileId),
               )
               .map((binding) => binding.agentId),
-          ),
+            ...IntegrationAgentIdSchema.options.filter((agentId) =>
+              plan.affectedProfiles.includes(
+                state.agentProfileBindings?.[agentId] ?? '',
+              ),
+            ),
+            ...('agentId' in input ? [input.agentId] : []),
+          ]),
         ],
         files: external?.paths ?? [],
         expiresAt: new Date(now() + 5 * 60_000).toISOString(),
@@ -269,6 +442,9 @@ export function createLifecycle(
                 state,
                 draft.preview.targetId!,
                 timestamp(),
+                draft.input.kind === 'set_tool_override'
+                  ? await checks.observations()
+                  : [],
               );
               if (draft.external) attachExternal(plan, draft.external);
               plan.next.activity.push({
@@ -399,6 +575,19 @@ export function createLifecycle(
     },
     async close() {
       closed = true;
+      httpTokens.close();
+      await Promise.allSettled(
+        [...httpBridges].map((bridge) => bridge.close()),
+      );
+      httpBridges.clear();
+      settings.close();
+      await health.close();
+      await playground.close();
+      await (await collector)?.close();
+      requestLog.clear();
+      adoption.close();
+      bundles.close();
+      setup.close();
       drafts.clear();
       for (const entry of jobs.values())
         if (entry.external && !entry.job.completedAt) entry.controller.abort();

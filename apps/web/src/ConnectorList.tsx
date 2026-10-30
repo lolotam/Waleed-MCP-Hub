@@ -1,4 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import {
+  ToolPolicyNameSchema,
+  ConnectorHealthResponseSchema,
+  type ConnectorHealth,
+  type ToolPolicy,
+  type ToolOverride,
+} from '@waleed/contracts';
 import type {
   CapabilityObservation,
   Connector,
@@ -8,8 +15,12 @@ import type {
 } from '@waleed/contracts';
 import type { OperationDialogInput } from './OperationDialog.js';
 import { api } from './api.js';
+import { ToolOverrideDialog } from './ToolOverrideDialog.js';
 
-export type ManagedConnector = Connector & { executionHash: string };
+export type ManagedConnector = Connector & {
+  executionHash: string;
+  toolOverrides?: ToolOverride[];
+};
 export function editableDefinition(
   connector: ManagedConnector,
 ): ImportDefinition {
@@ -26,34 +37,46 @@ export function editableDefinition(
       : {}),
     trustApproval: null,
   };
-  return connector.executionMode === 'native'
+  return connector.executionMode === 'package'
     ? {
         ...common,
-        executionMode: 'native',
+        executionMode: 'package',
         transport: 'stdio',
-        executable: connector.executable,
+        package: connector.package,
         arguments: connector.arguments,
       }
-    : connector.executionMode === 'docker'
+    : connector.executionMode === 'native'
       ? {
           ...common,
-          executionMode: 'docker',
+          executionMode: 'native',
           transport: 'stdio',
-          image: connector.image,
-          ...(connector.portBindings
-            ? { portBindings: connector.portBindings }
-            : {}),
-          command: connector.command ?? [],
+          executable: connector.executable,
           arguments: connector.arguments,
         }
-      : {
-          ...common,
-          executionMode: 'remote',
-          transport: connector.transport,
-          endpoint: connector.endpoint,
-        };
+      : connector.executionMode === 'docker'
+        ? {
+            ...common,
+            executionMode: 'docker',
+            transport: 'stdio',
+            image: connector.image,
+            ...(connector.portBindings
+              ? { portBindings: connector.portBindings }
+              : {}),
+            command: connector.command ?? [],
+            arguments: connector.arguments,
+          }
+        : {
+            ...common,
+            executionMode: 'remote',
+            transport: connector.transport,
+            endpoint: connector.endpoint,
+            ...(connector.localHttpOptIn !== undefined
+              ? { localHttpOptIn: connector.localHttpOptIn }
+              : {}),
+          };
 }
 export function ConnectorList({
+  revision,
   connectors,
   observations,
   profiles,
@@ -64,6 +87,7 @@ export function ConnectorList({
   operate,
   refresh,
 }: {
+  revision: number;
   connectors: ManagedConnector[];
   observations: CapabilityObservation[];
   profiles: Profile[];
@@ -77,6 +101,46 @@ export function ConnectorList({
   const [job, setJob] = useState<RuntimeJob | null>(null);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
+  const [health, setHealth] = useState<ConnectorHealth[]>([]),
+    [healthRunning, setHealthRunning] = useState(false),
+    [healthNotice, setHealthNotice] = useState('');
+  const [liveObservations, setLiveObservations] = useState<
+    CapabilityObservation[]
+  >([]);
+  useEffect(() => {
+    let stopped = false,
+      timer: ReturnType<typeof setTimeout>;
+    setLiveObservations([]);
+    const load = async () => {
+      try {
+        const [raw, inventory] = await Promise.all([
+          api('/api/health/connectors'),
+          api<{ observations: CapabilityObservation[] }>('/api/connectors'),
+        ]);
+        const result = ConnectorHealthResponseSchema.parse(raw);
+        if (!stopped) {
+          setHealth(result.connectors);
+          setHealthRunning(result.running);
+          setLiveObservations(inventory.observations);
+          setHealthNotice((current) =>
+            current.startsWith('Health status is unavailable') ? '' : current,
+          );
+        }
+      } catch {
+        if (!stopped)
+          setHealthNotice(
+            'Health status is unavailable; displayed badges may be stale.',
+          );
+      } finally {
+        if (!stopped) timer = setTimeout(() => void load(), 5000);
+      }
+    };
+    void load();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [revision]);
   // Rows stay compact; details open in place and several may be open at once.
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const toggle = (id: string) =>
@@ -91,7 +155,11 @@ export function ConnectorList({
     try {
       let current = await api<RuntimeJob>(`/api/connectors/${id}/check`, {});
       setJob(current);
-      const deadline = Date.now() + 65_000;
+      const deadline =
+        Date.now() +
+        (connectors.find((item) => item.id === id)?.executionMode === 'package'
+          ? 165_000
+          : 65_000);
       while (current.state === 'running' && Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 200));
         current = await api<RuntimeJob>(`/api/runtime/jobs/${current.id}`);
@@ -106,11 +174,50 @@ export function ConnectorList({
   }
   return (
     <>
+      <div className="health-toolbar">
+        <button
+          disabled={disabled || !runtime || healthRunning}
+          onClick={() => {
+            setHealthNotice('');
+            void api('/api/health/retest', {})
+              .then(() => {
+                setHealthNotice(
+                  'Health checks requested. Results update automatically.',
+                );
+                setHealthRunning(true);
+              })
+              .catch(() =>
+                setHealthNotice(
+                  'Health checks could not start. Review approval and recovery.',
+                ),
+              );
+          }}
+        >
+          {healthRunning ? 'Checking health…' : 'Check Health'}
+        </button>
+        <small className="muted">Discovery only · no tool calls</small>
+        {healthNotice && <span role="status">{healthNotice}</span>}
+      </div>
       <ul className="connector-list">
         {connectors.map((connector) => {
-          const observation = observations.find(
+          const liveObservation = liveObservations.find(
+            (entry) =>
+              entry.connectorId === connector.id &&
+              entry.revision === connector.revision &&
+              entry.definitionHash === connector.executionHash,
+          );
+          const inventoryObservation = observations.find(
             (entry) => entry.connectorId === connector.id,
           );
+          // Polling can finish after an explicit check has refreshed inventory.
+          // Never let an older same-revision snapshot erase the newer result.
+          const observation =
+            liveObservation &&
+            (!inventoryObservation ||
+              (liveObservation.checkedAt ?? '') >
+                (inventoryObservation.checkedAt ?? ''))
+              ? liveObservation
+              : inventoryObservation;
           const approval =
             connector.trustApproval?.revision === connector.revision &&
             connector.trustApproval.definitionHash === connector.executionHash;
@@ -118,8 +225,15 @@ export function ConnectorList({
             Object.keys(connector.secretBindings).length > 0 ||
             Object.keys(connector.headerBindings).length > 0;
           const state = observation?.state ?? 'untested';
-          const tone =
-            state === 'connected'
+          const connectorHealth = health.find(
+              (entry) =>
+                entry.connectorId === connector.id &&
+                entry.revision === connector.revision,
+            ),
+            needsReauth = connectorHealth?.status === 'needs_reauth';
+          const tone = needsReauth
+            ? 'warn'
+            : state === 'connected'
               ? 'ok'
               : state === 'untested' || state === 'checking'
                 ? 'idle'
@@ -127,11 +241,13 @@ export function ConnectorList({
           const toolCount =
             state === 'connected' ? (observation?.tools.length ?? 0) : null;
           const target =
-            connector.executionMode === 'native'
-              ? [connector.executable, ...connector.arguments].join(' ')
-              : connector.executionMode === 'docker'
-                ? connector.image
-                : connector.endpoint;
+            connector.executionMode === 'package'
+              ? `${connector.package.manager === 'npm' ? 'npx' : 'uvx'} ${connector.package.name}${connector.package.manager === 'npm' ? '@' : '=='}${connector.package.version} → ${connector.package.entryPoint}`
+              : connector.executionMode === 'native'
+                ? [connector.executable, ...connector.arguments].join(' ')
+                : connector.executionMode === 'docker'
+                  ? connector.image
+                  : connector.endpoint;
           const expanded = open.has(connector.id);
           const panelId = `connector-panel-${connector.id}`;
           return (
@@ -160,6 +276,26 @@ export function ConnectorList({
                   {connector.executionMode}
                 </span>
                 <span className="pills">
+                  {needsReauth && (
+                    <span
+                      className="pill reauth"
+                      aria-label={`Needs Re-auth for ${connector.name}`}
+                    >
+                      Needs Re-auth
+                    </span>
+                  )}
+                  {Object.values(connector.toolPolicies ?? {}).filter(
+                    (policy) => policy === 'block',
+                  ).length > 0 && (
+                    <span className="pill warn">
+                      {
+                        Object.values(connector.toolPolicies ?? {}).filter(
+                          (policy) => policy === 'block',
+                        ).length
+                      }{' '}
+                      blocked
+                    </span>
+                  )}
                   <span className={`pill ${connector.enabled ? tone : 'off'}`}>
                     {connector.enabled
                       ? state.replaceAll('_', ' ')
@@ -174,6 +310,18 @@ export function ConnectorList({
                 </span>
                 <span className="chevron" aria-hidden="true" />
               </button>
+              {needsReauth && (
+                <div className="connector-reauth-actions">
+                  <span>Sign-in or token renewal is required.</span>
+                  <button
+                    disabled={disabled || !secrets}
+                    aria-label={`Re-authenticate ${connector.name}`}
+                    onClick={() => authenticate(connector)}
+                  >
+                    Re-authenticate
+                  </button>
+                </div>
+              )}
               {expanded && (
                 <div className="connector-panel" id={panelId}>
                   <div
@@ -239,7 +387,9 @@ export function ConnectorList({
                           ? 'Endpoint'
                           : connector.executionMode === 'docker'
                             ? 'Image'
-                            : 'Command'}
+                            : connector.executionMode === 'package'
+                              ? 'Pinned package'
+                              : 'Command'}
                       </dt>
                       <dd>
                         <code>{target}</code>
@@ -283,6 +433,13 @@ export function ConnectorList({
                       ))}
                     </ul>
                   </details>
+                  <ToolPermissions
+                    connector={connector}
+                    observation={observation}
+                    revision={revision}
+                    disabled={disabled}
+                    refresh={refresh}
+                  />
                 </div>
               )}
             </li>
@@ -313,6 +470,203 @@ export function ConnectorList({
         </p>
       )}
     </>
+  );
+}
+function ToolPermissions({
+  connector,
+  observation,
+  revision,
+  disabled,
+  refresh,
+}: {
+  connector: ManagedConnector;
+  observation: CapabilityObservation | undefined;
+  revision: number;
+  disabled: boolean;
+  refresh: () => Promise<void>;
+}) {
+  const [policies, setPolicies] = useState(connector.toolPolicies ?? {}),
+    [saving, setSaving] = useState(false),
+    [stale, setStale] = useState(false),
+    [message, setMessage] = useState(''),
+    [error, setError] = useState('');
+  const [customizing, setCustomizing] = useState<string | null>(null);
+  useEffect(() => {
+    setPolicies(connector.toolPolicies ?? {});
+    setStale(false);
+  }, [connector.toolPolicies, revision]);
+  const names = [
+    ...new Set([
+      ...(observation?.tools.map((tool) => tool.name) ?? []),
+      ...Object.keys(policies),
+      ...(connector.toolOverrides ?? []).map((item) => item.originalToolName),
+    ]),
+  ].sort();
+  const blocked = Object.values(policies).filter(
+      (policy) => policy === 'block',
+    ).length,
+    asked = Object.values(policies).filter((policy) => policy === 'ask').length;
+  async function change(name: string, policy: ToolPolicy) {
+    const next = { ...policies };
+    if (policy === 'allow') delete next[name];
+    else next[name] = policy;
+    setPolicies(next);
+    setSaving(true);
+    setError('');
+    setMessage('Saving permissions…');
+    let saved = false;
+    try {
+      const result = await api<{ state: string; recoveryRequired: boolean }>(
+        `/api/connectors/${connector.id}/tool-policies`,
+        {
+          expectedRevision: revision,
+          expectedConnectorRevision: connector.revision,
+          toolPolicies: next,
+        },
+      );
+      saved = true;
+      await refresh();
+      setMessage(
+        result.recoveryRequired
+          ? 'Permissions saved; recovery review is required.'
+          : 'Permissions saved. The managed bridge rechecks every call.',
+      );
+    } catch {
+      if (!saved) setPolicies(connector.toolPolicies ?? {});
+      setStale(true);
+      setMessage('');
+      setError(
+        saved
+          ? 'Permissions saved, but inventory refresh failed. Refresh before making another change.'
+          : 'Permissions were not confirmed. Refresh inventory before retrying; another window may have changed it.',
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <details className="tool-permissions">
+      <summary>
+        Tools &amp; Permissions{' '}
+        <span className="pill">
+          {names.length} tools · {asked} Ask · {blocked} Blocked
+        </span>
+      </summary>
+      <p>
+        Allow runs normally. Ask requires a one-time user confirmation through
+        the agent’s elicitation UI; unsupported clients are refused. Block
+        removes the tool from the agent’s catalog and rejects stale calls.
+        Unconfigured tools default to Allow, including read-only tools.
+      </p>
+      {!names.length && (
+        <p>
+          No discovered tools yet. Approve this connector and test capabilities
+          first; discovery executes no tools.
+        </p>
+      )}
+      <ul className="tool-policy-list">
+        {names.map((name) => {
+          const supported = ToolPolicyNameSchema.safeParse(name).success,
+            policy = supported ? (policies[name] ?? 'allow') : 'block';
+          const override = connector.toolOverrides?.find(
+            (item) => item.originalToolName === name,
+          );
+          return (
+            <li key={name}>
+              <label>
+                <code>{name}</code>
+                <select
+                  aria-label={`Policy for ${name}`}
+                  value={policy}
+                  disabled={disabled || saving || stale || !supported}
+                  onChange={(event) =>
+                    void change(name, event.target.value as ToolPolicy)
+                  }
+                >
+                  <option value="allow">Allow</option>
+                  <option value="ask">Ask</option>
+                  <option value="block">Block</option>
+                </select>
+              </label>
+              <span className={`pill ${policy === 'allow' ? 'ok' : 'warn'}`}>
+                {policy === 'block'
+                  ? 'Blocked'
+                  : policy === 'ask'
+                    ? 'Ask'
+                    : 'Allow'}
+              </span>
+              {override && (
+                <span
+                  className="pill"
+                  title={
+                    override.alias
+                      ? `Alias: ${override.alias}`
+                      : 'Customized tool metadata'
+                  }
+                >
+                  Overridden
+                </span>
+              )}
+              {override?.alias && (
+                <small className="tool-alias">
+                  Agent name: <code>{override.alias}</code>
+                </small>
+              )}
+              <button
+                type="button"
+                aria-label={`Customize ${name}`}
+                disabled={disabled || saving || stale || !supported}
+                onClick={() => setCustomizing(name)}
+              >
+                Customize
+              </button>
+              {!supported && (
+                <small>
+                  Unsupported tool name; omitted by the managed bridge.
+                </small>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {message && <p role="status">{message}</p>}
+      {customizing && (
+        <ToolOverrideDialog
+          connectorId={connector.id}
+          connectorRevision={connector.revision}
+          revision={revision}
+          toolName={customizing}
+          override={connector.toolOverrides?.find(
+            (item) => item.originalToolName === customizing,
+          )}
+          close={() => setCustomizing(null)}
+          refresh={refresh}
+        />
+      )}
+      {error && <p role="alert">{error}</p>}
+      {stale && (
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => {
+            setSaving(true);
+            void refresh()
+              .then(() => {
+                setStale(false);
+                setError('');
+              })
+              .catch(() =>
+                setError(
+                  'Refresh failed. Permissions remain unchanged in this window.',
+                ),
+              )
+              .finally(() => setSaving(false));
+          }}
+        >
+          Refresh permissions
+        </button>
+      )}
+    </details>
   );
 }
 function ConnectorActions({
@@ -397,7 +751,9 @@ function ConnectorActions({
         }
         onClick={() => check(connector.id)}
       >
-        Test capabilities
+        {connector.executionMode === 'package'
+          ? 'Prepare & test package'
+          : 'Test capabilities'}
       </button>
       <button
         disabled={disabled}

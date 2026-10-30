@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { PortBindingsSchema } from './integrations.js';
+import { PackageSpecSchema } from './packages.js';
+import { EndpointSchema } from './endpoints.js';
 
 const Revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const Id = z
@@ -41,26 +43,17 @@ const common = {
 export const ImportDefinitionSchema = z.discriminatedUnion('executionMode', [
   z.strictObject({
     ...common,
+    executionMode: z.literal('package'),
+    transport: z.literal('stdio'),
+    package: PackageSpecSchema,
+    arguments: Args,
+  }),
+  z.strictObject({
+    ...common,
     executionMode: z.literal('remote'),
     transport: z.enum(['streamable_http', 'sse']),
-    endpoint: z
-      .string()
-      .max(2048)
-      .url()
-      .refine((value) => {
-        try {
-          const url = new URL(value);
-          return (
-            url.protocol === 'https:' &&
-            !url.username &&
-            !url.password &&
-            !url.search &&
-            !url.hash
-          );
-        } catch {
-          return false;
-        }
-      }),
+    endpoint: EndpointSchema,
+    localHttpOptIn: z.boolean().optional(),
   }),
   z.strictObject({
     ...common,
@@ -94,6 +87,7 @@ export const ImportIssueSchema = z.strictObject({
     'unresolved_reference',
     'credential_in_definition',
     'unsafe_literal',
+    'local_http_opt_in_required',
   ]),
   field: z.string().max(100),
 });
@@ -112,6 +106,7 @@ export const ImportWarningSchema = z.enum([
   'destination_review',
   'secrets_memory_only',
   'disabled_entry',
+  'local_http_opt_in',
 ]);
 export const ImportEntrySchema = z.strictObject({
   key: Id,
@@ -119,6 +114,7 @@ export const ImportEntrySchema = z.strictObject({
   name: Name,
   id: Id,
   definition: ImportDefinitionSchema.nullable(),
+  localHttpEndpoint: EndpointSchema.optional(),
   issues: z.array(ImportIssueSchema).max(100),
   warnings: z.array(ImportWarningSchema).max(20),
   conflicts: z
@@ -146,7 +142,15 @@ export const ImportSelectionSchema = z.strictObject({
   expectedRevision: Revision,
   entries: z
     .array(
-      z.strictObject({ key: Id, selected: z.boolean(), name: Name, id: Id }),
+      z.strictObject({
+        key: Id,
+        selected: z.boolean(),
+        name: Name,
+        id: Id,
+        packageVersion: z.string().max(100).optional(),
+        entryPoint: z.string().max(100).optional(),
+        localHttpOptIn: z.boolean().optional(),
+      }),
     )
     .min(1)
     .max(32),
@@ -167,7 +171,7 @@ export const ImportPreviewSchema = z.strictObject({
     )
     .max(256),
   selectionReady: z.boolean(),
-  applySupported: z.literal(false),
+  applySupported: z.boolean(),
   blockers: z
     .array(
       z.enum([
@@ -210,3 +214,16 @@ export type ImportIssue = z.infer<typeof ImportIssueSchema>;
 export type ImportWarning = z.infer<typeof ImportWarningSchema>;
 export type ImportPreview = z.infer<typeof ImportPreviewSchema>;
 export type ImportSelection = z.infer<typeof ImportSelectionSchema>;
+export const ImportApplySchema = z.strictObject({
+  expectedRevision: Revision,
+  profileIds: z
+    .array(Id)
+    .min(1)
+    .max(32)
+    .refine((ids) => new Set(ids).size === ids.length),
+  confirmImport: z.literal(true),
+  confirmAgentConfigChange: z.boolean().default(false),
+});
+export const AgentImportPreviewSchema = z.strictObject({
+  expectedRevision: Revision,
+});

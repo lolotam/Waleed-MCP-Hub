@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startDesktop } from './desktop-runtime.mjs';
+import { createInterface } from 'node:readline';
 
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Desktop mode requires Node 24 on Windows.');
@@ -56,6 +57,12 @@ const desktop = await startDesktop({
   directory,
   port: Number(process.env.HUB_PORT ?? 4177),
   log,
+  background: process.argv.includes('--background'),
+  preferencesChanged(value) {
+    process.stdout.write(
+      `wmh-keep-tray:${value.keepRunningInTray ? '1' : '0'}\n`,
+    );
+  },
   openWindow(url) {
     const app = spawn(
       browser,
@@ -68,6 +75,8 @@ const desktop = await startDesktop({
       { shell: false, stdio: 'ignore' },
     );
     log('opening Edge app window');
+    app.unref(); // Tray Exit must not wait for the separately owned Edge window.
+    if (app.pid) process.stdout.write(`wmh-edge-pid:${app.pid}\n`);
     app.on('error', (error) => {
       log(`Edge could not start: ${error.message}`);
       process.stderr.write('Windows App Mode could not open.\n');
@@ -78,6 +87,20 @@ const desktop = await startDesktop({
 log(
   desktop.reused ? 'reused running desktop' : `started backend ${desktop.pid}`,
 );
+if (!desktop.reused) {
+  process.stdout.write('wmh-desktop-owner-v1\n');
+  const input = createInterface({ input: process.stdin });
+  input.on('line', (line) => {
+    if (line.length > 16) {
+      input.close();
+      return;
+    }
+    if (line === 'open') void desktop.open().catch(() => undefined);
+    if (line === 'health') desktop.checkHealth();
+    if (line === 'exit') desktop.stop();
+  });
+  desktop.closed.then(() => input.close());
+}
 process.once('SIGINT', desktop.stop);
 process.once('SIGTERM', desktop.stop);
 await desktop.closed;

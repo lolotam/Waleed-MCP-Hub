@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { assertNoLinks } from '../adapters/managed-files.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
 import { HubError } from '../errors.js';
+import { platformPathKey, supportedPlatform } from '../platform/paths.js';
 
 const conflict = () =>
   new HubError(
@@ -55,12 +56,14 @@ export function agentFiles(
   backupDirectory: string,
   protect = restrictPrivatePath,
 ): AgentFiles {
-  const paths = new Set(allowed.map((path) => resolve(path).toLowerCase()));
+  const key = (path: string) =>
+    platformPathKey(resolve(path), supportedPlatform(process.platform));
+  const paths = new Set(allowed.map(key));
   const permit = (path: string) => {
     if (
       !isAbsolute(path) ||
-      !paths.has(resolve(path).toLowerCase()) ||
-      path.slice(2).includes(':')
+      !paths.has(key(path)) ||
+      (process.platform === 'win32' && path.slice(2).includes(':'))
     )
       throw conflict();
   };
@@ -77,7 +80,7 @@ export function agentFiles(
         const opened = await file.stat();
         if (
           opened.ino !== info.ino ||
-          opened.dev !== info.dev ||
+          (info.dev !== 0 && opened.dev !== info.dev) ||
           opened.size > 1024 * 1024
         )
           throw conflict();

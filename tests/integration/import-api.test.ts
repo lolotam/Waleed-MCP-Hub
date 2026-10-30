@@ -153,7 +153,7 @@ describe('authenticated no-effects import API', () => {
           payload: {},
         })
       ).statusCode,
-    ).toBe(404);
+    ).toBe(400);
     expect(
       (
         await hub.app.inject({

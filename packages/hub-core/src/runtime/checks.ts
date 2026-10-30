@@ -19,7 +19,7 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
       const state = await store.read();
       return state.connectors.map((connector) => { const observed = observations.get(connector.id); return observed?.revision === connector.revision && observed.definitionHash === definitionHash(connector) ? structuredClone(observed) : untested(connector); });
     },
-    async start(id: string, owner: string) {
+    async start(id: string, owner: string, background = false) {
       if (closed || !runtime) throw new HubError('unavailable', 'No verified runtime adapter is configured.');
       if (starting) throw new HubError('busy', 'Another check is being admitted.'); starting = true;
       try {
@@ -37,12 +37,12 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
           await safety.prepare({ id: job.id, operation: 'check_connector', targetId: id, expectedRevision: state.revision, beforeHash: stateHash(state), afterHash: hashData({ jobId: job.id, cleanup: 'owned_container_label' }), phase: 'prepared', reason: 'none', createdAt: job.createdAt, updatedAt: job.createdAt, external: true }); prepared = true;
         }
         observations.set(id, observed);
-        const timer = setTimeout(() => { job.reason = 'timed_out'; controller.abort(); }, 20_000);
+        const timer = setTimeout(() => { job.reason = 'timed_out'; controller.abort(); }, connector.executionMode === 'package' ? 120_000 : 20_000);
         const task = Promise.resolve().then(async () => {
           let result: CapabilityObservation = { ...observed };
           let uncertain = false;
           try {
-            const discovered = await runtime.discover(connector, controller.signal);
+            const discovered = background ? await runtime.discover(connector, controller.signal, {allowInstall:false}) : await runtime.discover(connector, controller.signal);
             if (controller.signal.aborted) throw new RuntimeFault(job.reason === 'timed_out' ? 'timed_out' : 'cancelled');
             result = { ...untested(connector), ...discovered, state: 'connected', checkedAt: new Date(now()).toISOString(), method: 'mcp_discovery', reason: 'none' }; job.state = 'succeeded';
           } catch (error) {
@@ -66,6 +66,7 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
       } finally { starting = false; }
     },
     job(id: string, owner: string) { const entry = jobs.get(id); if (!entry || entry.owner !== owner) throw new HubError('not_found', 'Check job not found.'); return structuredClone(entry.job); },
+    async wait(id: string, owner: string) { const entry = jobs.get(id); if (!entry || entry.owner !== owner) throw new HubError('not_found', 'Check job not found.'); await entry.task; return structuredClone(entry.job); },
     cancel(id: string, owner: string) { const entry = jobs.get(id); if (!entry || entry.owner !== owner) throw new HubError('not_found', 'Check job not found.'); if (!entry.job.completedAt) entry.controller.abort(); return structuredClone(entry.job); },
     invalidate(ids: string[]) { ids.forEach((id) => { observations.delete(id); for (const entry of jobs.values()) if (entry.job.connectorId === id && !entry.job.completedAt) entry.controller.abort(); }); },
     async drain() { await Promise.all([...jobs.values()].map((entry) => entry.task)); },

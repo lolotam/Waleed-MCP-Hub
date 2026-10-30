@@ -10,6 +10,45 @@ import { connector } from './helpers/runtime.js';
 import { managedFixture } from './helpers/materialization.js';
 
 describe('Docker command safety and owned cleanup', () => {
+  it('retains only allowlisted Windows variables regardless of captured key casing', async () => {
+    const calls: Array<Readonly<Record<string, string>>> = [];
+    const command = dockerCommand(
+      {
+        async run(request) {
+          calls.push(request.environment);
+          const stdout =
+            request.arguments[0] === 'context'
+              ? JSON.stringify('npipe:////./pipe/dockerDesktopLinuxEngine')
+              : request.arguments[0] === 'mcp'
+                ? 'v0.44.2'
+                : '29.9.2';
+          return { outcome: 'exited', exitCode: 0, stdout, stderr: '' };
+        },
+      },
+      'C:\\Synthetic\\docker.exe',
+      {
+        ProgramFiles: 'C:\\Program Files',
+        ProgramData: 'C:\\ProgramData',
+        SYSTEMROOT: 'C:\\Windows',
+        userprofile: 'C:\\Synthetic',
+        private_token: 'SYNTHETIC_NOT_FORWARDED',
+        Path: 'C:\\Untrusted',
+      },
+    );
+    await command.run(['version'], AbortSignal.timeout(1000));
+    for (const environment of calls) {
+      expect(environment).toMatchObject({
+        PROGRAMFILES: 'C:\\Program Files',
+        PROGRAMDATA: 'C:\\ProgramData',
+        SystemRoot: 'C:\\Windows',
+        USERPROFILE: 'C:\\Synthetic',
+      });
+      expect(JSON.stringify(environment)).not.toContain(
+        'SYNTHETIC_NOT_FORWARDED',
+      );
+      expect(environment.PATH).not.toContain('Untrusted');
+    }
+  });
   it('refuses remote contexts before invoking gateway/profile mutations and forwards no provider secrets', async () => {
     const calls: Array<{
       arguments: readonly string[];

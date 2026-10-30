@@ -1,5 +1,18 @@
 import { z } from 'zod';
-import { IntegrationRecordSchema, PortBindingsSchema } from './integrations.js';
+import { SecretAdapterSchema } from './platform.js';
+export * from './platform.js';
+import {
+  IntegrationRecordSchema,
+  PortBindingsSchema,
+  ToolPoliciesSchema,
+  IntegrationAgentIdSchema,
+  AgentToolSearchModesSchema,
+} from './integrations.js';
+import { PackageSpecSchema } from './packages.js';
+import { McpbBundleSchema } from './mcpb.js';
+import { ToolOverridesCollectionSchema } from './tool-overrides.js';
+export * from './mcpb.js';
+import { EndpointSchema, isLocalHttpEndpoint } from './endpoints.js';
 import {
   LifecycleKindSchema,
   MaterializationSchema,
@@ -10,6 +23,17 @@ export * from './imports.js';
 export * from './runtime.js';
 export * from './auth.js';
 export * from './integrations.js';
+export * from './packages.js';
+export * from './registry.js';
+export * from './endpoints.js';
+export * from './smart-paste.js';
+export * from './tool-search.js';
+export * from './playground.js';
+export * from './bridge-content.js';
+export * from './lifecycle.js';
+export * from './tool-overrides.js';
+export * from './setup.js';
+export * from './http-transport.js';
 
 export const MAX_REQUEST_BYTES = 64 * 1024;
 export const IdSchema = z
@@ -25,36 +49,20 @@ const boundedIds = z
   .array(IdSchema)
   .max(256)
   .refine((ids) => new Set(ids).size === ids.length, 'Duplicate identifiers');
-
-// This is definition validation, not DNS/redirect authorization for network access.
-export const EndpointSchema = z
-  .string()
-  .max(2048)
-  .url()
-  .superRefine((value, ctx) => {
-    let url: URL;
-    try {
-      url = new URL(value);
-    } catch {
-      return;
-    } // The URL validator reports malformed input.
-    if (
-      url.protocol !== 'https:' ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash
-    ) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'Use HTTPS without credentials, query strings, or fragments.',
-      });
-    }
-  });
+export const AgentProfileBindingsSchema = z.preprocess(
+  (value, ctx) => {
+    if (value && typeof value === 'object' && Object.hasOwn(value, '__proto__'))
+      ctx.addIssue({ code: 'custom', message: 'Forbidden agent binding key.' });
+    return value;
+  },
+  z
+    .partialRecord(IntegrationAgentIdSchema, IdSchema)
+    .refine((bindings) => Object.keys(bindings).length <= 24),
+);
 
 export const SecretReferenceSchema = z.strictObject({
   id: IdSchema,
-  adapter: z.enum(['docker', 'windows']),
+  adapter: SecretAdapterSchema,
   present: z.boolean(),
   ownerIds: boundedIds,
   kind: z.enum(['credential', 'oauth']).optional(),
@@ -69,6 +77,7 @@ const SecretBindings = z
   .record(BindingName, IdSchema)
   .refine((bindings) => Object.keys(bindings).length <= 64);
 const connectorFields = {
+  toolPolicies: ToolPoliciesSchema.optional(),
   id: IdSchema,
   name: Name,
   description: Description,
@@ -105,10 +114,27 @@ const Arguments = z
 export const ConnectorSchema = z.discriminatedUnion('executionMode', [
   z.strictObject({
     ...connectorFields,
-    executionMode: z.literal('remote'),
-    transport: z.enum(['streamable_http', 'sse']),
-    endpoint: EndpointSchema,
+    executionMode: z.literal('package'),
+    transport: z.literal('stdio'),
+    package: PackageSpecSchema,
+    arguments: Arguments,
   }),
+  z
+    .strictObject({
+      ...connectorFields,
+      executionMode: z.literal('remote'),
+      transport: z.enum(['streamable_http', 'sse']),
+      endpoint: EndpointSchema,
+      localHttpOptIn: z.boolean().optional(),
+    })
+    .superRefine((value, ctx) => {
+      if (isLocalHttpEndpoint(value.endpoint) && value.localHttpOptIn !== true)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['localHttpOptIn'],
+          message: 'Explicit local HTTP opt-in is required.',
+        });
+    }),
   z.strictObject({
     ...connectorFields,
     executionMode: z.literal('native'),
@@ -119,6 +145,7 @@ export const ConnectorSchema = z.discriminatedUnion('executionMode', [
       .max(1024)
       .refine((s) => !/[\r\n\0]/.test(s)),
     arguments: Arguments,
+    bundle: McpbBundleSchema.optional(),
   }),
   z.strictObject({
     ...connectorFields,
@@ -375,7 +402,10 @@ export const OperationPreviewSchema = z.strictObject({
     .regex(/^[a-f0-9]{64}$/)
     .optional(),
   affectedProfiles: boundedIds.optional(),
-  affectedAgents: z.array(AgentIdSchema).max(8).optional(),
+  affectedAgents: z
+    .array(z.union([AgentIdSchema, IntegrationAgentIdSchema]))
+    .max(10)
+    .optional(),
   files: z.array(z.string().max(2048)).max(256).optional(),
 });
 export const JobSchema = z.strictObject({
@@ -413,7 +443,17 @@ export const StateSchema = z
     activity: z.array(AuditEventSchema).max(200),
     materializations: z.array(MaterializationSchema).max(256).optional(),
     agentBindings: z.array(AgentBindingSchema).max(2048).optional(),
-    integrations: z.array(IntegrationRecordSchema).max(9).optional(),
+    integrations: z
+      .array(IntegrationRecordSchema)
+      .max(24)
+      .refine(
+        (items) =>
+          new Set(items.map((item) => item.agentId)).size === items.length,
+      )
+      .optional(),
+    agentProfileBindings: AgentProfileBindingsSchema.optional(),
+    agentToolSearchModes: AgentToolSearchModesSchema.optional(),
+    toolOverrides: ToolOverridesCollectionSchema.optional(),
   })
   .superRefine((state, ctx) => {
     for (const items of [
@@ -429,6 +469,20 @@ export const StateSchema = z
       }
     }
     const ids = new Set(state.connectors.map((connector) => connector.id));
+    if (state.toolOverrides?.some((item) => !ids.has(item.connectorId)))
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Tool override references an unknown connector.',
+      });
+    if (
+      Object.values(state.agentProfileBindings ?? {}).some(
+        (id) => !state.profiles.some((profile) => profile.id === id),
+      )
+    )
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Agent binding references an unknown profile.',
+      });
     if (
       state.profiles.some((profile) =>
         profile.connectorIds.some((id) => !ids.has(id)),
@@ -465,7 +519,8 @@ export const BootstrapSchema = z.strictObject({
     secrets: z.boolean(),
     agentApply: z.boolean(),
     desktop: z.boolean().optional(),
-    startup: z.literal(false),
+    playground: z.boolean().optional(),
+    startup: z.boolean(),
   }),
   docker: z.enum([
     'not_checked',

@@ -3,6 +3,7 @@ import {
   ImportPreviewRequestSchema,
   ImportPreviewSchema,
   ImportSelectionSchema,
+  PackageSpecSchema,
   type HubState,
   type ImportPreview,
 } from '@waleed/contracts';
@@ -26,13 +27,18 @@ const fold = (name: string) => name.normalize('NFKC').trim().toLowerCase();
 
 // No process/filesystem/network/secret-store adapter is accepted by this module.
 // Its only retained private data is bounded, owner-scoped, short-lived memory.
-export function createImportService(now: () => number = Date.now) {
+export function createImportService(
+  now: () => number = Date.now,
+  applySupported = false,
+  discarded?: (id: string) => void,
+) {
   const drafts = new Map<string, Draft>();
   let closed = false;
   const remove = (draft: Draft) => {
     clearTimeout(draft.timer);
     clearImport(draft.normalized);
     drafts.delete(draft.id);
+    discarded?.(draft.id);
   };
   const prune = () => {
     for (const draft of drafts.values())
@@ -65,6 +71,11 @@ export function createImportService(now: () => number = Date.now) {
     recoveryBlocked: boolean,
   ): ImportPreview => {
     const entries = structuredClone(draft.normalized.entries);
+    for (const entry of entries) {
+      const pending = draft.normalized.pendingLocalHttp.get(entry.key);
+      if (!entry.definition && pending?.executionMode === 'remote')
+        entry.localHttpEndpoint = pending.endpoint;
+    }
     const selected = entries.filter((entry) => entry.selected);
     for (const entry of selected) {
       if (
@@ -89,7 +100,17 @@ export function createImportService(now: () => number = Date.now) {
     }
     const blockers: ImportPreview['blockers'] = [];
     if (!selected.length) blockers.push('no_selection');
-    if (selected.some((entry) => !entry.definition || entry.issues.length))
+    if (
+      selected.some(
+        (entry) =>
+          !entry.definition ||
+          entry.issues.length ||
+          (applySupported &&
+            (entry.definition?.executionMode === 'docker' ||
+              (entry.definition?.executionMode === 'native' &&
+                !/^[a-z]:[\\/].+\.exe$/i.test(entry.definition.executable)))),
+      )
+    )
       blockers.push('invalid_selection');
     if (selected.some((entry) => entry.conflicts.length))
       blockers.push('conflicts');
@@ -114,7 +135,7 @@ export function createImportService(now: () => number = Date.now) {
       entries,
       blockers,
       selectionReady: !blockers.length,
-      applySupported: false,
+      applySupported,
       secretReferences: draft.normalized.references.filter((reference) =>
         references.has(reference.id),
       ),
@@ -260,9 +281,100 @@ export function createImportService(now: () => number = Date.now) {
         entry.name = change.name;
         entry.id = change.id;
         entry.selected = change.selected;
+        const pending = draft.normalized.pendingLocalHttp.get(entry.key);
+        if (pending) {
+          pending.name = change.name;
+          pending.id = change.id;
+        }
+        if (change.localHttpOptIn !== undefined) {
+          const candidate = entry.definition ?? pending;
+          if (
+            candidate?.executionMode !== 'remote' ||
+            !entry.warnings.includes('local_http_opt_in')
+          )
+            throw new HubError(
+              'invalid',
+              'Local HTTP consent requires a valid pending loopback endpoint.',
+            );
+          const confirmed = {
+            ...candidate,
+            name: change.name,
+            id: change.id,
+            localHttpOptIn: change.localHttpOptIn,
+          };
+          draft.normalized.pendingLocalHttp.set(entry.key, confirmed);
+          entry.issues = entry.issues.filter(
+            (issue) => issue.code !== 'local_http_opt_in_required',
+          );
+          if (change.localHttpOptIn) entry.definition = confirmed;
+          else {
+            entry.definition = null;
+            entry.issues.push({
+              code: 'local_http_opt_in_required',
+              field: 'localHttpOptIn',
+            });
+          }
+        }
         if (entry.definition) {
           entry.definition.name = change.name;
           entry.definition.id = change.id;
+          if (change.packageVersion || change.entryPoint) {
+            const definition = entry.definition;
+            if (definition.executionMode === 'package') {
+              definition.package = PackageSpecSchema.parse({
+                ...definition.package,
+                ...(change.packageVersion
+                  ? { version: change.packageVersion }
+                  : {}),
+                ...(change.entryPoint ? { entryPoint: change.entryPoint } : {}),
+              });
+            } else if (definition.executionMode === 'native') {
+              const binary = definition.executable
+                .split(/[\\/]/)
+                .at(-1)
+                ?.replace(/\.(?:exe|cmd|bat)$/i, '')
+                .toLowerCase();
+              const args = [...definition.arguments];
+              if (binary === 'npx' && ['-y', '--yes'].includes(args[0] ?? ''))
+                args.shift();
+              const token = args.shift() ?? '',
+                split =
+                  binary === 'npx'
+                    ? token.lastIndexOf('@')
+                    : token.indexOf('==');
+              const name = split > 0 ? token.slice(0, split) : token;
+              if (
+                !['npx', 'uvx'].includes(binary ?? '') ||
+                !change.packageVersion
+              )
+                throw new HubError(
+                  'invalid',
+                  'Only package entries accept a version pin.',
+                );
+              const spec = PackageSpecSchema.parse({
+                manager: binary === 'npx' ? 'npm' : 'uvx',
+                name,
+                version: change.packageVersion,
+                entryPoint: change.entryPoint || name.split('/').at(-1),
+              });
+              entry.definition = {
+                ...definition,
+                executionMode: 'package',
+                transport: 'stdio',
+                package: spec,
+                arguments: args,
+              };
+              delete (entry.definition as unknown as Record<string, unknown>)
+                .executable;
+              entry.warnings = entry.warnings.filter(
+                (warning) => warning !== 'unpinned_package',
+              );
+            } else
+              throw new HubError(
+                'invalid',
+                'Only package entries accept a version pin.',
+              );
+          }
         }
       }
       return project(draft, state, recoveryBlocked);
@@ -277,6 +389,21 @@ export function createImportService(now: () => number = Date.now) {
         );
       remove(draft);
       return { discarded: true as const };
+    },
+    // Internal ownership transfer to the effectful adoption boundary. No HTTP
+    // route exposes this object; the receiver must clear it in finally.
+    take(id: string, owner: string, state: HubState, recoveryBlocked: boolean) {
+      const draft = current(id, owner, state);
+      const preview = project(draft, state, recoveryBlocked);
+      if (!preview.selectionReady)
+        throw new HubError(
+          'conflict',
+          'Resolve the selected import entries before applying.',
+        );
+      clearTimeout(draft.timer);
+      drafts.delete(id);
+      discarded?.(id);
+      return draft.normalized;
     },
     revoke,
     close() {

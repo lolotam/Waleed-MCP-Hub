@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { localClientTokenStore } from './http-tokens.js';
 import { homedir } from 'node:os';
 import { createWindowsDiscoveryPorts } from './discovery-files.js';
 import { createWindowsProcessRunner } from './native/process-runner.js';
@@ -10,16 +11,23 @@ import {
 } from './docker-profile.js';
 import { createMaterializer } from '../runtime/materialize.js';
 import { createCapabilityRuntime } from './mcp/runtime.js';
+import { localPackageRuntime } from './packages.js';
+import { localMcpbAdapter } from './mcpb.js';
 import type { LifecycleAdapters } from '../lifecycle.js';
 import { StateSchema, type HubState } from '@waleed/contracts';
 import { lstat, readFile } from 'node:fs/promises';
-import { windowsSecretStore } from './secrets/windows.js';
 import { dockerSecretStore } from './secrets/docker.js';
 import { createBindingResolver } from '../auth/bindings.js';
 import type { SecretBackends } from '../auth/secrets.js';
 import { assertNoLinks } from './managed-files.js';
 import { windowsAgentTargets } from '../integrations/targets.js';
+import { createManagedPeerFactory } from '../integrations/bridge.js';
 import { agentFiles, outsideProtectedPilot } from '../integrations/files.js';
+import { localLifecyclePreferences } from './lifecycle-settings.js';
+import { createPlatformCredentialStorage } from './secrets/platform.js';
+import { createPlatformDiscoveryPorts } from './platform-discovery.js';
+import { platformAgentTargets } from '../integrations/targets.js';
+import { supportedPlatform } from '../platform/paths.js';
 
 export async function localRuntimeAdapters(
   directory: string,
@@ -35,7 +43,11 @@ export async function localRuntimeAdapters(
     ),
   });
   let command: DockerCommand | undefined;
-  const secrets: SecretBackends = {};
+  const credentialStorage = createPlatformCredentialStorage({
+    directory: join(directory, 'credentials'),
+    environment,
+  });
+  const secrets: SecretBackends = { ...credentialStorage.backends };
   if (process.platform === 'win32') {
     try {
       const [executable] = await createWindowsDiscoveryPorts({
@@ -60,30 +72,6 @@ export async function localRuntimeAdapters(
     }
   }
   if (process.platform === 'win32') {
-    // Initialize protection on an explicit credential/auth action, not dashboard
-    // startup. Preflight proves availability before writes/provider authorization.
-    let windows: ReturnType<typeof windowsSecretStore> | undefined;
-    const protectedStore = () =>
-      (windows ??= windowsSecretStore(join(directory, 'credentials')).catch(
-        (error: unknown) => {
-          windows = undefined;
-          throw error;
-        },
-      ));
-    secrets.windows = {
-      async has(id, signal) {
-        return (await protectedStore()).has(id, signal);
-      },
-      async put(id, value, signal) {
-        return (await protectedStore()).put(id, value, signal);
-      },
-      async read(id, signal) {
-        return (await protectedStore()).read!(id, signal);
-      },
-      async delete(id, signal) {
-        return (await protectedStore()).delete(id, signal);
-      },
-    };
     if (command)
       secrets.docker = dockerSecretStore(
         command,
@@ -103,6 +91,40 @@ export async function localRuntimeAdapters(
       return StateSchema.parse(JSON.parse(await readFile(path, 'utf8')));
     });
   return {
+    credentialStorage,
+    clientTokens: localClientTokenStore(directory),
+    lifecyclePreferences: localLifecyclePreferences(directory),
+    playgroundConnect: createManagedPeerFactory(directory, registry),
+    requestLogDirectory: directory,
+    ...(process.platform === 'win32'
+      ? { bundles: await localMcpbAdapter(directory) }
+      : {}),
+    ...(process.platform === 'darwin' || process.platform === 'linux'
+      ? {
+          integrations: (() => {
+            const platform = supportedPlatform(process.platform),
+              targets = platformAgentTargets(
+                platform,
+                environment.HOME || homedir(),
+                environment,
+              );
+            return {
+              platform,
+              targets,
+              files: agentFiles(
+                targets.flatMap((target) => target.paths),
+                join(directory, 'agent-backups'),
+              ),
+              discovery: createPlatformDiscoveryPorts({
+                workingDirectory: directory,
+                environment,
+              }),
+              node: process.execPath,
+              registry: join(directory, 'state.json'),
+            };
+          })(),
+        }
+      : {}),
     ...(process.platform === 'win32'
       ? {
           integrations: (() => {
@@ -142,6 +164,14 @@ export async function localRuntimeAdapters(
     }),
     runtime: createCapabilityRuntime({
       workingDirectory: directory,
+      preparePackage: async (connector, signal, allowInstall = true) =>
+        (await localPackageRuntime(directory)).prepare(
+          connector,
+          signal,
+          allowInstall,
+        ),
+      prepareBundle: async (connector) =>
+        (await localMcpbAdapter(directory)).prepare(connector),
       resolveBindings: createBindingResolver(secrets, registry),
       ...(command ? { docker: command } : {}),
     }),

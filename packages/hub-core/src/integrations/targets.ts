@@ -1,6 +1,15 @@
 import { readdirSync } from 'node:fs';
 import { win32 } from 'node:path';
-import type { IntegrationAgentId } from '@waleed/contracts';
+import {
+  platformDirectories,
+  platformPath,
+  platformPathKey,
+  type HubPlatform,
+} from '../platform/paths.js';
+import {
+  IntegrationAgentIdSchema,
+  type IntegrationAgentId,
+} from '@waleed/contracts';
 import type { AgentFormat } from './formats.js';
 
 export interface AgentTarget {
@@ -12,6 +21,7 @@ export interface AgentTarget {
   packageName?: string;
   reconnect: string;
   blocked?: boolean;
+  requireExisting?: boolean;
 }
 const directories = (path: string) => {
   try {
@@ -58,18 +68,32 @@ export function windowsAgentTargets(
   home: string,
   env: Record<string, string | undefined>,
 ): AgentTarget[] {
-  const config = env.XDG_CONFIG_HOME || win32.join(home, '.config');
-  const appdata = env.APPDATA || win32.join(home, 'AppData', 'Roaming');
+  return platformAgentTargets('win32', home, env);
+}
+export function platformAgentTargets(
+  platform: HubPlatform,
+  home: string,
+  env: Record<string, string | undefined>,
+): AgentTarget[] {
+  const p = platformPath(platform);
+  const roots = platformDirectories({ platform, home, environment: env });
+  const config =
+    env.XDG_CONFIG_HOME && p.isAbsolute(env.XDG_CONFIG_HOME)
+      ? env.XDG_CONFIG_HOME
+      : p.join(home, '.config');
+  const appdata =
+    platform === 'win32' ? roots.config : roots.applicationSupport;
+  const local = roots.local;
   const restart =
     'Configuration saved only. Reconnect/restart this agent and review its MCP approval prompts.';
-  return [
+  const targets: AgentTarget[] = [
     {
       id: 'opencode',
       name: 'OpenCode CLI',
       paths: env.OPENCODE_CONFIG
         ? [env.OPENCODE_CONFIG]
         : ['opencode.json', 'opencode.jsonc'].map((file) =>
-            win32.join(config, 'opencode', file),
+            p.join(config, 'opencode', file),
           ),
       format: 'opencode',
       aliases: ['opencode', 'opencode2'],
@@ -80,27 +104,159 @@ export function windowsAgentTargets(
     {
       id: 'codex',
       name: 'Codex CLI',
-      paths: [
-        win32.join(env.CODEX_HOME || win32.join(home, '.codex'), 'config.toml'),
-      ],
+      paths: [p.join(env.CODEX_HOME || p.join(home, '.codex'), 'config.toml')],
       format: 'codex',
       aliases: ['codex'],
       packageName: '@openai/codex',
       reconnect: restart,
     },
     {
+      id: 'windsurf',
+      name: 'Windsurf',
+      format: 'mcpServers',
+      paths: [p.join(home, '.codeium', 'windsurf', 'mcp_config.json')],
+      aliases: ['windsurf'],
+      reconnect:
+        'Restart Windsurf/Cascade and review the Hub in MCP settings. This legacy Windsurf scope does not configure Devin Local or bypass team allowlists.',
+    },
+    {
+      id: 'cline',
+      name: 'Cline',
+      format: 'mcpServers',
+      paths: [
+        p.join(
+          appdata,
+          'Code',
+          'User',
+          'globalStorage',
+          'saoudrizwan.claude-dev',
+          'settings',
+          'cline_mcp_settings.json',
+        ),
+      ],
+      aliases: [],
+      requireExisting: true,
+      reconnect:
+        'Reload the VS Code window, open Cline MCP Servers and reconnect. This is the default VS Code extension scope, not Cline CLI, remote or alternate profiles.',
+    },
+    {
+      id: 'roo-code',
+      name: 'Roo Code',
+      format: 'mcpServers',
+      paths: [
+        p.join(
+          appdata,
+          'Code',
+          'User',
+          'globalStorage',
+          'rooveterinaryinc.roo-cline',
+          'settings',
+          'cline_mcp_settings.json',
+        ),
+      ],
+      aliases: [],
+      requireExisting: true,
+      reconnect:
+        'Reload the VS Code window, open Roo Code MCP settings and reconnect. Other VS Code profiles, remote workspaces and extension approval lists are unchanged.',
+    },
+    {
+      id: 'zed',
+      name: 'Zed',
+      format: 'zed',
+      paths:
+        platform === 'win32'
+          ? [
+              p.join(appdata, 'Zed', 'settings.json'),
+              p.join(config, 'zed', 'settings.json'),
+            ]
+          : [p.join(config, 'zed', 'settings.json')],
+      aliases: ['zed'],
+      reconnect:
+        'Open Zed Settings → AI → MCP Servers and check the Hub. Review client tool approvals; project settings and external-agent native scopes are unchanged.',
+    },
+    {
+      id: 'gemini-cli',
+      name: 'Gemini CLI',
+      format: 'mcpServers',
+      paths: [
+        p.join(home, '.gemini', 'settings.json'),
+        p.join(home, '.gemini', 'mcp.json'),
+      ],
+      aliases: ['gemini'],
+      packageName: '@google/gemini-cli',
+      blocked: !!env.GEMINI_CLI_HOME,
+      reconnect:
+        'Restart Gemini CLI and check /mcp. settings.json is the documented user scope; an existing mcp.json is a compatibility scope that must be verified in your client. Project/enterprise exclusions remain unchanged.',
+    },
+    {
+      id: 'goose',
+      name: 'Goose',
+      format: 'goose',
+      paths:
+        platform === 'win32'
+          ? [
+              p.join(appdata, 'Block', 'goose', 'config', 'config.yaml'),
+              p.join(local, 'Block', 'Goose', 'config.yaml'),
+              p.join(config, 'goose', 'config.yaml'),
+            ]
+          : [p.join(config, 'goose', 'config.yaml')],
+      aliases: ['goose'],
+      blocked: !!env.GOOSE_CONFIG_DIR,
+      reconnect:
+        'Restart Goose or start a new session and inspect Extensions. Only the selected config.yaml extension is changed; provider settings, tool permissions and secrets.yaml are untouched.',
+    },
+    {
+      id: 'jetbrains',
+      name: 'JetBrains AI',
+      format: 'mcpServers',
+      paths: [p.join(appdata, 'JetBrains', 'mcp.json')],
+      aliases: [
+        'idea64',
+        'idea',
+        'pycharm64',
+        'pycharm',
+        'webstorm64',
+        'webstorm',
+        'rider64',
+        'rider',
+      ],
+      requireExisting: true,
+      reconnect:
+        'Verify this existing shared JSON scope in your IDE. JetBrains documents Settings → Tools → AI Assistant → MCP → Add/Import JSON; a file edit alone does not prove the IDE reads it. Versioned IDE/project settings are not modified.',
+    },
+    {
+      id: 'warp',
+      name: 'Warp',
+      format: 'mcpServers',
+      paths: [
+        p.join(home, '.warp', '.mcp.json'),
+        ...(platform === 'win32' ? [p.join(local, 'warp', 'mcp.json')] : []),
+        p.join(home, '.warp', 'mcp.json'),
+      ],
+      aliases: ['warp', 'warp-terminal'],
+      reconnect:
+        'Review Warp Settings → Agents → MCP servers and reconnect. ~/.warp/.mcp.json is the documented file scope; other existing candidates require client verification. Auto-spawn and third-party-provider toggles are never changed.',
+    },
+    {
       id: 'claude-desktop',
       name: 'Claude Desktop',
-      paths: [claudeDesktopConfig(home, env)],
+      paths: [
+        platform === 'win32'
+          ? claudeDesktopConfig(home, env)
+          : p.join(appdata, 'Claude', 'claude_desktop_config.json'),
+      ],
+      ...(platform === 'linux' ? { requireExisting: true } : {}),
       format: 'mcpServers',
       aliases: ['Claude'],
       reconnect:
-        'Quit Claude Desktop completely and reopen it; review connector approval.',
+        platform === 'linux'
+          ? 'No official Linux Claude Desktop configuration is assumed. Review this existing compatibility scope with your client; no missing file is created.'
+          : 'Quit Claude Desktop completely and reopen it; review connector approval.',
     },
     {
       id: 'claude',
       name: 'Claude Code CLI',
-      paths: [win32.join(home, '.claude.json')],
+      paths: [p.join(home, '.claude.json')],
       format: 'mcpServers',
       aliases: ['claude'],
       packageName: '@anthropic-ai/claude-code',
@@ -110,7 +266,7 @@ export function windowsAgentTargets(
     {
       id: 'antigravity',
       name: 'Antigravity',
-      paths: [win32.join(home, '.gemini', 'antigravity', 'mcp_config.json')],
+      paths: [p.join(home, '.gemini', 'antigravity', 'mcp_config.json')],
       format: 'mcpServers',
       aliases: ['agy'],
       reconnect: restart,
@@ -118,7 +274,7 @@ export function windowsAgentTargets(
     {
       id: 'vscode',
       name: 'VS Code',
-      paths: [win32.join(appdata, 'Code', 'User', 'mcp.json')],
+      paths: [p.join(appdata, 'Code', 'User', 'mcp.json')],
       format: 'vscode',
       aliases: ['code'],
       reconnect:
@@ -127,7 +283,7 @@ export function windowsAgentTargets(
     {
       id: 'cursor',
       name: 'Cursor',
-      paths: [win32.join(home, '.cursor', 'mcp.json')],
+      paths: [p.join(home, '.cursor', 'mcp.json')],
       format: 'mcpServers',
       aliases: ['cursor', 'cursor-agent'],
       reconnect: restart,
@@ -136,10 +292,7 @@ export function windowsAgentTargets(
       id: 'kimi',
       name: 'Kimi Code CLI',
       paths: [
-        win32.join(
-          env.KIMI_CODE_HOME || win32.join(home, '.kimi-code'),
-          'mcp.json',
-        ),
+        p.join(env.KIMI_CODE_HOME || p.join(home, '.kimi-code'), 'mcp.json'),
       ],
       format: 'mcpServers',
       aliases: ['kimi'],
@@ -151,7 +304,7 @@ export function windowsAgentTargets(
       id: 'kilo',
       name: 'Kilo Code CLI',
       paths: ['kilo.json', 'kilo.jsonc', 'config.json'].map((file) =>
-        win32.join(config, 'kilo', file),
+        p.join(config, 'kilo', file),
       ),
       format: 'kilo',
       aliases: ['kilo', 'kilocode'],
@@ -159,4 +312,18 @@ export function windowsAgentTargets(
       reconnect: restart,
     },
   ];
+  return targets
+    .map((target) => ({
+      ...target,
+      paths: [
+        ...new Map(
+          target.paths.map((path) => [platformPathKey(path, platform), path]),
+        ).values(),
+      ],
+    }))
+    .sort(
+      (a, b) =>
+        IntegrationAgentIdSchema.options.indexOf(a.id) -
+        IntegrationAgentIdSchema.options.indexOf(b.id),
+    );
 }

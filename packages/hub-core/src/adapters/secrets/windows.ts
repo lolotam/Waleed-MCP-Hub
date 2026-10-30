@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, unlink, rename } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertNoLinks } from '../managed-files.js';
@@ -115,7 +116,84 @@ export async function windowsSecretStore(
       throw unavailable();
     }
   }
+  async function protect(id: string, value: Buffer, signal: AbortSignal) {
+    assertSecretValue(value);
+    const entropy = entropyFor(id);
+    try {
+      const raw = await invoke(
+        {
+          action: 'protect',
+          data: value.toString('base64'),
+          entropy: entropy.toString('base64'),
+        },
+        signal,
+      );
+      if (!/^[a-zA-Z0-9+/=]+$/.test(raw) || raw.length > 44000)
+        throw unavailable();
+      return Buffer.from(raw, 'base64');
+    } finally {
+      entropy.fill(0);
+    }
+  }
   return {
+    async lock(id, signal) {
+      if (readOnly) throw unavailable();
+      const path = `${pathFor(id)}.lock`;
+      const deadline = Date.now() + 30_000;
+      while (true) {
+        signal.throwIfAborted();
+        await assertNoLinks(path, true);
+        try {
+          const file = await open(path, 'wx', 0o600);
+          let released = false;
+          return async () => {
+            if (!released) {
+              released = true;
+              try {
+                await file.close();
+              } finally {
+                await unlink(path);
+              }
+            }
+          };
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException).code !== 'EEXIST' ||
+            Date.now() >= deadline
+          )
+            throw unavailable();
+          await delay(50, undefined, { signal });
+        }
+      }
+    },
+    async replace(id, value, signal) {
+      if (readOnly) throw unavailable();
+      const previous = await encrypted(id);
+      if (!previous) throw unavailable();
+      previous.fill(0);
+      const path = pathFor(id),
+        temporary = join(directory, `${id}-${randomUUID()}.pending`);
+      const cipher = await protect(id, value, signal);
+      let created = false;
+      try {
+        signal.throwIfAborted();
+        const file = await open(temporary, 'wx', 0o600);
+        created = true;
+        try {
+          await file.writeFile(cipher);
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        signal.throwIfAborted();
+        await assertNoLinks(path);
+        await rename(temporary, path);
+        created = false;
+      } finally {
+        cipher.fill(0);
+        if (created) await unlink(temporary);
+      }
+    },
     async has(id) {
       const value = await encrypted(id);
       const present = value !== null;

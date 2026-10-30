@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   ManualMcpSchema,
+  PackageSpecSchema,
   type ImportDefinition,
   type RegistryOperation,
 } from '@waleed/contracts';
@@ -32,11 +33,13 @@ export async function addManualMcp(
   const id = `manual-${randomUUID()}`;
   try {
     input = ManualMcpSchema.parse(raw);
+    const packaged = input.type === 'npx' || input.type === 'uvx';
     if (
       (input.type !== 'docker' && input.ports.length) ||
-      (input.type === 'stdio' && Object.keys(input.headers).length) ||
+      ((input.type === 'stdio' || packaged) &&
+        Object.keys(input.headers).length) ||
       (input.type === 'docker' && Object.keys(input.headers).length) ||
-      (!['stdio', 'docker'].includes(input.type) &&
+      (!['stdio', 'docker', 'npx', 'uvx'].includes(input.type) &&
         Object.keys(input.env).length)
     )
       throw new HubError(
@@ -63,30 +66,45 @@ export async function addManualMcp(
       trustApproval: null,
     };
     const definition: ImportDefinition =
-      input.type === 'stdio'
+      input.type === 'npx' || input.type === 'uvx'
         ? {
             ...common,
-            executionMode: 'native',
+            executionMode: 'package',
             transport: 'stdio',
-            executable: input.command,
+            package: PackageSpecSchema.parse({
+              manager: input.type === 'npx' ? 'npm' : 'uvx',
+              name: input.packageName,
+              version: input.packageVersion,
+              entryPoint:
+                input.entryPoint || input.packageName.split('/').at(-1),
+            }),
             arguments: input.args,
           }
-        : input.type === 'docker'
+        : input.type === 'stdio'
           ? {
               ...common,
-              executionMode: 'docker',
+              executionMode: 'native',
               transport: 'stdio',
-              image: input.image,
-              command: [],
+              executable: input.command,
               arguments: input.args,
-              portBindings: input.ports,
             }
-          : {
-              ...common,
-              executionMode: 'remote',
-              transport: input.type,
-              endpoint: input.url,
-            };
+          : input.type === 'docker'
+            ? {
+                ...common,
+                executionMode: 'docker',
+                transport: 'stdio',
+                image: input.image,
+                command: [],
+                arguments: input.args,
+                portBindings: input.ports,
+              }
+            : {
+                ...common,
+                executionMode: 'remote',
+                transport: input.type === 'sse' ? 'sse' : 'streamable_http',
+                endpoint: input.url,
+                ...(input.localHttpOptIn ? { localHttpOptIn: true } : {}),
+              };
     try {
       assertNoCredentialEcho(definition, [
         ...Object.values(input.env),
@@ -125,7 +143,10 @@ export async function addManualMcp(
           location,
           name,
           format: 'raw',
-          adapter: input.type === 'docker' ? 'docker' : 'windows',
+          adapter:
+            input.type === 'docker'
+              ? 'docker'
+              : hub.auth.credentials.nativeAdapter(),
           value: values[name],
         });
         values[name] = '';

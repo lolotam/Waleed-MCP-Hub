@@ -47,6 +47,10 @@ export function createMaterializer(options: { files: ManagedFiles; docker?: Dock
       };
       const selected = remove || profile.enabled === false ? [] : state.connectors.filter((connector) => connector.enabled && profile.connectorIds.includes(connector.id)).sort((a, b) => a.id.localeCompare(b.id));
       for (const connector of selected) {
+        if(state.toolOverrides?.some(item=>item.connectorId===connector.id))throw new HubError('unavailable','Tool overrides require the managed agent bridge; direct profile snapshots cannot apply them.');
+        if(Object.values(connector.toolPolicies??{}).some(policy=>policy!=='allow'))throw new HubError('unavailable','Restricted tools require the managed agent bridge; direct profile snapshots cannot enforce tool policies.');
+        if (connector.executionMode === 'remote' && new URL(connector.endpoint).protocol === 'http:') throw new HubError('unavailable','Local HTTP endpoints must use the managed host bridge, not Docker loopback/profile snapshots.');
+        if (connector.executionMode === 'package') throw new HubError('unavailable','Managed packages run through the persistent agent bridge, not direct Docker/profile launchers.');
         if (connector.executionMode === 'docker' && connector.portBindings?.length) throw new HubError('unavailable','Port-published images require the contained agent bridge, not a Docker catalog snapshot.');
         if (!approved(connector)) throw new HubError('conflict', 'Approve every enabled member definition before materializing.');
         if (Object.keys(connector.headerBindings).length) throw new HubError('unavailable', 'Secret-backed remote profile proxies require the verified P7 agent path; no values are written into Docker snapshots.');

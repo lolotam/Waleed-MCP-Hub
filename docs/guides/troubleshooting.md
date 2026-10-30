@@ -41,8 +41,9 @@ The server wants credentials the hub doesn't have:
 
 - API key servers: **Authentication** → enter the key with the right **Header
   format**, approve again, test again.
-- OAuth-only servers: only Linear read-only is supported today. Use the
-  provider's token option if it has one. See
+- OAuth servers: use the curated Linear flow, or **Discover OAuth provider**
+  for compatible standard PKCE providers. Review the issuer and scopes before
+  signing in. A provider's API token can be an alternative. See
   [adding-mcps.md](adding-mcps.md#oauth-sign-in).
 
 ## Test capabilities shows "error" or "unavailable"
@@ -51,14 +52,18 @@ The server wants credentials the hub doesn't have:
   expects. Run the same command in PowerShell to see its own error.
 - The process gets an isolated environment. Add every variable it needs to
   **Protected environment values**.
-- Remote: the URL must be public HTTPS. `localhost` and private addresses are refused.
+- Remote: use public HTTPS, or explicitly opted-in HTTP on `localhost`/`127.0.0.1`
+  with an explicit port. Other private/LAN destinations and redirects are refused.
 - Docker: Docker Desktop must be running with a local context.
 
 ## Saving fails with "unsupported executable"
 
-`npx`, `uvx`, `.cmd`, `.bat` and scripts aren't run directly. Install the package
-and use `node.exe` + entry script, or the tool's real `.exe`. See
-[adding-mcps.md](adding-mcps.md#npm-package-npx).
+Shell shims, `.cmd`, `.bat` and scripts aren't run directly as native executables.
+For npm/Python tools, select a **Managed package** connection with an exact version
+and executable name. Alternatively install the package yourself and use `node.exe`
+
+- entry script, or the tool's real `.exe`. See
+  [adding-mcps.md](adding-mcps.md#npm-package-npx).
 
 ## An agent shows no hub tools
 
@@ -72,15 +77,37 @@ and use `node.exe` + entry script, or the tool's real `.exe`. See
    [connecting-agents.md](connecting-agents.md)).
 4. Claude Desktop: make sure the hub wrote the file Claude actually reads. See
    [connecting-agents.md](connecting-agents.md#claude-desktop).
-5. Docker connectors with protected values are not exposed to agents yet.
+5. Docker connectors with protected values require the reference-only Docker vault
+   and a supported local gateway. DPAPI setup import does not convert those bindings.
 
 ## A tool works once, then "forgets" a session
 
-Native connectors start a fresh process for each tool call, so state such as an
-open SSH session doesn't survive between calls. Use the server's single-shot tools
-(for example `run-command` instead of `open-session` + `read-session-output`).
+The managed bridge reuses bounded native, remote and Docker sessions, but a restart,
+credential rotation, profile/approval change or session lifetime limit can close
+them. Refresh the catalog and explicitly reopen the provider session. Use single-shot
+tools when possible. The Hub never replays a failed tool call automatically.
 
 ## A tool call says "Refresh the hub tool list"
 
 The connector changed since the agent last listed tools. Reconnect the agent, or
 ask it to list tools again.
+
+## Exit code -1 or a process will not start
+
+An exit code alone does not identify the cause. Check the connector's approved
+executable/image, exact arguments, runtime installation and protected bindings.
+Native processes run under a Windows JobObject with a restricted environment;
+an uncontained fallback is never attempted. Package installation requires its own
+explicit consent. Re-test capabilities only after reviewing the definition.
+
+Inspect local runtime/recovery metadata and `desktop.log`. Do not paste credentials,
+provider output or private agent configuration into support messages. If cleanup or
+state is uncertain, keep recovery blocked rather than deleting locks or retrying.
+
+## A connector has a Needs Re-auth badge
+
+Open **Authentication** from the connector row. Supply a fresh API key or review
+the OAuth provider/scopes and sign in again. The badge can mean missing credentials,
+expired tokens or a failed refresh; it is not permission to retry a tool call.
+Credential changes may require new execution approval. Test capabilities explicitly
+after signing in. Revocation and local-only disconnect are different actions.

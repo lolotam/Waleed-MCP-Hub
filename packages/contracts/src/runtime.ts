@@ -1,5 +1,12 @@
 import { z } from 'zod';
 import { ImportDefinitionSchema } from './imports.js';
+import { ToolOverrideUpdateSchema } from './tool-overrides.js';
+import {
+  ToolPoliciesUpdateSchema,
+  AgentProfileUpdateSchema,
+  IntegrationAgentIdSchema,
+  AgentToolSearchUpdateSchema,
+} from './integrations.js';
 
 export const LifecycleKindSchema = z.enum([
   'integrate_agent',
@@ -16,9 +23,15 @@ export const LifecycleKindSchema = z.enum([
   'unassign_connector',
   'create_connector',
   'create_connectors',
+  'import_connectors',
+  'import_setup',
   'edit_connector',
   'remove_connector',
   'set_connector_enabled',
+  'set_tool_policies',
+  'set_tool_override',
+  'set_agent_profile',
+  'set_agent_tool_search',
   'approve_connector',
   'materialize_profile',
   'dematerialize_profile',
@@ -36,6 +49,22 @@ const ids = z
   .refine((items) => new Set(items).size === items.length);
 const base = { expectedRevision: Revision };
 export const RegistryOperationSchema = z.discriminatedUnion('kind', [
+  ToolOverrideUpdateSchema.extend({
+    kind: z.literal('set_tool_override'),
+    connectorId: Id,
+  }),
+  AgentToolSearchUpdateSchema.extend({
+    kind: z.literal('set_agent_tool_search'),
+    agentId: IntegrationAgentIdSchema,
+  }),
+  AgentProfileUpdateSchema.extend({
+    kind: z.literal('set_agent_profile'),
+    agentId: IntegrationAgentIdSchema,
+  }),
+  ToolPoliciesUpdateSchema.extend({
+    kind: z.literal('set_tool_policies'),
+    connectorId: Id,
+  }),
   z.strictObject({
     ...base,
     kind: z.literal('create_profile'),

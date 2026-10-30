@@ -7,7 +7,7 @@ export class RuntimeFault extends Error {
   constructor(readonly reason: CapabilityObservation['reason'], readonly uncertain = false) { super('Bounded MCP operation failed.'); }
 }
 export type Capabilities = Pick<CapabilityObservation, 'protocolVersion' | 'tools' | 'resourceCount' | 'promptCount'>;
-export interface CapabilityRuntime { discover(connector: Connector, signal: AbortSignal): Promise<Capabilities> }
+export interface CapabilityRuntime { discover(connector: Connector, signal: AbortSignal, options?:{allowInstall:boolean}): Promise<Capabilities> }
 const allowed = new Set(['initialize', 'notifications/initialized', 'tools/list', 'resources/list', 'prompts/list', 'ping', 'notifications/cancelled']);
 export function assertDiscoveryMessage(message: JSONRPCMessage) {
   if ('method' in message && !allowed.has(message.method)) throw new RuntimeFault('protocol_error');

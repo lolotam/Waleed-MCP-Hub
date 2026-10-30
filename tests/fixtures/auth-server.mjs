@@ -18,6 +18,8 @@ import {
   beginOAuth,
   refreshOAuth,
 } from '../../packages/hub-core/dist/auth/oauth-flow.js';
+import { discoverOAuth } from '../../packages/hub-core/dist/auth/oauth-discovery.js';
+import { hashData } from '../../packages/hub-core/dist/runtime/registry.js';
 
 const privateValue = 'SYNTHETIC_BROWSER_APIKEY_0123456789';
 const keyPeer = await mcpHttpFixture(`Bearer ${privateValue}`),
@@ -40,9 +42,17 @@ const lifecycle = createLifecycle(store, Date.now, createMemorySafetyLedger(), {
     { ...oauthPeer.recipe, endpoint: 'https://example.test/oauth' },
   ],
   oauthFlows: {
-    begin: (_recipe, signal, now) => beginOAuth(oauthPeer.recipe, signal, now),
+    begin: (recipe, signal, now) =>
+      beginOAuth(recipe.discovered ? recipe : oauthPeer.recipe, signal, now),
     refresh: (_recipe, previous, signal, now) =>
       refreshOAuth(oauthPeer.recipe, previous, signal, now),
+  },
+  oauthDiscovery: async (endpoint, signal) => {
+    const { recipe } = await discoverOAuth(oauthPeer.recipe.endpoint, signal, {
+      fixtureOrigin: oauthPeer.recipe.fixtureOrigin,
+    });
+    recipe.endpoint = endpoint;
+    return { recipe, discoveryHash: hashData(recipe) };
   },
   runtime: {
     async discover(item, signal) {
@@ -66,7 +76,11 @@ const hub = await createHubServer({
 hub.app.get('/api/fixture-report', async () => ({
   stored: secrets.values.size,
   keyMethods: keyPeer.methods,
-  oauth: oauthPeer.report(),
+  oauth: {
+    methods: oauthPeer.methods,
+    registrations: oauthPeer.report().registrations,
+    tokenRequests: oauthPeer.report().tokenRequests,
+  },
   retainedBuffersZeroed:
     secrets.writes.every((buffer) => buffer.every((byte) => byte === 0)) &&
     secrets.reads.every((buffer) => buffer.every((byte) => byte === 0)),

@@ -1,7 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import type { AuthReason } from '@waleed/contracts';
-import { restrictedFetch } from '../adapters/mcp/http.js';
+import { restrictedFetch, publicAddress } from '../adapters/mcp/http.js';
 
 export interface OAuthRecipe {
   id: string;
@@ -15,6 +17,10 @@ export interface OAuthRecipe {
   resource: string;
   scopes: string[];
   fixtureOrigin?: string;
+  discovered?: true;
+  revocation?: string;
+  clientId?: string;
+  responseIssuerRequired?: boolean;
 }
 // Explicit, documented recipe only. No arbitrary auth-page URLs or account-cache
 // extraction. Linear's metadata and read scope were inspected on 2026-10-28.
@@ -42,6 +48,7 @@ export interface TokenBundle {
   refreshToken: string | null;
   expiresAt: number | null;
   clientId: string;
+  recipe?: OAuthRecipe;
 }
 export function validateRecipe(recipe: OAuthRecipe) {
   const origin = new URL(recipe.issuer).origin;
@@ -53,37 +60,43 @@ export function validateRecipe(recipe: OAuthRecipe) {
     recipe.metadata,
     recipe.authorize,
     recipe.token,
-    recipe.register,
+    ...(recipe.register ? [recipe.register] : []),
+    ...(recipe.revocation ? [recipe.revocation] : []),
+    ...(recipe.clientId ? [recipe.clientId] : []),
     recipe.endpoint,
     recipe.resource,
   ]) {
     const url = new URL(value);
     if (
-      url.origin !== origin ||
+      (!recipe.discovered && url.origin !== origin) ||
       url.username ||
       url.password ||
       url.search ||
       url.hash ||
-      (!fixture && url.protocol !== 'https:')
+      (!(fixture && url.origin === origin) && url.protocol !== 'https:')
     )
       throw new AuthFault('unsupported');
   }
   if (
-    !recipe.scopes.length ||
     recipe.scopes.length > 16 ||
-    recipe.scopes.some((scope) => !/^[a-zA-Z0-9_:.-]{1,100}$/.test(scope))
+    recipe.scopes.some(
+      (scope) => !/^[\x21\x23-\x5b\x5d-\x7e]{1,100}$/.test(scope),
+    )
   )
     throw new AuthFault('unsupported');
 }
 function transport(recipe: OAuthRecipe, signal: AbortSignal) {
   validateRecipe(recipe);
-  const fetch = restrictedFetch(recipe.issuer, signal, recipe.fixtureOrigin);
   return async (
     url: string,
     body?: unknown,
     form = false,
   ): Promise<Record<string, unknown>> => {
-    const response = await fetch(url, {
+    const response = await restrictedFetch(
+      url,
+      signal,
+      recipe.fixtureOrigin,
+    )(url, {
       method: body === undefined ? 'GET' : 'POST',
       headers: {
         accept: 'application/json',
@@ -120,6 +133,7 @@ function tokenBytes(
   scopes: string[],
   now: () => number,
   previousRefresh?: string | null,
+  recipe?: OAuthRecipe,
 ) {
   if (
     typeof result.access_token !== 'string' ||
@@ -162,6 +176,7 @@ function tokenBytes(
         ? now() + result.expires_in * 1000
         : null,
     clientId,
+    ...(recipe ? { recipe } : {}),
   };
   const value = Buffer.from(JSON.stringify(bundle));
   if (value.length > 8192) {
@@ -176,9 +191,22 @@ export async function beginOAuth(
   now: () => number = Date.now,
 ) {
   const request = transport(recipe, signal);
+  if (new URL(recipe.authorize).origin !== recipe.fixtureOrigin) {
+    const host = new URL(recipe.authorize).hostname.replace(/^\[|\]$/g, '');
+    const addresses = isIP(host)
+      ? [{ address: host }]
+      : await lookup(host, { all: true });
+    if (
+      !addresses.length ||
+      addresses.some((item) => !publicAddress(item.address))
+    )
+      throw new AuthFault('unsupported');
+  }
   const state = randomBytes(32),
     verifier = randomBytes(32);
-  const callbackPath = `/callback/${randomBytes(16).toString('hex')}`;
+  const callbackPath = recipe.clientId
+    ? '/oauth/callback'
+    : `/callback/${randomBytes(16).toString('hex')}`;
   let resolveCode!: (code: string) => void,
     rejectCode!: (error: unknown) => void,
     consumed = false,
@@ -228,7 +256,9 @@ export async function beginOAuth(
         [...new Set(url.searchParams.keys())].every(
           (key) => url.searchParams.getAll(key).length === 1,
         ) &&
-        url.searchParams.get('iss') === recipe.issuer;
+        (url.searchParams.has('iss')
+          ? url.searchParams.get('iss') === recipe.issuer
+          : recipe.responseIssuerRequired === false);
       received.fill(0);
       if (!valid) {
         res.writeHead(400);
@@ -288,35 +318,63 @@ export async function beginOAuth(
     if (!address || typeof address === 'string')
       throw new AuthFault('dependency_unavailable');
     const redirect = `http://127.0.0.1:${address.port}${callbackPath}`;
+    if (recipe.clientId) {
+      const client = await request(recipe.clientId);
+      if (
+        client.client_id !== recipe.clientId ||
+        client.token_endpoint_auth_method !== 'none' ||
+        !Array.isArray(client.redirect_uris) ||
+        !client.redirect_uris.some((value) => {
+          if (typeof value !== 'string') return false;
+          const uri = new URL(value);
+          return (
+            uri.protocol === 'http:' &&
+            uri.hostname === '127.0.0.1' &&
+            !uri.username &&
+            !uri.password &&
+            !uri.search &&
+            !uri.hash &&
+            uri.pathname === callbackPath
+          );
+        })
+      )
+        throw new AuthFault('unsupported');
+    }
     const metadata = await request(recipe.metadata);
     if (
       metadata.issuer !== recipe.issuer ||
       metadata.authorization_endpoint !== recipe.authorize ||
       metadata.token_endpoint !== recipe.token ||
-      metadata.registration_endpoint !== recipe.register ||
+      (recipe.register && metadata.registration_endpoint !== recipe.register) ||
       !Array.isArray(metadata.code_challenge_methods_supported) ||
       !metadata.code_challenge_methods_supported.includes('S256') ||
-      !Array.isArray(metadata.token_endpoint_auth_methods_supported) ||
-      !metadata.token_endpoint_auth_methods_supported.includes('none') ||
-      metadata.authorization_response_iss_parameter_supported !== true ||
-      !Array.isArray(metadata.scopes_supported) ||
-      recipe.scopes.some(
-        (scope) => !(metadata.scopes_supported as unknown[]).includes(scope),
-      )
+      (metadata.token_endpoint_auth_methods_supported !== undefined &&
+        (!Array.isArray(metadata.token_endpoint_auth_methods_supported) ||
+          !metadata.token_endpoint_auth_methods_supported.includes('none'))) ||
+      (recipe.responseIssuerRequired !== false &&
+        metadata.authorization_response_iss_parameter_supported !== true) ||
+      (metadata.scopes_supported !== undefined &&
+        (!Array.isArray(metadata.scopes_supported) ||
+          recipe.scopes.some(
+            (scope) =>
+              !(metadata.scopes_supported as unknown[]).includes(scope),
+          )))
     )
       throw new AuthFault('unsupported');
-    const registration = await request(recipe.register, {
-      client_name: 'Waleed MCP Hub',
-      redirect_uris: [redirect],
-      token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-      scope: recipe.scopes.join(' '),
-    });
+    const registration = recipe.clientId
+      ? { client_id: recipe.clientId }
+      : await request(recipe.register, {
+          client_name: 'Waleed MCP Hub',
+          redirect_uris: [redirect],
+          token_endpoint_auth_method: 'none',
+          grant_types: ['authorization_code', 'refresh_token'],
+          response_types: ['code'],
+          scope: recipe.scopes.join(' '),
+        });
     if (
       typeof registration.client_id !== 'string' ||
       !registration.client_id ||
-      registration.client_id.length > 256 ||
+      registration.client_id.length > 2048 ||
       /[\s\0]/.test(registration.client_id) ||
       registration.client_secret ||
       (registration.token_endpoint_auth_method &&
@@ -362,6 +420,8 @@ export async function beginOAuth(
             clientId,
             recipe.scopes,
             now,
+            undefined,
+            recipe,
           );
         } finally {
           close();
@@ -398,8 +458,43 @@ export async function refreshOAuth(
       recipe.scopes,
       now,
       bundle.refreshToken,
+      bundle.recipe ?? recipe,
     );
   } catch {
     throw new AuthFault('refresh_failed');
   }
+}
+
+// RFC 7009 permits an empty success response and deliberately does not reveal
+// whether a token existed. Never mistake local deletion for provider revocation.
+export async function revokeOAuth(
+  recipe: OAuthRecipe,
+  previous: Buffer,
+  signal: AbortSignal,
+) {
+  validateRecipe(recipe);
+  if (!recipe.revocation) return false;
+  const bundle = JSON.parse(previous.toString('utf8')) as TokenBundle;
+  for (const [token, hint] of [
+    [bundle.refreshToken, 'refresh_token'],
+    [bundle.accessToken, 'access_token'],
+  ]) {
+    if (!token) continue;
+    const response = await restrictedFetch(
+      recipe.revocation,
+      signal,
+      recipe.fixtureOrigin,
+    )(recipe.revocation, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        token,
+        token_type_hint: hint!,
+        client_id: bundle.clientId,
+      }).toString(),
+    });
+    await response.body?.cancel();
+    if (!response.ok) throw new AuthFault('invalid_response');
+  }
+  return true;
 }

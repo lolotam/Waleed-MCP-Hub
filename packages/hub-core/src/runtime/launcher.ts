@@ -3,11 +3,12 @@ import { fileURLToPath } from 'node:url';
 import { ConnectorSchema, StateSchema, SafetyStateSchema } from '@waleed/contracts';
 import { assertNoLinks } from '../adapters/managed-files.js';
 import { approved, definitionHash, hashBytes } from './registry.js';
-import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
+import { createPlatformProcessRunner } from '../adapters/native/platform-runner.js';
 import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
 import { dirname, join } from 'node:path';
-import { windowsSecretStore } from '../adapters/secrets/windows.js';
+import { createPlatformCredentialStorage } from '../adapters/secrets/platform.js';
 import { createBindingResolver, type SecretLease } from '../auth/bindings.js';
+import { createMcpbAdapter } from '../adapters/mcpb.js';
 
 // Each agent connection invokes a fresh Node launcher and a fresh contained target
 // tree with independent stdin/stdout. It never attaches to a dashboard process.
@@ -28,17 +29,20 @@ export async function runNativeLauncher(manifestUrl: URL, expectedHash: string) 
     const safetyPath = join(dirname(manifest.registryPath), 'safety.json'); await assertNoLinks(safetyPath);
     if ((await lstat(safetyPath)).size > 1024 * 1024 || SafetyStateSchema.parse(JSON.parse(await readFile(safetyPath, 'utf8'))).operations.some((operation) => operation.phase === 'prepared' || operation.phase === 'needs_review')) throw new Error();
     const current = state.connectors.find((connector) => connector.id === saved.id);
+    if(current&&Object.values(current.toolPolicies??{}).some(policy=>policy!=='allow'))throw new Error();
+    if(current&&state.toolOverrides?.some(item=>item.connectorId===current.id))throw new Error();
     const profile = state.profiles.find((profile) => profile.id === manifest.profileId);
     if (!current || current.executionMode !== 'native' || !current.enabled || !profile || profile.enabled === false || !profile.connectorIds.includes(current.id) || !approved(current) || current.revision !== saved.revision || definitionHash(current) !== definitionHash(saved) || Object.keys(current.headerBindings).length) throw new Error();
-    if (Object.keys(current.secretBindings).length) lease = await createBindingResolver({ windows: await windowsSecretStore(join(dirname(manifest.registryPath), 'credentials'), true) }, async () => state)(current, stop.signal);
+    const bundled=current.bundle?await createMcpbAdapter(dirname(manifest.registryPath),{node:process.execPath}).prepare(current):undefined;
+    if (Object.keys(current.secretBindings).length) lease = await createBindingResolver(createPlatformCredentialStorage({directory:join(dirname(manifest.registryPath),'credentials'),readOnly:true}).backends, async () => state)(current, stop.signal);
     await assertNoLinks(current.executable);
-    const runner = await createWindowsProcessRunner({ allowedExecutables: [current.executable], workingDirectory: dirname(path), concurrency: 1 });
+    const runner = await createPlatformProcessRunner({ allowedExecutables: [current.executable], workingDirectory: bundled?.workingDirectory??dirname(path), concurrency: 1 });
     process.stdin.setEncoding('utf8'); let send: ((data: string) => void) | undefined;
     process.stdin.pause();
     const input = (data: string) => { if (send) { for (let offset = 0; offset < data.length; offset += 4096) send(data.slice(offset, offset + 4096)); } };
     process.stdin.on('data', input); process.stdin.once('end', () => stop.abort());
     process.once('SIGINT', () => stop.abort()); process.once('SIGTERM', () => stop.abort());
-    const result = await runner.run({ executable: current.executable, arguments: isolatedNativeArguments(current), environment: { ...(current.environmentLiterals ?? {}), ...lease?.environment }, timeoutMs: 120_000, outputLimitBytes: 1024 * 1024, signal: stop.signal, stream: { started(write) { send = write; process.stdin.resume(); }, stdout(data) { process.stdout.write(data); } } });
+    const result = await runner.run({ executable: current.executable, arguments: bundled?.arguments??isolatedNativeArguments(current), environment: { ...(current.environmentLiterals ?? {}), ...lease?.environment }, timeoutMs: 120_000, outputLimitBytes: 1024 * 1024, signal: stop.signal, stream: { started(write) { send = write; process.stdin.resume(); }, stdout(data) { const copy = Buffer.from(data); process.stdout.write(copy, () => copy.fill(0)); } } });
     process.stdin.off('data', input); process.stdin.pause();
     if (result.outcome !== 'exited' && result.outcome !== 'cancelled') process.exitCode = 1;
   } catch { process.stderr.write('The approved native launcher is stale, disabled, unsafe, or unavailable. Re-preview its managed profile.\n'); process.exitCode = 1; stop.abort(); }

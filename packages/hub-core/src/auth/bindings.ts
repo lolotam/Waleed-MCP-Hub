@@ -2,9 +2,10 @@ import type { Connector, HubState } from '@waleed/contracts';
 import { HubError } from '../errors.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
 import type { SecretBackends } from './secrets.js';
+import { assertSecretId } from './secrets.js';
 
 const forbiddenEnvironment =
-  /^(?:PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|LD_PRELOAD|LD_LIBRARY_PATH|PSMODULEPATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|DOCKER_.+|WMH_.+)$/i;
+  /^(?:PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|PYTHONSAFEPATH|PYTHONNOUSERSITE|PYTHONDONTWRITEBYTECODE|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.+|XDG_.+|DBUS_SESSION_BUS_ADDRESS|DISPLAY|WAYLAND_DISPLAY|PSMODULEPATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|NPM_CONFIG_.+|UV_.+|PIP_.+|DOCKER_.+|WMH_.+)$/i;
 export function assertBinding(
   location: 'environment' | 'header',
   name: string,
@@ -32,6 +33,9 @@ export function assertBinding(
 export interface SecretLease {
   environment: Record<string, string>;
   headers: Record<string, string>;
+  // Docker resolves these references inside its gateway. Never decrypt them here.
+  dockerSecrets?: Array<{ name: string; env: string }>;
+  expiresAt?: number;
   dispose(): void;
 }
 export function createBindingResolver(
@@ -47,12 +51,20 @@ export function createBindingResolver(
     const buffers: Buffer[] = [];
     const environment: Record<string, string> = {},
       headers: Record<string, string> = {};
+    const dockerSecrets: Array<{ name: string; env: string }> = [];
+    let expiresAt: number | undefined;
     const dispose = () => {
       buffers.forEach((buffer) => buffer.fill(0));
       for (const key of Object.keys(environment)) delete environment[key];
       for (const key of Object.keys(headers)) delete headers[key];
+      dockerSecrets.length = 0;
     };
     try {
+      if (
+        connector.executionMode === 'docker' &&
+        Object.keys(connector.headerBindings).length
+      )
+        throw new RuntimeFault('secrets_pending');
       for (const location of ['environment', 'header'] as const) {
         const bindings =
           location === 'environment'
@@ -71,14 +83,27 @@ export function createBindingResolver(
           const reference = state.secretReferences.find(
             (reference) => reference.id === id,
           );
-          if (
-            !reference?.present ||
-            !reference.ownerIds.includes(connector.id) ||
-            reference.adapter !== 'windows' ||
-            !backends.windows?.read
-          )
+          if (!reference?.present || !reference.ownerIds.includes(connector.id))
             throw new RuntimeFault('secrets_pending');
-          const value = await backends.windows.read(id, signal);
+          if (connector.executionMode === 'docker') {
+            assertSecretId(id);
+            if (
+              reference.adapter !== 'docker' ||
+              reference.kind === 'oauth' ||
+              !backends.docker ||
+              Object.hasOwn(connector.environmentLiterals ?? {}, name) ||
+              !(await backends.docker.has(id, signal))
+            )
+              throw new RuntimeFault('secrets_pending');
+            dockerSecrets.push({ name: id, env: name });
+            continue;
+          }
+          const backend =
+            reference.adapter === 'docker'
+              ? undefined
+              : backends[reference.adapter];
+          if (!backend?.read) throw new RuntimeFault('secrets_pending');
+          const value = await backend.read(id, signal);
           buffers.push(value);
           let text = value.toString('utf8');
           if (reference.kind === 'oauth') {
@@ -97,6 +122,11 @@ export function createBindingResolver(
               token.expiresAt <= now() + 30_000
             )
               throw new RuntimeFault('auth_expired');
+            if (typeof token.expiresAt === 'number')
+              expiresAt = Math.min(
+                expiresAt ?? Infinity,
+                token.expiresAt - 30_000,
+              );
             text = token.accessToken;
           }
           if (location === 'header') {
@@ -111,7 +141,13 @@ export function createBindingResolver(
           } else environment[name] = text;
         }
       }
-      return { environment, headers, dispose };
+      return {
+        environment,
+        headers,
+        ...(connector.executionMode === 'docker' ? { dockerSecrets } : {}),
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+        dispose,
+      };
     } catch (error) {
       dispose();
       throw error instanceof RuntimeFault

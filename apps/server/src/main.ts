@@ -10,6 +10,10 @@ import {
   createWindowsDiscoveryPorts,
   createDiscoveryService,
   localRuntimeAdapters,
+  windowsStartupRegistration,
+  type HubLifecycle,
+  platformDirectories,
+  supportedPlatform,
 } from '@waleed/hub-core';
 import { createHubServer } from './app.js';
 
@@ -19,12 +23,11 @@ async function main() {
   const port = Number(process.env.HUB_PORT ?? 4177);
   if (!Number.isInteger(port) || port < 1024 || port > 65535)
     throw new Error('HUB_PORT must be an integer from 1024 to 65535.');
-  const directory =
-    process.env.HUB_DATA_DIR ??
-    join(
-      process.env.LOCALAPPDATA ?? join(homedir(), '.local', 'share'),
-      'WaleedMcpHub',
-    );
+  const directory = platformDirectories({
+    platform: supportedPlatform(process.platform),
+    home: homedir(),
+    environment: process.env,
+  }).runtime;
   const store = await openStateStore(directory);
   const safety = await openSafetyLedger(directory).catch(
     async (error: unknown) => {
@@ -47,6 +50,13 @@ async function main() {
   const discoveryEnvironment = Object.fromEntries(
     [
       'PATH',
+      'HOME',
+      'XDG_DATA_HOME',
+      'XDG_CACHE_HOME',
+      'XDG_RUNTIME_DIR',
+      'DBUS_SESSION_BUS_ADDRESS',
+      'DISPLAY',
+      'WAYLAND_DISPLAY',
       'USERPROFILE',
       'HOMEDRIVE',
       'HOMEPATH',
@@ -89,18 +99,28 @@ async function main() {
       : undefined;
   // Include adapter construction in startup cleanup: argument evaluation can
   // reject before createHubServer's promise exists (for example unsafe scopes).
+  let lifecycle: HubLifecycle;
   const hub = await (async () =>
     createHubServer({
       port,
-      lifecycle: createLifecycle(
-        store,
-        Date.now,
-        safety,
-        await localRuntimeAdapters(directory, discoveryEnvironment, () =>
+      lifecycle: (lifecycle = createLifecycle(store, Date.now, safety, {
+        ...(await localRuntimeAdapters(directory, discoveryEnvironment, () =>
           store.read(),
-        ),
-      ),
+        )),
+        ...(process.platform === 'win32'
+          ? {
+              startup: windowsStartupRegistration(
+                fileURLToPath(new URL('../../../', import.meta.url)).replace(
+                  /[\\/]$/,
+                  '',
+                ),
+              ),
+            }
+          : {}),
+      })),
       webRoot,
+      lifecyclePreferencesChanged: (value) =>
+        process.send?.({ lifecyclePreferences: value }),
       ...(process.env.HUB_DESKTOP === '1'
         ? {
             shutdown: () => {
@@ -135,6 +155,12 @@ async function main() {
       `Waleed MCP Hub is listening at ${hub.origin}. No agent or Docker configuration has changed.`,
     );
     if (process.send) process.send({ launchUrl });
+    if (process.send) {
+      const preferences = await lifecycle!.settings
+        .preferences()
+        .catch(() => null);
+      if (preferences) process.send({ lifecyclePreferences: preferences });
+    }
     if (process.env.HUB_NO_OPEN !== '1') {
       if (process.platform !== 'win32') {
         console.info(
@@ -183,6 +209,8 @@ async function main() {
         });
       if (message === 'shutdown')
         void stop().then(() => process.disconnect?.());
+      if (message === 'check-health' && !stopping)
+        void lifecycle!.health.retest().catch(() => undefined);
     });
   } catch (error) {
     await stop();

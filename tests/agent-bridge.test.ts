@@ -114,6 +114,11 @@ it('refuses plain, JSON-escaped, prefixed and encoded credential echoes', () => 
     assertNoCredentialEcho({ text: secret }, [`Bearer ${secret}`]),
   ).toThrow();
   expect(() =>
+    assertNoCredentialEcho({ text: secret }, [
+      `Basic ${Buffer.from(secret).toString('base64')}`,
+    ]),
+  ).toThrow();
+  expect(() =>
     assertNoCredentialEcho({ text: 'safe result' }, [secret]),
   ).not.toThrow();
 });

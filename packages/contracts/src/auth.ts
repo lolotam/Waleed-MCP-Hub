@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SecretAdapterSchema } from './platform.js';
 
 const Id = z
   .string()
@@ -16,7 +17,7 @@ export const CredentialWriteSchema = z.strictObject({
     .max(100)
     .regex(/^[a-zA-Z_][a-zA-Z0-9_-]*$/),
   format: z.enum(['raw', 'bearer', 'basic']),
-  adapter: z.enum(['windows', 'docker']),
+  adapter: SecretAdapterSchema,
   value: z.string().min(1).max(8192),
 });
 export const CredentialReceiptSchema = z.strictObject({
@@ -36,6 +37,32 @@ export const OAuthStartSchema = z.strictObject({
   recipeId: Id,
   definitionHash: z.string().regex(/^[a-f0-9]{64}$/),
   approveSignInAndDiscovery: z.literal(true),
+  discoveryHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  scopes: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(100)
+        .regex(/^[\x21\x23-\x5b\x5d-\x7e]+$/),
+    )
+    .max(16)
+    .optional(),
+});
+export const OAuthDiscoverySchema = z.strictObject({
+  expectedRevision: Revision,
+  expectedConnectorRevision: Revision,
+  definitionHash: z.string().regex(/^[a-f0-9]{64}$/),
+  approveDiscovery: z.literal(true),
+});
+export const OAuthDisconnectSchema = z.strictObject({
+  expectedRevision: Revision,
+  expectedConnectorRevision: Revision,
+  confirmDisconnect: z.literal(true),
+  revokeProvider: z.boolean(),
 });
 export const AuthReasonSchema = z.enum([
   'none',

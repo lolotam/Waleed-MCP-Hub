@@ -7,13 +7,10 @@ import type {
   ProcessRequest,
   ProcessResult,
   ProcessRunner,
+  ProcessRunnerOptions,
 } from '../../ports.js';
 
-export interface WindowsRunnerOptions {
-  allowedExecutables: readonly string[];
-  workingDirectory: string;
-  concurrency?: number;
-}
+export type WindowsRunnerOptions = ProcessRunnerOptions;
 
 const invalid = () =>
   new HubError(
@@ -38,6 +35,7 @@ const emptyResult = (outcome: ProcessResult['outcome']): ProcessResult => ({
 });
 
 function validate(request: ProcessRequest) {
+  if (request.session && !request.stream) throw invalid();
   if (
     request.stream &&
     (typeof request.stream.started !== 'function' ||
@@ -70,7 +68,7 @@ function validate(request: ProcessRequest) {
   if (
     !Number.isInteger(request.timeoutMs) ||
     request.timeoutMs < 50 ||
-    request.timeoutMs > 120_000 ||
+    request.timeoutMs > (request.session ? 3_600_000 : 120_000) ||
     !Number.isInteger(request.outputLimitBytes) ||
     request.outputLimitBytes < 1 ||
     request.outputLimitBytes > 1024 * 1024
@@ -312,9 +310,13 @@ export async function createWindowsProcessRunner(
                     0,
                     Math.min(data.length, request.outputLimitBytes - retained),
                   );
-                  (frame.event === 'stdout' ? stdout : stderr).push(
-                    data.subarray(0, allowed),
-                  );
+                  // Duplex consumers already received stdout. Do not retain a
+                  // second lifetime-long copy of tool results or private stderr.
+                  if (!request.stream)
+                    (frame.event === 'stdout' ? stdout : stderr).push(
+                      data.subarray(0, allowed),
+                    );
+                  else data.fill(0);
                   retained += allowed;
                   if (allowed !== data.length) stop('output_limit');
                 } else if (frame.event === 'result') {
@@ -341,25 +343,31 @@ export async function createWindowsProcessRunner(
                 } else if (frame.event === 'started') {
                   if (started) throw unavailable();
                   started = true;
-                  request.stream?.started((data) => {
-                    if (
-                      closed ||
-                      reason ||
-                      typeof data !== 'string' ||
-                      Buffer.byteLength(data, 'utf8') > 32 * 1024 ||
-                      (inputBytes += Buffer.byteLength(data, 'utf8')) >
-                        1024 * 1024
-                    ) {
-                      stop('output_limit');
-                      return;
-                    }
-                    child.stdin.write(
-                      'stdin ' +
-                        Buffer.from(data, 'utf8').toString('base64') +
-                        '\n',
-                      () => undefined,
-                    );
-                  });
+                  request.stream?.started(
+                    (data) => {
+                      if (
+                        closed ||
+                        reason ||
+                        typeof data !== 'string' ||
+                        Buffer.byteLength(data, 'utf8') > 32 * 1024 ||
+                        (inputBytes += Buffer.byteLength(data, 'utf8')) >
+                          1024 * 1024
+                      ) {
+                        stop('output_limit');
+                        return;
+                      }
+                      child.stdin.write(
+                        'stdin ' +
+                          Buffer.from(data, 'utf8').toString('base64') +
+                          '\n',
+                        () => undefined,
+                      );
+                    },
+                    () => {
+                      if (!closed && !reason)
+                        child.stdin.write('eof\n', () => undefined);
+                    },
+                  );
                 } else throw unavailable();
               } catch {
                 failure = true;

@@ -15,6 +15,8 @@ export class ContainedStdioTransport implements Transport {
   private controller = new AbortController();
   private task: Promise<unknown> | undefined;
   private write: ((value: string) => void) | undefined;
+  private endInput: (() => void) | undefined;
+  private closing: Promise<void> | undefined;
   private decoder = new StringDecoder('utf8');
   private pending = '';
   private messages = 0;
@@ -31,8 +33,9 @@ export class ContainedStdioTransport implements Transport {
           ...this.request,
           signal: AbortSignal.any([this.controller.signal, this.signal]),
           stream: {
-            started: (write) => {
+            started: (write, endInput) => {
               this.write = write;
+              this.endInput = endInput;
               resolve();
             },
             stdout: (bytes) => {
@@ -68,7 +71,7 @@ export class ContainedStdioTransport implements Transport {
                   : 'dependency_unavailable',
               ),
             );
-          if (!this.controller.signal.aborted)
+          if (!this.controller.signal.aborted && !this.closing)
             this.onerror?.(
               new RuntimeFault(
                 result.outcome === 'output_limit'
@@ -95,8 +98,27 @@ export class ContainedStdioTransport implements Transport {
       throw new RuntimeFault('limit_exceeded');
     this.write(data);
   }
-  async close() {
-    this.controller.abort();
-    await this.task;
+  close() {
+    return (this.closing ??= (async () => {
+      this.write = undefined;
+      // Give an EOF-aware peer a brief graceful exit, then cancel its owned Job
+      // Object. The hard lifetime and cumulative I/O bounds remain in the host.
+      if (this.endInput && this.task && !this.signal.aborted) {
+        this.endInput();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            this.task,
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, 1000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      this.controller.abort();
+      await this.task;
+    })());
   }
 }

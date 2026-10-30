@@ -282,7 +282,7 @@ describe('deterministic data-only import normalization', () => {
     'https://user:pass@example.test/mcp',
     'https://example.test/mcp?token=hidden',
     'https://example.test/mcp#hidden',
-    'http://127.0.0.1:80',
+    'http://192.168.1.2:80',
     'file:///C:/private',
   ])('never returns a credential-bearing/unsupported URL: %s', (url) => {
     const result = entry({ url });

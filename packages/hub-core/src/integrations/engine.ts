@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { win32 } from 'node:path';
+import {
+  platformPath,
+  platformPathKey,
+  type HubPlatform,
+} from '../platform/paths.js';
 import { fileURLToPath } from 'node:url';
 import {
   AgentChangeSchema,
+  IntegrationAgentIdSchema,
+  AgentToolSetsSchema,
+  type CapabilityObservation,
   StateSchema,
   type AgentIntegration,
   type IntegrationAgentId,
@@ -16,8 +23,12 @@ import { hashData, hashBytes } from '../runtime/registry.js';
 import { agentEntry, editAgentDocument, managedEntry } from './formats.js';
 import type { AgentTarget } from './targets.js';
 import type { AgentFiles } from './files.js';
+import { agentToolSet } from './agent-profiles.js';
+const scopeFingerprint = (path: string, text: string, platform: HubPlatform) =>
+  hashData([platformPathKey(path, platform), hashBytes(text)]);
 
 export interface IntegrationAdapters {
+  platform?: HubPlatform;
   targets: AgentTarget[];
   files: AgentFiles;
   discovery: DiscoveryPorts;
@@ -32,13 +43,12 @@ export function createIntegrationEngine(
   adapters?: IntegrationAdapters,
 ) {
   const observed = new Map<IntegrationAgentId, AgentIntegration>();
+  const platform = adapters?.platform ?? 'win32',
+    p = platformPath(platform);
   let scanning = false;
   const requireAdapters = () => {
     if (!adapters)
-      throw new HubError(
-        'unavailable',
-        'Windows agent integration is unavailable.',
-      );
+      throw new HubError('unavailable', 'Agent integration is unavailable.');
     return adapters;
   };
   async function inspect(target: AgentTarget): Promise<AgentIntegration> {
@@ -75,17 +85,25 @@ export function createIntegrationEngine(
       }
       const chosen = existing[0] ?? paths[0]!;
       result.configPath = chosen.path;
-      result.fingerprint = chosen.text === null ? null : hashBytes(chosen.text);
+      result.fingerprint =
+        chosen.text === null
+          ? null
+          : scopeFingerprint(chosen.path, chosen.text, platform);
       const [executable] = await options.discovery.find(
         target.aliases,
         AbortSignal.timeout(5000),
       );
       result.executable = executable ?? null;
       result.detected = !!executable || existing.length > 0;
+      if (target.requireExisting && !existing.length) {
+        result.reason =
+          target.id === 'jetbrains' ? 'ambiguous_scope' : 'not_installed';
+        return result;
+      }
       if (executable && target.packageName) {
         const manifest = await options.discovery.read(
-          win32.join(
-            win32.dirname(executable),
+          p.join(
+            p.dirname(executable),
             'node_modules',
             target.packageName,
             'package.json',
@@ -121,7 +139,8 @@ export function createIntegrationEngine(
         entry === undefined
           ? 'not_integrated'
           : record &&
-              record.configPath === chosen.path &&
+              platformPathKey(record.configPath, platform) ===
+                platformPathKey(chosen.path, platform) &&
               record.entryHash === hashData(entry)
             ? 'integrated'
             : 'unknown';
@@ -188,7 +207,12 @@ export function createIntegrationEngine(
       )
         return { agent: current, backup: null, changed: false };
       const text = await options.files.read(current.configPath);
-      if ((text === null ? null : hashBytes(text)) !== current.fingerprint)
+      if (
+        (text === null
+          ? null
+          : scopeFingerprint(current.configPath, text, platform)) !==
+        current.fingerprint
+      )
         throw new HubError('conflict', 'Agent configuration changed.');
       const record = before.integrations?.find((item) => item.agentId === id);
       const entry = agentEntry(
@@ -286,6 +310,15 @@ export function createIntegrationEngine(
     });
   }
   return {
+    async toolSets(observations: CapabilityObservation[] = []) {
+      const state = await store.read();
+      return AgentToolSetsSchema.parse({
+        revision: state.revision,
+        toolSets: IntegrationAgentIdSchema.options.map((agentId) =>
+          agentToolSet(state, agentId, observations),
+        ),
+      });
+    },
     enabled: !!adapters,
     scan,
     async status(id: IntegrationAgentId) {
@@ -304,7 +337,16 @@ export function createIntegrationEngine(
       for (const record of records) {
         const target = adapters!.targets.find(
           (item) => item.id === record.agentId,
-        )!;
+        );
+        if (!target) {
+          results.push({
+            agentId: record.agentId,
+            status: 'conflict',
+            reconnect:
+              'Agent target unavailable in this runtime. No configuration was changed.',
+          });
+          continue;
+        }
         const item = await inspect(target);
         results.push({
           agentId: record.agentId,

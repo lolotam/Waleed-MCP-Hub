@@ -33,7 +33,9 @@ for (const target of targets) {
     target.paths[0],
     target.format === 'codex'
       ? '# preserve this\n[tools]\nnode_repl=true\n'
-      : '{\n// preserve this\n"unrelated":"SYNTHETIC-existing-private"\n}\n',
+      : target.format === 'goose'
+        ? '# preserve this\nGOOSE_MODE: approve\n'
+        : '{\n// preserve this\n"unrelated":"SYNTHETIC-existing-private"\n}\n',
   );
 }
 const store = await openStateStore(runtime),
@@ -95,7 +97,7 @@ try {
     approveExecution: true,
   });
   const scanned = await hub.integrations.scan();
-  assert.equal(scanned.agents.length, 9);
+  assert.equal(scanned.agents.length, 17);
   for (const agent of scanned.agents) {
     assert.equal(agent.status, 'not_integrated');
     const receipt = await hub.integrations.integrate(agent.agentId, {
@@ -170,7 +172,7 @@ try {
   }
   success = true;
   console.info(
-    'Compiled nine-scope private backup/integrate/disconnect and DPAPI-backed independent bridge passed. Discovery invoked no tools; one explicit synthetic call succeeded; disabled routing was rejected. No real agent/pilot was changed.',
+    'Compiled seventeen-scope private backup/integrate/disconnect and DPAPI-backed independent bridge passed. Discovery invoked no tools; one explicit synthetic call succeeded; disabled routing was rejected. No real agent/pilot was changed.',
   );
 } finally {
   await hub.close();

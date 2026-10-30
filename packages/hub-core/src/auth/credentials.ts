@@ -18,6 +18,7 @@ import { assertBinding } from './bindings.js';
 import {
   assertSecretId,
   assertSecretValue,
+  nativeSecretAdapter,
   type SecretBackends,
 } from './secrets.js';
 
@@ -32,7 +33,8 @@ export function createCredentials(
 ) {
   const timestamp = () => new Date(now()).toISOString();
   return {
-    enabled: !!backends.windows || !!backends.docker,
+    enabled: Object.values(backends).some(Boolean),
+    nativeAdapter: () => nativeSecretAdapter(backends),
     backends,
     async write(connectorId: string, raw: unknown) {
       let value: Buffer | undefined;
@@ -99,10 +101,13 @@ export function createCredentials(
             );
           if (
             current.executionMode === 'remote'
-              ? input.location !== 'header' || input.adapter !== 'windows'
+              ? input.location !== 'header' ||
+                input.adapter !== nativeSecretAdapter(backends)
               : input.location !== 'environment' ||
                 input.adapter !==
-                  (current.executionMode === 'docker' ? 'docker' : 'windows')
+                  (current.executionMode === 'docker'
+                    ? 'docker'
+                    : nativeSecretAdapter(backends))
           )
             throw new HubError(
               'invalid',
@@ -118,6 +123,9 @@ export function createCredentials(
             );
           const next = structuredClone(before);
           const connector = requireConnector(next, connectorId);
+          const previousOAuthId = oauth
+            ? connector.headerBindings.Authorization
+            : undefined;
           const id = `wmh-secret-${randomUUID()}`;
           const bindings =
             input.location === 'header'
@@ -166,6 +174,21 @@ export function createCredentials(
             kind: oauth ? 'oauth' : 'credential',
             ...(oauth ? { recipeId: oauth.recipeId } : {}),
           });
+          const retiredOAuth =
+            previousOAuthId &&
+            next.secretReferences.find(
+              (ref) =>
+                ref.id === previousOAuthId &&
+                ref.kind === 'oauth' &&
+                !ref.ownerIds.length &&
+                !next.materializations?.some((record) =>
+                  record.secretReferenceIds?.includes(ref.id),
+                ),
+            );
+          if (retiredOAuth)
+            next.secretReferences = next.secretReferences.filter(
+              (ref) => ref.id !== retiredOAuth.id,
+            );
           if (next.secretReferences.length > 256)
             throw new HubError(
               'invalid',
@@ -257,6 +280,26 @@ export function createCredentials(
               );
             }
           }
+          if (retiredOAuth) {
+            try {
+              await backend.delete(
+                retiredOAuth.id,
+                AbortSignal.timeout(20_000),
+              );
+              if (
+                await backend.has(retiredOAuth.id, AbortSignal.timeout(10_000))
+              )
+                throw new Error();
+            } catch {
+              await safety
+                .finish(jobId, 'needs_review', 'state_drift')
+                .catch(() => undefined);
+              throw new HubError(
+                'unavailable',
+                'Retired OAuth token cleanup needs recovery review.',
+              );
+            }
+          }
           await safety.finish(jobId, 'committed').catch(() => undefined);
           return {
             id,
@@ -338,6 +381,101 @@ export function createCredentials(
         }
         await safety.finish(jobId, 'committed').catch(() => undefined);
         return { id, present: false as const, providerRevoked: false as const };
+      });
+    },
+    async disconnectOAuth(
+      connectorId: string,
+      expectedRevision: number,
+      expectedConnectorRevision: number,
+    ) {
+      return lock(async () => {
+        await safety.assertWritable();
+        const before = await store.read(),
+          current = requireConnector(before, connectorId);
+        if (
+          before.revision !== expectedRevision ||
+          current.revision !== expectedConnectorRevision
+        )
+          throw new HubError('conflict', 'Account inventory changed.');
+        const id = current.headerBindings.Authorization;
+        if (!id) throw new HubError('not_found', 'OAuth account not found.');
+        const reference = before.secretReferences.find(
+          (ref) =>
+            ref.id === id && ref.kind === 'oauth' && ref.adapter === 'windows',
+        );
+        if (!reference || !backends.windows)
+          throw new HubError('not_found', 'OAuth account not found.');
+        if (
+          reference.ownerIds.some((owner) => owner !== connectorId) ||
+          before.connectors.some(
+            (item) =>
+              item.id !== connectorId &&
+              [
+                ...Object.values(item.headerBindings),
+                ...Object.values(item.secretBindings),
+              ].includes(id),
+          ) ||
+          before.materializations?.some((item) =>
+            item.secretReferenceIds?.includes(id),
+          )
+        )
+          throw new HubError(
+            'conflict',
+            'Remove other credential consumers before disconnecting.',
+          );
+        const next = structuredClone(before),
+          connector = requireConnector(next, connectorId);
+        delete connector.headerBindings.Authorization;
+        if (connector.credentialFormats)
+          delete connector.credentialFormats.Authorization;
+        connector.revision++;
+        connector.updatedAt = timestamp();
+        connector.trustApproval = null;
+        next.secretReferences = next.secretReferences.filter(
+          (ref) => ref.id !== id,
+        );
+        for (const profile of next.profiles)
+          if (profile.connectorIds.includes(connectorId)) {
+            profile.revision++;
+            profile.updatedAt = timestamp();
+            for (const binding of next.agentBindings ?? [])
+              if (binding.profileId === profile.id)
+                binding.reconnectRequired = true;
+          }
+        next.revision++;
+        StateSchema.parse(next);
+        const jobId = randomUUID();
+        await safety.prepare({
+          id: jobId,
+          operation: 'delete_credential',
+          targetId: id,
+          expectedRevision: before.revision,
+          beforeHash: stateHash(before),
+          afterHash: stateHash(next),
+          phase: 'prepared',
+          reason: 'none',
+          createdAt: timestamp(),
+          updatedAt: timestamp(),
+          external: true,
+        });
+        try {
+          // First detach/unapprove so a concurrent bridge cannot lease it again.
+          await store.write(before.revision, next);
+          invalidate([connectorId]);
+          await backends.windows.delete(id, AbortSignal.timeout(20_000));
+          if (await backends.windows.has(id, AbortSignal.timeout(10_000)))
+            throw new Error();
+        } catch {
+          await safety
+            .finish(jobId, 'needs_review', 'state_drift')
+            .catch(() => undefined);
+          throw new HubError(
+            'unavailable',
+            'Account disconnect needs recovery review.',
+          );
+        }
+        await safety.finish(jobId, 'committed').catch(() => undefined);
+        return { connectorId, disconnected: true as const };
       });
     },
   };

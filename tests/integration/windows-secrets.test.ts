@@ -6,6 +6,7 @@ import {
   rm,
   symlink,
   mkdir,
+  readdir,
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -62,6 +63,76 @@ describe.skipIf(process.platform !== 'win32')(
         readFile(join(root, 'credentials', 'scope.json')),
       ).rejects.toHaveProperty('code', 'ENOENT');
     });
+    it('atomically rotates protected OAuth bundles under a lock shared across vault instances, never writing plaintext', async () => {
+      const accountId = `wmh-secret-${crypto.randomUUID()}`;
+      const original = Buffer.from(
+        JSON.stringify({
+          accessToken: 'SYNTHETIC-ACCESS-OLD',
+          refreshToken: 'SYNTHETIC-REFRESH-OLD',
+        }),
+      );
+      const rotated = Buffer.from(
+        JSON.stringify({
+          accessToken: 'SYNTHETIC-ACCESS-NEW',
+          refreshToken: 'SYNTHETIC-REFRESH-NEW',
+        }),
+      );
+      const signal = AbortSignal.timeout(25_000);
+      try {
+        await vault.put(accountId, original, signal);
+        const other = await windowsSecretStore(join(directory, 'vault'));
+        const release = await vault.lock!(accountId, signal);
+        const abort = new AbortController();
+        const waiting = other.lock!(accountId, abort.signal);
+        const rejected = expect(waiting).rejects.toBeDefined();
+        abort.abort();
+        await rejected;
+        try {
+          await vault.replace!(accountId, rotated, signal);
+          const bytes = await other.read!(accountId, signal);
+          try {
+            expect(bytes.equals(rotated)).toBe(true);
+          } finally {
+            bytes.fill(0);
+          }
+        } finally {
+          await release();
+        }
+        const reacquired = await other.lock!(accountId, signal);
+        await reacquired();
+        for (const name of await readdir(join(directory, 'vault'))) {
+          const bytes = await readFile(join(directory, 'vault', name));
+          try {
+            for (const secret of [
+              'SYNTHETIC-ACCESS-OLD',
+              'SYNTHETIC-REFRESH-OLD',
+              'SYNTHETIC-ACCESS-NEW',
+              'SYNTHETIC-REFRESH-NEW',
+            ])
+              expect(bytes.includes(Buffer.from(secret))).toBe(false);
+          } finally {
+            bytes.fill(0);
+          }
+        }
+        expect(
+          (await readdir(join(directory, 'vault'))).some(
+            (name) => name.endsWith('.pending') || name.endsWith('.lock'),
+          ),
+        ).toBe(false);
+        const readOnly = await windowsSecretStore(
+          join(directory, 'vault'),
+          true,
+        );
+        await expect(
+          readOnly.replace!(accountId, original, signal),
+        ).rejects.toBeDefined();
+        await expect(readOnly.lock!(accountId, signal)).rejects.toBeDefined();
+        await vault.delete(accountId, signal);
+      } finally {
+        original.fill(0);
+        rotated.fill(0);
+      }
+    }, 30_000);
     it('fails closed for a ciphertext copied to another vault scope and for tampering; never falls back to plaintext', async () => {
       const other = await windowsSecretStore(join(directory, 'other'));
       const disk = await readFile(join(directory, 'vault', `${id}.dpapi`));

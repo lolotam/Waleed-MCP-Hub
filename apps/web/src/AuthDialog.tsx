@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { AuthJob, CredentialWrite } from '@waleed/contracts';
+import type {
+  AuthJob,
+  CredentialWrite,
+  NativeSecretAdapter,
+} from '@waleed/contracts';
 import type { ManagedConnector } from './ConnectorList.js';
 import { api } from './api.js';
 import { Icon } from './Icon.js';
 
 interface AuthStatus {
+  nativeAdapter?: NativeSecretAdapter;
+  genericOAuthSupported?: boolean;
   credentials: Array<{
     id: string;
     adapter: string;
@@ -18,6 +24,21 @@ interface AuthStatus {
     scopes: string[];
   }>;
   state: string;
+}
+interface OAuthDiscovery {
+  discoveryHash: string;
+  issuer: string;
+  resource: string;
+  scopes: string[];
+  revocationSupported: boolean;
+}
+interface ConnectedAccount {
+  connectorId: string;
+  recipeId: string;
+  issuer: string | null;
+  scopes: string[];
+  refreshSupported: boolean;
+  revocationSupported: boolean;
 }
 export function AuthDialog({
   connector,
@@ -42,6 +63,12 @@ export function AuthDialog({
     [deleted, setDeleted] = useState(false),
     [job, setJob] = useState<AuthJob | null>(null),
     [consent, setConsent] = useState(false);
+  const [discovery, setDiscovery] = useState<OAuthDiscovery | null>(null),
+    [scopes, setScopes] = useState<string[]>([]),
+    [genericConsent, setGenericConsent] = useState(false),
+    [account, setAccount] = useState<ConnectedAccount | null>(null),
+    [disconnectConsent, setDisconnectConsent] = useState(false),
+    [accountNotice, setAccountNotice] = useState('');
   const [unused, setUnused] = useState<
       Array<{ id: string; present: boolean; ownerIds: string[] }>
     >([]),
@@ -51,14 +78,19 @@ export function AuthDialog({
     connector.trustApproval?.revision === connector.revision &&
     connector.trustApproval.definitionHash === connector.executionHash;
   const load = async () => {
-    const [info, credentials] = await Promise.all([
+    const [info, credentials, accounts] = await Promise.all([
       api<AuthStatus>(`/api/connectors/${connector.id}/auth`),
       api<{
         references: Array<{ id: string; present: boolean; ownerIds: string[] }>;
       }>('/api/credentials'),
+      api<{ accounts: ConnectedAccount[] }>('/api/oauth/accounts'),
     ]);
     if (mounted.current) {
       setStatus(info);
+      setAccount(
+        accounts.accounts.find((item) => item.connectorId === connector.id) ??
+          null,
+      );
       setUnused(
         credentials.references.filter(
           (reference) => reference.present && !reference.ownerIds.length,
@@ -100,7 +132,7 @@ export function AuthDialog({
   }
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!form.current || !secret.current) return;
+    if (!form.current || !secret.current || !status) return;
     setBusy(true);
     setError('');
     const fields = new FormData(form.current);
@@ -108,7 +140,10 @@ export function AuthDialog({
       expectedRevision: revision,
       expectedConnectorRevision: connector.revision,
       location: connector.executionMode === 'remote' ? 'header' : 'environment',
-      adapter: connector.executionMode === 'docker' ? 'docker' : 'windows',
+      adapter:
+        connector.executionMode === 'docker'
+          ? 'docker'
+          : (status?.nativeAdapter ?? 'windows'),
       name: String(fields.get('binding')),
       format:
         connector.executionMode === 'remote'
@@ -149,6 +184,9 @@ export function AuthDialog({
           recipeId,
           definitionHash: connector.executionHash,
           approveSignInAndDiscovery: true,
+          ...(recipeId === 'generic' && !refreshToken
+            ? { discoveryHash: discovery?.discoveryHash, scopes }
+            : {}),
         },
       );
       currentJob.current = current;
@@ -172,7 +210,66 @@ export function AuthDialog({
       if (mounted.current) setBusy(false);
     }
   }
-  const consumed = saved || deleted || !!job?.completedAt;
+  async function discover() {
+    if (secret.current) secret.current.value = '';
+    setBusy(true);
+    setError('');
+    setGenericConsent(false);
+    setDiscovery(null);
+    try {
+      const result = await api<OAuthDiscovery>(
+        `/api/connectors/${connector.id}/oauth/discover`,
+        {
+          expectedRevision: revision,
+          expectedConnectorRevision: connector.revision,
+          definitionHash: connector.executionHash,
+          approveDiscovery: true,
+        },
+      );
+      if (mounted.current) {
+        setDiscovery(result);
+        setScopes(result.scopes);
+      }
+    } catch {
+      if (mounted.current)
+        setError(
+          'Standard OAuth discovery is unavailable. This server may require a provider-specific client or unsupported authorization flow.',
+        );
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  }
+  async function disconnect(revokeProvider: boolean) {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api<{ providerRevoked: boolean }>(
+        `/api/connectors/${connector.id}/oauth/disconnect`,
+        {
+          expectedRevision: revision,
+          expectedConnectorRevision: connector.revision,
+          confirmDisconnect: true,
+          revokeProvider,
+        },
+      );
+      if (mounted.current)
+        setAccountNotice(
+          result.providerRevoked
+            ? 'Provider tokens revoked and local account disconnected. Approve the connector again before using it.'
+            : 'Local account disconnected. Provider access was not revoked; remove authorization in the provider settings.',
+        );
+      await refresh();
+      await load();
+    } catch {
+      if (mounted.current)
+        setError(
+          'Disconnect failed. Provider access may have changed; inspect account settings and Hub recovery before retrying.',
+        );
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  }
+  const consumed = saved || deleted || !!accountNotice || !!job?.completedAt;
   return (
     <dialog
       ref={dialog}
@@ -206,7 +303,11 @@ export function AuthDialog({
         Store:{' '}
         {connector.executionMode === 'docker'
           ? 'Docker OS keychain (stdin)'
-          : 'Windows DPAPI — current user'}
+          : status?.nativeAdapter === 'keychain'
+            ? 'macOS Keychain — current user'
+            : status?.nativeAdapter === 'libsecret'
+              ? 'Linux Secret Service / libsecret — current user'
+              : 'Windows DPAPI — current user'}
         . Existing credential values are never displayed.
       </p>
       {!!status?.credentials.length && (
@@ -222,6 +323,11 @@ export function AuthDialog({
       {deleted && (
         <p role="status" className="notice">
           Local credential deleted. Provider access was not revoked.
+        </p>
+      )}
+      {accountNotice && (
+        <p role="status" className="notice">
+          {accountNotice}
         </p>
       )}
       {saved && (
@@ -291,17 +397,148 @@ export function AuthDialog({
             Cleared on submission, error and close. No show/copy/export action
             is provided.
           </p>
-          <button type="submit" className="primary" disabled={busy}>
+          <button type="submit" className="primary" disabled={busy || !status}>
             {busy && !job ? 'Saving…' : 'Save protected credential'}
           </button>
         </form>
       )}
       <section className="review">
+        <h3>Connected OAuth account</h3>
+        {account ? (
+          <>
+            <p>
+              {account.issuer ?? 'OAuth provider'} ·{' '}
+              {account.scopes.join(', ') || 'No recorded scopes'}
+            </p>
+            <p className="muted">
+              {account.refreshSupported
+                ? 'Tokens refresh automatically before remote requests.'
+                : 'No refresh token was issued; sign in again when access expires.'}
+            </p>
+            {!consumed && (
+              <>
+                <label className="import-check">
+                  <input
+                    type="checkbox"
+                    checked={disconnectConsent}
+                    onChange={(event) =>
+                      setDisconnectConsent(event.target.checked)
+                    }
+                  />
+                  I confirm this account should be disconnected.
+                </label>
+                <div className="row-actions">
+                  <button
+                    disabled={
+                      busy || !disconnectConsent || !account.revocationSupported
+                    }
+                    onClick={() => void disconnect(true)}
+                  >
+                    Revoke and disconnect
+                  </button>
+                  <button
+                    disabled={busy || !disconnectConsent}
+                    onClick={() => void disconnect(false)}
+                  >
+                    Disconnect locally only
+                  </button>
+                  <button
+                    disabled={busy || !approved || !account.refreshSupported}
+                    onClick={() => void signIn(account.recipeId, true)}
+                  >
+                    Refresh account token
+                  </button>
+                </div>
+                {!account.revocationSupported && (
+                  <p className="muted">
+                    Provider revocation is not advertised. Local disconnect does
+                    not revoke provider access.
+                  </p>
+                )}
+              </>
+            )}
+          </>
+        ) : (
+          <p>No connected OAuth account.</p>
+        )}
+      </section>
+      {status?.genericOAuthSupported && !consumed && !job && (
+        <section className="review">
+          <h3>Standard MCP OAuth</h3>
+          <p>
+            Discover authorization metadata from this approved remote endpoint.
+            No credentials are sent during discovery.
+          </p>
+          <button disabled={busy || !approved} onClick={() => void discover()}>
+            {busy ? 'Working…' : 'Discover OAuth provider'}
+          </button>
+          {!approved && (
+            <p className="notice">
+              Approve the enabled execution definition before discovery.
+            </p>
+          )}
+          {discovery && (
+            <>
+              <p>
+                Issuer: <code>{discovery.issuer}</code>
+              </p>
+              <p>
+                Resource: <code>{discovery.resource}</code>
+              </p>
+              <fieldset disabled={busy}>
+                <legend>Requested scopes</legend>
+                {discovery.scopes.length ? (
+                  discovery.scopes.map((scope) => (
+                    <label key={scope} className="import-check">
+                      <input
+                        type="checkbox"
+                        checked={scopes.includes(scope)}
+                        onChange={(event) => {
+                          setScopes((current) =>
+                            event.target.checked
+                              ? [...current, scope]
+                              : current.filter((value) => value !== scope),
+                          );
+                          setGenericConsent(false);
+                        }}
+                      />
+                      {scope}
+                    </label>
+                  ))
+                ) : (
+                  <p>
+                    No scopes advertised. Review permissions on the provider
+                    consent page.
+                  </p>
+                )}
+              </fieldset>
+              <label className="import-check">
+                <input
+                  type="checkbox"
+                  checked={genericConsent}
+                  disabled={busy}
+                  onChange={(event) => setGenericConsent(event.target.checked)}
+                />
+                I approve this issuer, selected scopes and MCP capability
+                discovery.
+              </label>
+              <button
+                disabled={busy || !approved || !genericConsent}
+                onClick={() => void signIn('generic')}
+              >
+                Sign in with discovered provider
+              </button>
+            </>
+          )}
+        </section>
+      )}
+      <section className="review">
         <h3>Supported OAuth</h3>
         {!status?.recipes.length ? (
           <p>
-            No verified OAuth recipe for this endpoint. A generic sign-in
-            webpage is not supported. Postora authentication remains unresolved.
+            No curated OAuth recipe for this endpoint. Remote servers can use
+            standard MCP OAuth discovery above; arbitrary login webpages are not
+            supported.
           </p>
         ) : (
           status.recipes.map((recipe) => (

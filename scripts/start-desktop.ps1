@@ -8,6 +8,10 @@ if (-not $NodePath) {
 }
 if (-not [IO.Path]::IsPathRooted($NodePath) -or [IO.Path]::GetExtension($NodePath) -ne '.exe') { throw 'An absolute Node executable is required.' }
 $root = Split-Path -Parent $PSScriptRoot
+if ((Test-Path -LiteralPath (Join-Path $root 'WaleedMcpHub.exe')) -and (Test-Path -LiteralPath (Join-Path $root 'WaleedMcpHub.launcher.json'))) {
+    & (Join-Path $root 'WaleedMcpHub.exe')
+    exit $LASTEXITCODE
+}
 if (-not (Test-Path -LiteralPath (Join-Path $root 'apps\server\dist\main.js'))) { throw 'Build the workspace with npm run build before starting desktop mode.' }
 & $NodePath (Join-Path $PSScriptRoot 'desktop.mjs')
 exit $LASTEXITCODE

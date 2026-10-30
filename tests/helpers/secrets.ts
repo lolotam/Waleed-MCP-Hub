@@ -5,7 +5,33 @@ export function memorySecrets() {
   const reads: Buffer[] = [];
   const writes: Buffer[] = [];
   const idsRead: string[] = [];
+  const locks = new Map<string, Promise<void>>();
   const backend: SecretBackend = {
+    async lock(id, signal) {
+      const before = locks.get(id) ?? Promise.resolve();
+      let release!: () => void;
+      const next = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      locks.set(
+        id,
+        before.then(() => next),
+      );
+      await before;
+      if (signal.aborted) {
+        release();
+        signal.throwIfAborted();
+      }
+      return async () => {
+        release();
+      };
+    },
+    async replace(id, value) {
+      if (!values.has(id)) throw new Error('Synthetic credential missing.');
+      values.get(id)!.fill(0);
+      writes.push(value);
+      values.set(id, Buffer.from(value));
+    },
     async has(id) {
       return values.has(id);
     },

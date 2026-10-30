@@ -224,6 +224,101 @@ test('supported OAuth shows provider/scope, handles consent and verifies before 
   expect(report.oauth.methods).not.toContain('tools/call');
   expect(report.retainedBuffersZeroed).toBe(true);
 });
+
+test('generic OAuth discovery pins consent and supports a clean connected-account revocation flow', async ({
+  page,
+  context,
+}) => {
+  const row = page.getByTestId('connector-oauth');
+  await expand(row);
+  await row
+    .getByRole('button', { name: 'Authentication', exact: true })
+    .click();
+  const dialog = page.getByRole('dialog');
+  await dialog
+    .getByRole('button', { name: 'Discover OAuth provider', exact: true })
+    .click();
+  await expect(dialog.getByText(/^Issuer:/)).toBeVisible();
+  const consent = dialog.getByLabel(
+    'I approve this issuer, selected scopes and MCP capability discovery.',
+    { exact: true },
+  );
+  const signIn = dialog.getByRole('button', {
+    name: 'Sign in with discovered provider',
+    exact: true,
+  });
+  await expect(signIn).toBeDisabled();
+  await consent.check();
+  await dialog
+    .getByRole('group', { name: 'Requested scopes', exact: true })
+    .getByLabel('read', { exact: true })
+    .uncheck();
+  await expect(consent).not.toBeChecked();
+  await expect(signIn).toBeDisabled();
+  await dialog
+    .getByRole('group', { name: 'Requested scopes', exact: true })
+    .getByLabel('read', { exact: true })
+    .check();
+  await consent.check();
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1050 });
+    expect(
+      await dialog.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: `test-results/task4-discovered-${width}.png`,
+      fullPage: true,
+    });
+  }
+  await signIn.click();
+  const link = dialog.getByRole('link', {
+    name: 'Continue to verified provider',
+    exact: true,
+  });
+  await expect(link).toBeVisible();
+  const popupPromise = context.waitForEvent('page');
+  await link.click();
+  const popup = await popupPromise;
+  await expect(
+    popup.getByText(
+      'Authorization response received. Return to the local hub.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    dialog.getByText('MCP discovery passed. No upstream tool was called.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await popup.close();
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await row
+    .getByRole('button', { name: 'Authentication', exact: true })
+    .click();
+  await expect(
+    dialog.getByText('Tokens refresh automatically before remote requests.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const revoke = dialog.getByRole('button', {
+    name: 'Revoke and disconnect',
+    exact: true,
+  });
+  await expect(revoke).toBeDisabled();
+  await dialog
+    .getByLabel('I confirm this account should be disconnected.', {
+      exact: true,
+    })
+    .check();
+  await revoke.click();
+  await expect(
+    dialog.getByText(/Provider tokens revoked and local account disconnected/),
+  ).toBeVisible();
+  expect(await page.content()).not.toContain('SYNTHETIC_OAUTH_ACCESS');
+  expect(await page.evaluate(() => Object.keys(localStorage))).toEqual([]);
+});
 test('cancelled OAuth closes the listener and never fabricates a connected state', async ({
   page,
 }) => {

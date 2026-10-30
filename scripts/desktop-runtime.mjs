@@ -42,6 +42,8 @@ export async function startDesktop({
   openWindow,
   log = () => {},
   environment = process.env,
+  background = false,
+  preferencesChanged = () => {},
 }) {
   const runtime = resolve(directory);
   const pipe = `\\\\.\\pipe\\wmh-desktop-${createHash('sha256')
@@ -53,10 +55,17 @@ export async function startDesktop({
     closing = false,
     restarting = false,
     ready = false,
-    pending = false;
+    pending = false,
+    pendingHealth = false,
+    firstLaunch = true;
   function reopen() {
     if (ready && backend?.connected) backend.send('reopen', () => undefined);
     else pending = true;
+  }
+  function checkHealth() {
+    if (ready && backend?.connected)
+      backend.send('check-health', () => undefined);
+    else pendingHealth = true;
   }
   async function openOrRestart() {
     if (restarting || closing) return;
@@ -68,20 +77,33 @@ export async function startDesktop({
     log('build changed; restarting backend');
     restarting = true;
     ready = false;
-    pending = false;
+    pending = true;
     if (backend.connected) backend.send('shutdown', () => undefined);
   }
+  const sockets = new Set();
   const control = createServer((socket) => {
+    if (sockets.size >= 16) {
+      socket.destroy();
+      return;
+    }
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => undefined);
     socket.setTimeout(2000, () => socket.destroy());
-    let request = '';
+    let request = '',
+      handled = false;
     socket.on('data', (chunk) => {
+      if (handled) return;
       request += chunk.toString();
       if (Buffer.byteLength(request) > 64) {
         socket.destroy();
         return;
       }
-      if (request === 'open\n') {
-        void openOrRestart();
+      if (['open\n', 'health\n', 'exit\n', 'ping\n'].includes(request)) {
+        handled = true;
+        if (request === 'open\n') void openOrRestart();
+        if (request === 'health\n') checkHealth();
+        if (request === 'exit\n') stop();
         socket.end('wmh-desktop-v1\n');
       } else if (request.includes('\n')) socket.destroy();
     });
@@ -96,7 +118,9 @@ export async function startDesktop({
     if (error.code !== 'EADDRINUSE')
       throw new Error('Desktop control unavailable. No lock was removed.');
     await new Promise((resolveClient, reject) => {
-      const client = createConnection(pipe, () => client.write('open\n'));
+      const client = createConnection(pipe, () =>
+        client.write(background ? 'ping\n' : 'open\n'),
+      );
       let reply = '';
       client.setTimeout(3000, () => {
         client.destroy();
@@ -125,6 +149,7 @@ export async function startDesktop({
     resolveExit = resolve;
   });
   async function launch() {
+    firstLaunch = true;
     for (const lockName of ['writer.lock', 'safety.lock']) {
       try {
         const lockFile = join(runtime, lockName);
@@ -146,6 +171,7 @@ export async function startDesktop({
       }
     }
     fingerprint = await buildFingerprint(root);
+    if (closing) return;
     backend = fork(join(root, 'apps/server/dist/main.js'), [], {
       execArgv: [],
       env: {
@@ -164,6 +190,11 @@ export async function startDesktop({
       process.stderr.write(`Desktop backend: ${text}`);
     });
     backend.on('message', (message) => {
+      if (
+        message?.lifecyclePreferences &&
+        typeof message.lifecyclePreferences.keepRunningInTray === 'boolean'
+      )
+        preferencesChanged(message.lifecyclePreferences);
       if (!message || typeof message.launchUrl !== 'string') return;
       try {
         const url = new URL(message.launchUrl);
@@ -175,10 +206,12 @@ export async function startDesktop({
         )
           return;
         ready = true;
-        openWindow(url.href);
-        if (pending) {
-          pending = false;
-          reopen();
+        if (!firstLaunch || !background || pending) openWindow(url.href);
+        firstLaunch = false;
+        pending = false;
+        if (pendingHealth) {
+          pendingHealth = false;
+          checkHealth();
         }
       } catch {
         process.stderr.write('Desktop window launch failed.\n');
@@ -207,7 +240,8 @@ export async function startDesktop({
     if (closing) return;
     closing = true;
     control.close();
-    if (backend.connected) backend.send('shutdown', () => undefined);
+    if (backend?.connected) backend.send('shutdown', () => undefined);
+    else if (!backend) resolveExit?.();
   }
   return {
     reused: false,
@@ -216,5 +250,7 @@ export async function startDesktop({
     },
     closed,
     stop,
+    open: openOrRestart,
+    checkHealth,
   };
 }

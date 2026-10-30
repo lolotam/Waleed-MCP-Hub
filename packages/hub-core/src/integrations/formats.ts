@@ -2,57 +2,88 @@ import { applyEdits, modify, parseTree, type Node } from 'jsonc-parser';
 import { parseDocument, object } from '../discovery/metadata.js';
 import { hashData } from '../runtime/registry.js';
 import { HubError } from '../errors.js';
+import { gooseDocument, editGooseEntry } from './goose-yaml.js';
 
 export const managedName = 'waleed-mcp-hub';
 export type AgentFormat =
-  'opencode' | 'codex' | 'mcpServers' | 'vscode' | 'kilo';
-const pathFor = (format: AgentFormat) =>
+  'opencode' | 'codex' | 'mcpServers' | 'vscode' | 'kilo' | 'zed' | 'goose';
+export const agentServerMapPath = (
+  format: AgentFormat,
+  doc?: Record<string, unknown>,
+) =>
   format === 'opencode'
-    ? ['mcp', 'servers', managedName]
+    ? ['mcp', 'servers']
     : [
-        format === 'codex'
-          ? 'mcp_servers'
-          : format === 'vscode'
-            ? 'servers'
-            : format === 'kilo'
-              ? 'mcp'
-              : 'mcpServers',
-        managedName,
+        format === 'goose'
+          ? 'extensions'
+          : format === 'zed'
+            ? doc && Object.hasOwn(doc, 'mcpServers')
+              ? 'mcpServers'
+              : 'context_servers'
+            : format === 'codex'
+              ? 'mcp_servers'
+              : format === 'vscode'
+                ? 'servers'
+                : format === 'kilo'
+                  ? 'mcp'
+                  : 'mcpServers',
       ];
+const pathFor = (format: AgentFormat, doc?: Record<string, unknown>) => [
+  ...agentServerMapPath(format, doc),
+  managedName,
+];
 const conflict = () =>
   new HubError(
     'conflict',
     'Agent configuration is invalid, ambiguous or contains a conflicting managed entry.',
   );
-function document(text: string, format: AgentFormat) {
+export function parseAgentDocument(text: string, format: AgentFormat) {
+  if (Buffer.byteLength(text) > 1024 * 1024) throw conflict();
+  if (format === 'goose') return gooseDocument(text).value;
   if (format !== 'codex') {
-    const walk = (node: Node) => {
+    let count = 0;
+    const walk = (node: Node, depth = 0) => {
+      if (++count > 65536 || depth > 32) throw conflict();
       if (node.type === 'object') {
         const keys =
           node.children?.map(
             (property) => property.children?.[0]?.value as unknown,
           ) ?? [];
-        if (new Set(keys).size !== keys.length) throw conflict();
+        if (
+          new Set(keys).size !== keys.length ||
+          keys.some((key) =>
+            ['__proto__', 'prototype', 'constructor'].includes(String(key)),
+          )
+        )
+          throw conflict();
       }
-      for (const child of node.children ?? []) walk(child);
+      for (const child of node.children ?? []) walk(child, depth + 1);
     };
     const tree = parseTree(text);
     if (!tree) throw conflict();
     walk(tree);
   }
   try {
-    return parseDocument(text, format === 'codex' ? 'toml' : 'jsonc');
+    const doc = parseDocument(text, format === 'codex' ? 'toml' : 'jsonc');
+    if (
+      format === 'zed' &&
+      Object.hasOwn(doc, 'context_servers') &&
+      Object.hasOwn(doc, 'mcpServers')
+    )
+      throw conflict();
+    return doc;
   } catch {
     throw conflict();
   }
 }
+const document = parseAgentDocument;
 export function managedEntry(
   text: string | null,
   format: AgentFormat,
 ): unknown {
   if (text === null) return undefined;
   let value: unknown = document(text.replace(/^\uFEFF/, ''), format);
-  for (const key of pathFor(format)) {
+  for (const key of pathFor(format, object(value) ?? undefined)) {
     if (!object(value)) throw conflict();
     value = (value as Record<string, unknown>)[key];
     if (value === undefined) return undefined;
@@ -67,6 +98,18 @@ export function agentEntry(
   agentId: string,
 ) {
   const args = [bridge, registry, agentId];
+  if (format === 'goose')
+    return {
+      type: 'stdio',
+      name: managedName,
+      enabled: true,
+      cmd: node,
+      args,
+      envs: {},
+      env_keys: [],
+      timeout: 300,
+    };
+  if (format === 'zed') return { command: node, args, env: {} };
   if (format === 'opencode') return { type: 'local', command: [node, ...args] };
   if (format === 'kilo')
     return { type: 'local', command: [node, ...args], enabled: true };
@@ -92,7 +135,9 @@ export function editAgentDocument(
     (!expectedEntryHash || hashData(current) !== expectedEntryHash)
   )
     throw conflict();
-  const raw = text ?? (format === 'codex' ? '' : '{}\n');
+  const raw = text ?? (format === 'codex' || format === 'goose' ? '' : '{}\n');
+  if (format === 'goose')
+    return editGooseEntry(raw, managedName, entry, expectedEntryHash);
   let result: string;
   if (format === 'codex') {
     const start = raw.indexOf(begin),
@@ -126,13 +171,12 @@ export function editAgentDocument(
   } else {
     result = applyEdits(
       raw,
-      modify(raw, pathFor(format), entry, {
-        formattingOptions: {
-          insertSpaces: true,
-          tabSize: 2,
-          eol: raw.includes('\r\n') ? '\r\n' : '\n',
-        },
-      }),
+      modify(
+        raw,
+        pathFor(format, document(raw.replace(/^\uFEFF/, ''), format)),
+        entry,
+        {},
+      ),
     );
   }
   const actual = managedEntry(result, format);
@@ -148,7 +192,7 @@ export function editAgentDocument(
   // Verify semantics outside the owned entry instead of trusting an edit library.
   const without = (value: string) => {
     const doc = document(value.replace(/^\uFEFF/, ''), format);
-    const path = pathFor(format);
+    const path = pathFor(format, doc);
     let parent = doc;
     for (const key of path.slice(0, -1)) {
       const next = object(parent[key]);

@@ -4,9 +4,16 @@ import type {
   ImportSelection,
   ImportDefinition,
   OperationPreview,
+  Profile,
+} from '@waleed/contracts';
+import {
+  smartPasteImportSource,
+  type SmartPasteResult,
 } from '@waleed/contracts';
 import { api, ApiError } from './api.js';
 import { Icon } from './Icon.js';
+import { SmartPaste } from './SmartPaste.js';
+import { BundleInstaller } from './BundleInstaller.js';
 
 type Mode = 'paste' | 'endpoint' | 'native';
 function sourceFromForm(form: HTMLFormElement, mode: Mode): string {
@@ -32,6 +39,9 @@ export function ImportDialog({
   close,
   refresh,
   savePreview,
+  initialPreview,
+  profiles = [],
+  agentSource = false,
 }: {
   revision: number;
   close: () => void;
@@ -40,6 +50,9 @@ export function ImportDialog({
     preview: OperationPreview,
     definitions: ImportDefinition[],
   ) => void;
+  initialPreview?: ImportPreview | undefined;
+  profiles?: Profile[];
+  agentSource?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
@@ -52,11 +65,19 @@ export function ImportDialog({
   const [error, setError] = useState('');
   const [edited, setEdited] = useState(false);
   const [expired, setExpired] = useState(false);
+  const [profileIds, setProfileIds] = useState<string[]>([]),
+    [applyConsent, setApplyConsent] = useState(false),
+    [agentConsent, setAgentConsent] = useState(false),
+    [applied, setApplied] = useState(false);
   useEffect(() => {
     mounted.current = true;
     const previous = document.activeElement as HTMLElement | null;
     dialog.current?.showModal();
-    form.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+    if (initialPreview) accept(initialPreview);
+    const source =
+      form.current?.querySelector<HTMLTextAreaElement>('#import-source');
+    if (source) source.focus();
+    else form.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
     return () => {
       mounted.current = false;
       form.current?.reset();
@@ -92,7 +113,9 @@ export function ImportDialog({
     const warn = (event: BeforeUnloadEvent) => {
       if (
         draftId.current ||
-        form.current?.querySelector<HTMLTextAreaElement>('textarea')?.value
+        Array.from(
+          form.current?.querySelectorAll<HTMLTextAreaElement>('textarea') ?? [],
+        ).some((input) => !!input.value)
       )
         event.preventDefault();
     };
@@ -112,6 +135,24 @@ export function ImportDialog({
     );
     setEdited(false);
     setExpired(false);
+    setApplyConsent(false);
+  }
+  async function smartReview(value: SmartPasteResult) {
+    setBusy(true);
+    setError('');
+    form.current?.reset();
+    const source = smartPasteImportSource(value);
+    try {
+      const next = await api<ImportPreview>('/api/imports/preview', {
+        expectedRevision: revision,
+        source,
+      });
+      if (mounted.current) accept(next);
+      else
+        void api(`/api/imports/${next.id}/cancel`, {}).catch(() => undefined);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
   }
   async function discard() {
     form.current?.reset();
@@ -240,6 +281,29 @@ export function ImportDialog({
       if (mounted.current) setBusy(false);
     }
   }
+  async function applyImport() {
+    if (!preview) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/api/imports/${preview.id}/apply`, {
+        expectedRevision: preview.expectedRevision,
+        profileIds,
+        confirmImport: true,
+        confirmAgentConfigChange: agentConsent,
+      });
+      draftId.current = null;
+      setApplied(true);
+      setPreview(null);
+      await refresh();
+    } catch {
+      setError(
+        'Import refused or interrupted. Refresh inventory and inspect recovery before retrying; a consumed draft cannot be replayed.',
+      );
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  }
   return (
     <dialog
       ref={dialog}
@@ -258,7 +322,11 @@ export function ImportDialog({
         autoComplete="off"
       >
         <div className="dialog-header">
-          <div className="eyebrow">PREVIEW ONLY · NO EXTERNAL EFFECTS</div>
+          <div className="eyebrow">
+            {preview?.applySupported
+              ? 'PREVIEW FIRST · PROTECTED APPLY'
+              : 'PREVIEW ONLY · NO EXTERNAL EFFECTS'}
+          </div>
           <button
             className="icon-button"
             type="button"
@@ -281,8 +349,27 @@ export function ImportDialog({
           local registry save requires a separate review; execution approval is
           separate. Private import values remain memory-only; save a value-free
           definition, then add its protected credential through Authentication.
+          {preview?.applySupported &&
+            ' Protected import can instead save the selected values directly to the native credential vault with explicit confirmation.'}
         </p>
-        {!preview ? (
+        {!preview && !applied && (
+          <>
+            <SmartPaste disabled={busy} onReview={smartReview} />
+            <BundleInstaller
+              revision={revision}
+              refresh={refresh}
+              onBusy={setBusy}
+              disabled={busy}
+            />
+          </>
+        )}
+        {applied ? (
+          <p role="status" className="notice">
+            Import completed. Credentials are protected, profile membership is
+            saved, and execution approval is still required. Reconnect the agent
+            after approving the exact connector definitions.
+          </p>
+        ) : !preview ? (
           <>
             <fieldset className="import-modes">
               <legend>Input format</legend>
@@ -301,7 +388,7 @@ export function ImportDialog({
                   {item === 'paste'
                     ? 'Paste JSON'
                     : item === 'endpoint'
-                      ? 'HTTPS endpoint'
+                      ? 'Remote endpoint'
                       : 'Native command'}
                 </label>
               ))}
@@ -336,7 +423,7 @@ export function ImportDialog({
                   />
                   {mode === 'endpoint' ? (
                     <>
-                      <label htmlFor="import-endpoint">HTTPS endpoint</label>
+                      <label htmlFor="import-endpoint">MCP endpoint URL</label>
                       <input
                         id="import-endpoint"
                         name="endpoint"
@@ -351,9 +438,10 @@ export function ImportDialog({
                         <option value="sse">Legacy SSE</option>
                       </select>
                       <small id="import-input-help">
-                        No credentials, query strings, or fragments. No endpoint
-                        or DNS requests are made. Paste JSON to provide
-                        write-only headers.
+                        HTTPS or opt-in loopback HTTP with a port. No
+                        credentials, query strings, or fragments. No endpoint or
+                        DNS requests are made. Paste JSON to provide write-only
+                        headers.
                       </small>
                     </>
                   ) : (
@@ -501,6 +589,60 @@ export function ImportDialog({
                       />
                     </label>
                   </div>
+                  {(entry.definition?.executionMode === 'package' ||
+                    entry.warnings.includes('unpinned_package')) && (
+                    <div className="import-identity">
+                      <label>
+                        Exact package version
+                        <input
+                          aria-label={`Entry ${index + 1} exact version`}
+                          value={
+                            selection[index]?.packageVersion ??
+                            (entry.definition?.executionMode === 'package'
+                              ? entry.definition.package.version
+                              : '')
+                          }
+                          onChange={(event) => {
+                            setSelection((items) =>
+                              items.map((item) =>
+                                item.key === entry.key
+                                  ? {
+                                      ...item,
+                                      packageVersion: event.target.value,
+                                    }
+                                  : item,
+                              ),
+                            );
+                            setEdited(true);
+                            setApplyConsent(false);
+                          }}
+                        />
+                      </label>
+                      <label>
+                        Package executable
+                        <input
+                          aria-label={`Entry ${index + 1} package executable`}
+                          value={
+                            selection[index]?.entryPoint ??
+                            (entry.definition?.executionMode === 'package'
+                              ? entry.definition.package.entryPoint
+                              : '')
+                          }
+                          onChange={(event) => {
+                            setSelection((items) =>
+                              items.map((item) =>
+                                item.key === entry.key
+                                  ? { ...item, entryPoint: event.target.value }
+                                  : item,
+                              ),
+                            );
+                            setEdited(true);
+                            setApplyConsent(false);
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
                   {entry.issues.length > 0 && (
                     <ul className="error-message">
                       {entry.issues.map((issue, index) => (
@@ -509,6 +651,45 @@ export function ImportDialog({
                         </li>
                       ))}
                     </ul>
+                  )}
+                  {entry.warnings.includes('local_http_opt_in') && (
+                    <>
+                      <p>
+                        Local endpoint to review:{' '}
+                        <code>
+                          {entry.localHttpEndpoint ??
+                            (entry.definition?.executionMode === 'remote'
+                              ? entry.definition.endpoint
+                              : 'Resolve the invalid endpoint first.')}
+                        </code>
+                      </p>
+                      <label className="import-check">
+                        <input
+                          type="checkbox"
+                          checked={
+                            selection[index]?.localHttpOptIn ??
+                            (entry.definition?.executionMode === 'remote' &&
+                              entry.definition.localHttpOptIn === true)
+                          }
+                          onChange={(event) => {
+                            setSelection((items) =>
+                              items.map((item) =>
+                                item.key === entry.key
+                                  ? {
+                                      ...item,
+                                      localHttpOptIn: event.target.checked,
+                                    }
+                                  : item,
+                              ),
+                            );
+                            setEdited(true);
+                            setApplyConsent(false);
+                          }}
+                        />
+                        I opt in to unencrypted local HTTP for entry {index + 1}
+                        's exact loopback endpoint and port.
+                      </label>
+                    </>
                   )}
                   {entry.conflicts.length > 0 && (
                     <p className="error-message" role="status">
@@ -566,10 +747,70 @@ export function ImportDialog({
                 {edited
                   ? 'Selection changed. Update preview to recheck conflicts.'
                   : preview.selectionReady
-                    ? 'Selection is valid for review. Local save requires a separate preview; private import values stay memory-only.'
+                    ? preview.applySupported
+                      ? 'Selection is valid. Confirm the protected import below to save credentials and profile membership; execution approval remains separate.'
+                      : 'Selection is valid for review. Local save requires a separate preview; private import values stay memory-only.'
                     : `Review blocked: ${preview.blockers.map((blocker) => blocker.replaceAll('_', ' ')).join(', ')}.`}
               </p>
             </section>
+            {preview.applySupported && (
+              <section className="review">
+                <h3>Apply protected import</h3>
+                <p>
+                  Selected credentials go directly to this runtime's native
+                  credential vault; Settings shows its backend and health. No
+                  packages are installed, no server is started, and execution is
+                  not approved.
+                </p>
+                {profiles
+                  .filter((profile) => profile.enabled !== false)
+                  .map((profile) => (
+                    <label className="import-check" key={profile.id}>
+                      <input
+                        type="checkbox"
+                        checked={profileIds.includes(profile.id)}
+                        onChange={(event) => {
+                          setProfileIds((ids) =>
+                            event.target.checked
+                              ? [...ids, profile.id]
+                              : ids.filter((id) => id !== profile.id),
+                          );
+                          setApplyConsent(false);
+                        }}
+                      />
+                      Bind to {profile.name}
+                    </label>
+                  ))}
+                {!profiles.some((profile) => profile.enabled !== false) && (
+                  <p>
+                    Create an enabled Hub profile before applying this import.
+                  </p>
+                )}
+                {agentSource && (
+                  <label className="import-check">
+                    <input
+                      type="checkbox"
+                      checked={agentConsent}
+                      onChange={(event) =>
+                        setAgentConsent(event.target.checked)
+                      }
+                    />
+                    Replace only selected source entries with the Hub bridge and
+                    keep an encrypted recovery copy. Unselected entries stay
+                    unchanged.
+                  </label>
+                )}
+                <label className="import-check">
+                  <input
+                    type="checkbox"
+                    checked={applyConsent}
+                    onChange={(event) => setApplyConsent(event.target.checked)}
+                  />
+                  I confirm importing the reviewed definitions, protected
+                  credentials and profile membership.
+                </label>
+              </section>
+            )}
           </>
         )}
         {error && (
@@ -585,9 +826,9 @@ export function ImportDialog({
               void discard();
             }}
           >
-            Cancel and discard
+            {applied ? 'Close' : 'Cancel and discard'}
           </button>
-          {preview && (
+          {preview && !agentSource && (
             <button
               type="button"
               disabled={
@@ -618,24 +859,40 @@ export function ImportDialog({
               Export sanitized preview
             </button>
           )}
-          <button
-            className="primary"
-            type="submit"
-            disabled={busy || (expired && !!preview)}
-          >
-            {busy
-              ? 'Checking…'
-              : preview
-                ? 'Update preview'
-                : 'Preview configuration'}
-          </button>
+          {!applied && (
+            <button
+              className={
+                !preview?.applySupported || edited ? 'primary' : undefined
+              }
+              type="submit"
+              disabled={busy || (expired && !!preview)}
+            >
+              {busy
+                ? 'Checking…'
+                : preview
+                  ? 'Update preview'
+                  : 'Preview configuration'}
+            </button>
+          )}
           {preview && (
             <button
               type="button"
-              disabled
-              title="Direct private-draft apply is unsupported; use a separate value-free save and Authentication."
+              className={preview.applySupported ? 'primary' : undefined}
+              disabled={
+                busy ||
+                edited ||
+                expired ||
+                !preview.applySupported ||
+                !preview.selectionReady ||
+                !profileIds.length ||
+                !applyConsent ||
+                (agentSource && !agentConsent)
+              }
+              onClick={() => void applyImport()}
             >
-              Apply import (unavailable)
+              {preview.applySupported
+                ? 'Apply protected import'
+                : 'Apply import (unavailable)'}
             </button>
           )}
         </footer>

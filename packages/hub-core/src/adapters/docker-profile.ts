@@ -21,6 +21,15 @@ export function dockerCommand(
   declared: Record<string, string>,
 ): DockerCommand {
   const environment: Record<string, string> = {};
+  // Windows environment keys are case-insensitive, but a captured plain object
+  // is not. Preserve only the allowlist below, including ProgramFiles/ProgramData
+  // needed by Docker's plugin discovery when agents normalize key casing.
+  const declaredValues = new Map(
+    Object.entries(declared).map(([name, value]) => [
+      name.toLowerCase(),
+      value,
+    ]),
+  );
   // Docker's keychain interface invokes its own credential helper by name.
   // Provide only reviewed binary directories, never the user's inherited PATH.
   environment.PATH = [
@@ -43,8 +52,10 @@ export function dockerCommand(
     'DOCKER_CONFIG',
     'DOCKER_HOST',
     'DOCKER_CONTEXT',
-  ])
-    if (declared[key]) environment[key] = declared[key]!;
+  ]) {
+    const value = declaredValues.get(key.toLowerCase());
+    if (value) environment[key] = value;
+  }
   let ready: Promise<void> | undefined;
   const execute = async (args: readonly string[], signal: AbortSignal) => {
     const result = await runner.run({

@@ -9,6 +9,7 @@ import type {
   FetchLike,
 } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { RuntimeFault } from '../../runtime/capabilities.js';
+import { isLocalHttpEndpoint } from '@waleed/contracts';
 
 export function publicAddress(address: string): boolean {
   if (isIP(address) === 4) {
@@ -40,12 +41,17 @@ export function restrictedFetch(
   endpoint: string,
   signal: AbortSignal,
   fixtureOrigin?: string,
-  credentials: Record<string, string> = {},
+  credentials:
+    Record<string, string> | (() => Promise<Record<string, string>>) = {},
+  exposeChallenge = false,
+  localHttpOptIn = false,
 ): FetchLike {
   const origin = new URL(endpoint).origin;
+  const local = localHttpOptIn && isLocalHttpEndpoint(endpoint);
   let bytes = 0,
     requests = 0;
   const secureFetch: FetchLike = async (input, init = {}) => {
+    signal.throwIfAborted();
     const url = new URL(String(input));
     if (++requests > 64) throw new RuntimeFault('limit_exceeded');
     const fixture =
@@ -57,7 +63,9 @@ export function restrictedFetch(
       url.username ||
       url.password ||
       url.hash ||
-      (!fixture && url.protocol !== 'https:')
+      (!fixture &&
+        !(local && url.protocol === 'http:') &&
+        url.protocol !== 'https:')
     )
       throw new RuntimeFault('destination_denied');
     const dnsSignal = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
@@ -88,7 +96,12 @@ export function restrictedFetch(
           );
     if (
       !addresses.length ||
-      (!fixture && addresses.some((item) => !publicAddress(item.address)))
+      (!fixture &&
+        addresses.some((item) =>
+          local
+            ? !['127.0.0.1', '::1'].includes(item.address)
+            : !publicAddress(item.address),
+        ))
     )
       throw new RuntimeFault('destination_denied');
     const headers: Record<string, string> = {};
@@ -108,7 +121,9 @@ export function restrictedFetch(
     });
     // Only the binding resolver may supply credential headers. SDK/server input
     // cannot add Authorization/Cookie. Never follow redirects with these values.
-    for (const [key, value] of Object.entries(credentials)) {
+    const credentialHeaders =
+      typeof credentials === 'function' ? await credentials() : credentials;
+    for (const [key, value] of Object.entries(credentialHeaders)) {
       if (
         !/^(?:Authorization|X-[a-z0-9-]+|Api-Key)$/i.test(key) ||
         /[\r\n\0]/.test(value) ||
@@ -128,7 +143,7 @@ export function restrictedFetch(
       ? AbortSignal.any([signal, init.signal])
       : signal;
     return new Promise<Response>((resolve, reject) => {
-      const request = (fixture ? httpRequest : httpsRequest)(
+      const request = (fixture || local ? httpRequest : httpsRequest)(
         url,
         {
           method: init.method ?? 'GET',
@@ -144,13 +159,23 @@ export function restrictedFetch(
           },
         },
         (response) => {
+          // Bound header establishment, not quiet periods in an established MCP
+          // event stream. Its AbortSignal and bridge idle/lifetime limits remain
+          // authoritative; JSON bodies retain the short inactivity timeout.
+          if (
+            /text\/event-stream/i.test(headers.accept ?? '') &&
+            /text\/event-stream/i.test(
+              String(response.headers['content-type'] ?? ''),
+            )
+          )
+            request.setTimeout(0);
           const status = response.statusCode ?? 500;
           if (status >= 300 && status < 400) {
             response.destroy();
             reject(new RuntimeFault('destination_denied'));
             return;
           }
-          if (status === 401 || status === 403) {
+          if (!exposeChallenge && (status === 401 || status === 403)) {
             response.destroy();
             reject(new RuntimeFault('auth_required'));
             return;
@@ -160,6 +185,7 @@ export function restrictedFetch(
             'content-type',
             'mcp-session-id',
             'mcp-protocol-version',
+            ...(exposeChallenge ? ['www-authenticate'] : []),
           ]) {
             const value = response.headers[key];
             if (typeof value === 'string' && value.length <= 2048)
@@ -234,13 +260,17 @@ export function safeMcpHttpTransport(
   transport: 'streamable_http' | 'sse',
   signal: AbortSignal,
   fixtureOrigin?: string,
-  credentials: Record<string, string> = {},
-): Transport {
+  credentials:
+    Record<string, string> | (() => Promise<Record<string, string>>) = {},
+  localHttpOptIn = false,
+): Transport & { terminateSession?: () => Promise<void> } {
   const secureFetch = restrictedFetch(
     endpoint,
     signal,
     fixtureOrigin,
     credentials,
+    false,
+    localHttpOptIn,
   );
   return transport === 'sse'
     ? new SSEClientTransport(new URL(endpoint), {

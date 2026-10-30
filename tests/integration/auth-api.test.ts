@@ -104,6 +104,8 @@ describe('protected one-way credential HTTP interface', () => {
     for (const url of [
       '/api/connectors/connector-0/credentials',
       '/api/connectors/connector-0/oauth',
+      '/api/connectors/connector-0/oauth/discover',
+      '/api/connectors/connector-0/oauth/disconnect',
     ]) {
       expect(
         (
@@ -159,6 +161,34 @@ describe('protected one-way credential HTTP interface', () => {
         })
       ).statusCode,
     ).toBe(404);
+  });
+  it('lists connected accounts without a token-read endpoint and validates explicit disconnect/discovery consent', async () => {
+    const { server, headers, secrets } = await setup();
+    const accounts = await server.app.inject({
+      url: '/api/oauth/accounts',
+      headers,
+    });
+    expect(accounts.statusCode).toBe(200);
+    expect(accounts.json()).toEqual({ revision: 0, accounts: [] });
+    expect(
+      (
+        await server.app.inject({
+          url: '/api/oauth/accounts',
+          headers: { host: headers.host },
+        })
+      ).statusCode,
+    ).toBe(401);
+    for (const action of ['discover', 'disconnect']) {
+      const denied = await server.app.inject({
+        method: 'POST',
+        url: `/api/connectors/connector-0/oauth/${action}`,
+        headers,
+        payload: { expectedRevision: 0, expectedConnectorRevision: 1 },
+      });
+      expect(denied.statusCode).toBe(400);
+    }
+    expect(secrets.reads).toEqual([]);
+    expect(secrets.values.size).toBe(0);
   });
   it('rejects stale editors and shared credential deletion; a saved credential is not reported connected', async () => {
     const { server, headers } = await setup();

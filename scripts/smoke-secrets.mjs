@@ -19,8 +19,24 @@ import {
   definitionHash,
 } from '@waleed/hub-core';
 
-if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
+if (process.platform !== 'win32') throw new Error('Use Windows.');
+if (!process.versions.node.startsWith('24.')) {
+  const { existsSync } = await import('node:fs');
+  const { spawnSync } = await import('node:child_process');
+  const candidate = [
+    join(process.cwd(), 'runtime', 'node.exe'),
+    'E:\\Dev\\Tools_and_Utilities\\nodejs24\\node.exe',
+  ].find((p) => existsSync(p));
+  if (candidate) {
+    const res = spawnSync(
+      candidate,
+      [fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+      { stdio: 'inherit' },
+    );
+    process.exit(res.status ?? 0);
+  }
   throw new Error('Use Node 24 on Windows.');
+}
 const directory = await mkdtemp(join(tmpdir(), 'hub-p6-compiled-'));
 const store = await openStateStore(directory),
   safety = await openSafetyLedger(directory),

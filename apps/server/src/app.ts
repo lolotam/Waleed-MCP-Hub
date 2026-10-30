@@ -3,9 +3,11 @@ import cookie from '@fastify/cookie';
 import staticFiles from '@fastify/static';
 import {
   MAX_REQUEST_BYTES,
+  MCPB_MAX_ARCHIVE_BYTES,
   SessionRequestSchema,
   ApplyRequestSchema,
   IdSchema,
+  ToolPoliciesUpdateSchema,
   BootstrapSchema,
   AgentIdSchema,
   RefusalReasonSchema,
@@ -13,33 +15,47 @@ import {
   ImportSavePreviewRequestSchema,
   SecretDeleteSchema,
   IntegrationAgentIdSchema,
+  AgentProfileUpdateSchema,
+  AgentToolSearchUpdateSchema,
+  PlaygroundCatalogRequestSchema,
+  PlaygroundInvokeRequestSchema,
+  HealthRetestRequestSchema,
+  ToolOverrideUpdateSchema,
+  SETUP_MAX_BYTES,
+  CredentialStorageStatusSchema,
 } from '@waleed/contracts';
 import {
   HubError,
   publicError,
-  createImportService,
   definitionHash,
   profileHash,
   type HubLifecycle,
   type DiscoveryService,
   addManualMcp,
+  createRegistryClient,
 } from '@waleed/hub-core';
 import { createSessions } from './security.js';
+import { registerHttpMcp } from './http-mcp.js';
 
 export interface ServerOptions {
+  lifecyclePreferencesChanged?: (
+    value: import('@waleed/contracts').LifecyclePreferences,
+  ) => void;
   port: number;
   lifecycle: HubLifecycle;
   discovery?: DiscoveryService;
   webRoot?: string;
   now?: () => number;
   shutdown?: () => void;
+  registry?: ReturnType<typeof createRegistryClient>;
 }
 
 export async function createHubServer(options: ServerOptions) {
   const origin = `http://127.0.0.1:${options.port}`;
   const host = `127.0.0.1:${options.port}`;
   const sessions = createSessions(options.now);
-  const imports = createImportService(options.now);
+  const imports = options.lifecycle.adoption.imports;
+  const registry = options.registry ?? createRegistryClient();
   const app = Fastify({
     logger: false,
     bodyLimit: MAX_REQUEST_BYTES,
@@ -49,8 +65,33 @@ export async function createHubServer(options: ServerOptions) {
     routerOptions: { maxParamLength: 100 },
   });
   await app.register(cookie);
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer' },
+    (_request, body, done) => done(null, body),
+  );
 
   const routes: Record<string, RefusalInput['route']> = {
+    '/api/credential-storage': 'credential_storage',
+    '/api/credential-storage/check': 'credential_storage',
+    '/mcp': 'http_mcp',
+    '/api/http-tokens': 'http_tokens',
+    '/api/http-tokens/:id': 'http_tokens',
+    '/api/settings/onboarding': 'onboarding',
+    '/api/setup/export': 'setup_export',
+    '/api/setup/import/preview': 'setup_import',
+    '/api/setup/import/apply': 'setup_import',
+    '/api/setup/import/:id/cancel': 'setup_import',
+    '/api/connectors/:id/tool-override': 'tool_override',
+    '/api/health/connectors': 'connector_health',
+    '/api/health/retest': 'connector_health',
+    '/api/lifecycle/startup': 'lifecycle_startup',
+    '/api/lifecycle/preferences': 'lifecycle_preferences',
+    '/api/request-log': 'request_log',
+    '/api/playground/catalog': 'playground_catalog',
+    '/api/playground/invoke': 'playground_invoke',
+    '/api/playground/jobs/:id': 'playground_job',
+    '/api/playground/jobs/:id/cancel': 'playground_cancel',
     '/health': 'health',
     '/api/session': 'session',
     '/api/session/logout': 'logout',
@@ -71,11 +112,18 @@ export async function createHubServer(options: ServerOptions) {
     '/api/discovery/jobs/:id/cancel': 'discovery_cancel',
     '/api/adoption/preview': 'adoption_preview',
     '/api/imports/preview': 'import_preview',
+    '/api/bundles/preview': 'import_preview',
+    '/api/bundles/:id/install': 'import_save_preview',
+    '/api/bundles/:id/cancel': 'import_cancel',
     '/api/imports/:id': 'import_read',
     '/api/imports/:id/selection': 'import_selection',
     '/api/imports/:id/cancel': 'import_cancel',
     '/api/imports/:id/save-preview': 'import_save_preview',
+    '/api/imports/:id/apply': 'import_save_preview',
+    '/api/adoption/agents/:agentId/preview': 'adoption_preview',
+    '/api/registry/servers': 'discovery',
     '/api/connectors/:id/check': 'connector_check',
+    '/api/connectors/:id/tool-policies': 'tool_policies',
     '/api/runtime/jobs/:id': 'runtime_job',
     '/api/runtime/jobs/:id/cancel': 'runtime_cancel',
     '/api/connectors/:id/credentials': 'credential_write',
@@ -84,12 +132,18 @@ export async function createHubServer(options: ServerOptions) {
     '/api/connectors/:id/auth': 'auth_status',
     '/api/connectors/:id/oauth': 'oauth_start',
     '/api/connectors/:id/oauth/refresh': 'oauth_refresh',
+    '/api/connectors/:id/oauth/discover': 'oauth_start',
+    '/api/connectors/:id/oauth/disconnect': 'credential_delete',
+    '/api/oauth/accounts': 'auth_status',
     '/api/auth/jobs/:id': 'auth_job',
     '/api/auth/jobs/:id/cancel': 'auth_cancel',
     '/api/agents/scan': 'agent_scan',
     '/api/agents/:agentId/integrate': 'agent_integrate',
     '/api/agents/:agentId/disconnect': 'agent_disconnect',
     '/api/agents/:agentId/status': 'agent_status',
+    '/api/agents/tool-sets': 'agent_tool_sets',
+    '/api/agents/:agentId/profile': 'agent_profile',
+    '/api/agents/:agentId/tool-search': 'agent_tool_search',
     '/api/agents/sync': 'agent_sync',
     '/api/connectors/manual': 'manual_mcp',
     '/api/desktop/shutdown': 'desktop_shutdown',
@@ -168,6 +222,9 @@ export async function createHubServer(options: ServerOptions) {
         error: 'origin_denied',
         message: 'Cross-site requests are not allowed.',
       });
+    // Only these registered MCP methods use Bearer auth. Host/Origin checks above
+    // still apply; browser APIs keep their unchanged session/Origin/CSRF rules.
+    if (request.routeOptions.config.mcpBearer === true) return;
     const mutation = !['GET', 'HEAD'].includes(request.method);
     if (mutation && request.headers.origin !== origin)
       return reply.code(403).send({
@@ -251,6 +308,47 @@ export async function createHubServer(options: ServerOptions) {
   app.get('/health', { config: { public: true } }, async () => ({
     ready: true,
   }));
+  registerHttpMcp(app, options.lifecycle, options.now);
+  app.get('/api/credential-storage', async () =>
+    CredentialStorageStatusSchema.parse(
+      options.lifecycle.credentialStorage.status(),
+    ),
+  );
+  app.post('/api/credential-storage/check', async () =>
+    CredentialStorageStatusSchema.parse(
+      await options.lifecycle.credentialStorage.check(),
+    ),
+  );
+  app.get('/api/request-log', async () =>
+    options.lifecycle.requestLogSnapshot(),
+  );
+  app.post('/api/playground/catalog', async (request) =>
+    options.lifecycle.playground.catalog(
+      PlaygroundCatalogRequestSchema.parse(request.body),
+    ),
+  );
+  app.post('/api/playground/invoke', async (request) =>
+    options.lifecycle.playground.invoke(
+      PlaygroundInvokeRequestSchema.parse(request.body),
+      request.cookies.waleed_hub_session!,
+    ),
+  );
+  app.get<{ Params: { id: string } }>(
+    '/api/playground/jobs/:id',
+    async (request) =>
+      options.lifecycle.playground.job(
+        request.params.id,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/playground/jobs/:id/cancel',
+    async (request) =>
+      options.lifecycle.playground.cancel(
+        request.params.id,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
   app.post(
     '/api/session',
     { config: { public: true } },
@@ -279,6 +377,9 @@ export async function createHubServer(options: ServerOptions) {
   app.post('/api/session/logout', async (request, reply) => {
     options.lifecycle.auth.revokeSession(request.cookies.waleed_hub_session!);
     imports.revoke(request.cookies.waleed_hub_session!);
+    options.lifecycle.bundles.revoke(request.cookies.waleed_hub_session!);
+    options.lifecycle.setup.revoke(request.cookies.waleed_hub_session!);
+    options.lifecycle.playground.revoke(request.cookies.waleed_hub_session!);
     sessions.revoke(request.cookies.waleed_hub_session!);
     reply.clearCookie('waleed_hub_session', { path: '/' });
     return { signedOut: true };
@@ -297,21 +398,54 @@ export async function createHubServer(options: ServerOptions) {
         materialization: options.lifecycle.capabilities.materialization,
         secrets: options.lifecycle.capabilities.secrets,
         agentApply: options.lifecycle.capabilities.agentApply,
+        playground: options.lifecycle.capabilities.playground,
         desktop: !!options.shutdown,
-        startup: false,
+        startup: options.lifecycle.capabilities.startup,
       },
       docker: options.discovery?.snapshot().docker.state ?? 'not_checked',
     }),
   );
-  app.get('/api/connectors', async () => ({
-    connectors: (await options.lifecycle.inventory()).connectors.map(
-      (connector) => ({
+  app.get('/api/connectors', async () => {
+    const state = await options.lifecycle.inventory();
+    return {
+      connectors: state.connectors.map((connector) => ({
         ...connector,
         executionHash: definitionHash(connector),
-      }),
+        toolOverrides: (state.toolOverrides ?? []).filter(
+          (item) => item.connectorId === connector.id,
+        ),
+      })),
+      observations: await options.lifecycle.checks.observations(),
+    };
+  });
+  app.get('/api/health/connectors', async () =>
+    options.lifecycle.health.snapshot(),
+  );
+  app.post('/api/health/retest', async (request) =>
+    options.lifecycle.health.retest(
+      HealthRetestRequestSchema.parse(request.body),
     ),
-    observations: await options.lifecycle.checks.observations(),
-  }));
+  );
+  app.get('/api/lifecycle/startup', async () =>
+    options.lifecycle.settings.startup(),
+  );
+  app.post('/api/lifecycle/startup', async (request) =>
+    options.lifecycle.settings.setStartup(request.body),
+  );
+  app.get('/api/lifecycle/preferences', async () =>
+    options.lifecycle.settings.preferences(),
+  );
+  app.get('/api/settings/onboarding', async () =>
+    options.lifecycle.settings.onboarding(),
+  );
+  app.post('/api/settings/onboarding', async (request) =>
+    options.lifecycle.settings.setOnboarding(request.body),
+  );
+  app.post('/api/lifecycle/preferences', async (request) => {
+    const value = await options.lifecycle.settings.update(request.body);
+    options.lifecyclePreferencesChanged?.(value);
+    return value;
+  });
   app.get('/api/profiles', async () => {
     const state = await options.lifecycle.inventory();
     return {
@@ -347,6 +481,59 @@ export async function createHubServer(options: ServerOptions) {
           })),
         }),
   }));
+  app.get('/api/agents/tool-sets', async () =>
+    options.lifecycle.integrations.toolSets(
+      await options.lifecycle.checks.observations(),
+    ),
+  );
+  app.post<{ Params: { agentId: string } }>(
+    '/api/agents/:agentId/tool-search',
+    async (request) => {
+      const input = AgentToolSearchUpdateSchema.parse(request.body),
+        agentId = IntegrationAgentIdSchema.parse(request.params.agentId),
+        owner = request.cookies.waleed_hub_session!;
+      const preview = await options.lifecycle.preview(
+          { ...input, agentId, kind: 'set_agent_tool_search' },
+          owner,
+        ),
+        job = await options.lifecycle.apply(preview.id, owner);
+      let result = options.lifecycle.job(job.id, owner);
+      while (result.state === 'queued' || result.state === 'running') {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        result = options.lifecycle.job(job.id, owner);
+      }
+      if (result.state !== 'succeeded')
+        throw new HubError(
+          'conflict',
+          'Tool search mode was not confirmed. Refresh tool sets and inspect recovery before retrying.',
+        );
+      return { state: 'saved', recoveryRequired: !!result.reason };
+    },
+  );
+  app.post<{ Params: { agentId: string } }>(
+    '/api/agents/:agentId/profile',
+    async (request) => {
+      const input = AgentProfileUpdateSchema.parse(request.body),
+        agentId = IntegrationAgentIdSchema.parse(request.params.agentId),
+        owner = request.cookies.waleed_hub_session!;
+      const preview = await options.lifecycle.preview(
+          { ...input, agentId, kind: 'set_agent_profile' },
+          owner,
+        ),
+        job = await options.lifecycle.apply(preview.id, owner);
+      let result = options.lifecycle.job(job.id, owner);
+      while (result.state === 'queued' || result.state === 'running') {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        result = options.lifecycle.job(job.id, owner);
+      }
+      if (result.state !== 'succeeded')
+        throw new HubError(
+          'conflict',
+          'Agent tool set was not confirmed. Refresh inventory and inspect recovery before retrying.',
+        );
+      return { state: 'saved', recoveryRequired: !!result.reason };
+    },
+  );
   app.get('/api/discovery', async () => {
     if (!options.discovery)
       throw new HubError(
@@ -426,6 +613,35 @@ export async function createHubServer(options: ServerOptions) {
       context.blocked,
     );
   });
+  app.post(
+    '/api/bundles/preview',
+    { bodyLimit: MCPB_MAX_ARCHIVE_BYTES },
+    async (request) => {
+      if (!Buffer.isBuffer(request.body))
+        throw new HubError('invalid', 'Upload a binary .mcpb archive.');
+      return options.lifecycle.bundles.preview(
+        request.body,
+        request.cookies.waleed_hub_session!,
+      );
+    },
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/bundles/:id/install',
+    async (request) =>
+      options.lifecycle.bundles.install(
+        request.params.id,
+        request.body,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/bundles/:id/cancel',
+    async (request) =>
+      options.lifecycle.bundles.cancel(
+        request.params.id,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
   app.get<{ Params: { id: string } }>('/api/imports/:id', async (request) => {
     const context = await importContext();
     return imports.read(
@@ -507,6 +723,24 @@ export async function createHubServer(options: ServerOptions) {
       imports.cancel(preview.id, owner);
       return operation;
     },
+  );
+  app.post<{ Params: { agentId: string } }>(
+    '/api/adoption/agents/:agentId/preview',
+    async (request) =>
+      options.lifecycle.adoption.preview(
+        IntegrationAgentIdSchema.parse(request.params.agentId),
+        request.body,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/imports/:id/apply',
+    async (request) =>
+      options.lifecycle.adoption.apply(
+        IdSchema.parse(request.params.id),
+        request.body,
+        request.cookies.waleed_hub_session!,
+      ),
   );
   app.post<{ Params: { id: string } }>(
     '/api/connectors/:id/check',
@@ -644,6 +878,24 @@ export async function createHubServer(options: ServerOptions) {
           ),
         ),
   );
+  app.get('/api/oauth/accounts', async () => options.lifecycle.auth.accounts());
+  app.post<{ Params: { id: string } }>(
+    '/api/connectors/:id/oauth/discover',
+    async (request) =>
+      options.lifecycle.auth.discover(
+        IdSchema.parse(request.params.id),
+        request.body,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/connectors/:id/oauth/disconnect',
+    async (request) =>
+      options.lifecycle.auth.disconnect(
+        IdSchema.parse(request.params.id),
+        request.body,
+      ),
+  );
   app.get<{ Params: { id: string } }>('/api/auth/jobs/:id', async (request) =>
     options.lifecycle.auth.job(
       IdSchema.parse(request.params.id),
@@ -661,6 +913,9 @@ export async function createHubServer(options: ServerOptions) {
   app.get('/api/activity', async () => ({
     events: (await options.lifecycle.inventory()).activity,
   }));
+  app.get('/api/registry/servers', async (request) =>
+    registry.search(request.query),
+  );
   app.get('/api/security-activity', async () => ({
     events: (await options.lifecycle.safety.read()).securityEvents,
   }));
@@ -675,17 +930,101 @@ export async function createHubServer(options: ServerOptions) {
     };
   });
   app.get('/api/settings', async () => ({
-    startup: 'not_implemented',
+    startup: options.lifecycle.capabilities.startup
+      ? 'hkcu_run_opt_in'
+      : 'unavailable',
     secretStore: 'not_implemented',
     discovery: options.discovery ? 'read_only' : 'unavailable',
     storage: 'versioned_json',
     backupLimit: 5,
   }));
+  app.get('/api/setup/export', async (_request, reply) => {
+    const bundle = await options.lifecycle.setup.export();
+    return reply
+      .header('Content-Disposition', 'attachment; filename="setup.json"')
+      .type('application/json')
+      .send(bundle);
+  });
+  app.post(
+    '/api/setup/import/preview',
+    { bodyLimit: SETUP_MAX_BYTES * 6 + 4096 },
+    async (request) =>
+      options.lifecycle.setup.preview(
+        request.body,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post(
+    '/api/setup/import/apply',
+    { bodyLimit: 3 * 1024 * 1024 },
+    async (request) =>
+      options.lifecycle.setup.apply(
+        request.body,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/setup/import/:id/cancel',
+    async (request) =>
+      options.lifecycle.setup.cancel(
+        request.params.id,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
   app.post('/api/operations/preview', async (request) =>
     options.lifecycle.preview(
       request.body,
       request.cookies.waleed_hub_session!,
     ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/connectors/:id/tool-policies',
+    async (request) => {
+      const input = ToolPoliciesUpdateSchema.parse(request.body),
+        owner = request.cookies.waleed_hub_session!,
+        connectorId = IdSchema.parse(request.params.id);
+      const preview = await options.lifecycle.preview(
+        { ...input, connectorId, kind: 'set_tool_policies' },
+        owner,
+      );
+      const job = await options.lifecycle.apply(preview.id, owner);
+      let result = options.lifecycle.job(job.id, owner);
+      // Wait only for this registry mutation, not unrelated capability checks.
+      while (result.state === 'queued' || result.state === 'running') {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        result = options.lifecycle.job(job.id, owner);
+      }
+      if (result.state !== 'succeeded')
+        throw new HubError(
+          'conflict',
+          'Permissions were not saved. Refresh inventory and inspect recovery before retrying.',
+        );
+      return { state: 'saved', recoveryRequired: !!result.reason };
+    },
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/connectors/:id/tool-override',
+    async (request) => {
+      const input = ToolOverrideUpdateSchema.parse(request.body),
+        connectorId = IdSchema.parse(request.params.id),
+        owner = request.cookies.waleed_hub_session!;
+      const preview = await options.lifecycle.preview(
+          { ...input, connectorId, kind: 'set_tool_override' },
+          owner,
+        ),
+        job = await options.lifecycle.apply(preview.id, owner);
+      let result = options.lifecycle.job(job.id, owner);
+      while (result.state === 'queued' || result.state === 'running') {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        result = options.lifecycle.job(job.id, owner);
+      }
+      if (result.state !== 'succeeded')
+        throw new HubError(
+          'conflict',
+          'Tool override was not confirmed. Refresh inventory and inspect recovery.',
+        );
+      return { state: 'saved', recoveryRequired: !!result.reason };
+    },
   );
   app.post('/api/operations/apply', async (request, reply) => {
     const { previewId } = ApplyRequestSchema.parse(request.body);
@@ -738,5 +1077,6 @@ export async function createHubServer(options: ServerOptions) {
 declare module 'fastify' {
   interface FastifyContextConfig {
     public?: boolean;
+    mcpBearer?: boolean;
   }
 }

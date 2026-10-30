@@ -67,7 +67,9 @@ const targets = windowsAgentTargets('C:\\Synthetic', {
 const source = (format: AgentFormat) =>
   format === 'codex'
     ? '# preserve this comment\nmodel = "synthetic"\n[tools]\nnode_repl = true\n[mcp_servers.other]\ncommand = "unchanged"\n'
-    : '{\n // Preserve plugins and policy\n "plugins": ["keep"], "denylist": ["rube", "byterover"], "unrelated": {"credential": "SYNTHETIC_PRIVATE_EXISTING"}\n}\n';
+    : format === 'goose'
+      ? '# Preserve plugins and policy\nplugins: [keep]\ndenylist: [rube, byterover]\nunrelated:\n  credential: SYNTHETIC_PRIVATE_EXISTING\n'
+      : '{\n // Preserve plugins and policy\n "plugins": ["keep"], "denylist": ["rube", "byterover"], "unrelated": {"credential": "SYNTHETIC_PRIVATE_EXISTING"}\n}\n';
 function setup() {
   const contents = new Map(
     targets.map((target) => [target.paths[0]!, source(target.format)]),
@@ -153,7 +155,7 @@ describe('comment-preserving managed agent entries', () => {
       contents.set(
         target.paths[0]!,
         integrated +
-          (target.format === 'codex'
+          (target.format === 'codex' || target.format === 'goose'
             ? '# later unrelated comment\n'
             : '// later unrelated comment\n'),
       );

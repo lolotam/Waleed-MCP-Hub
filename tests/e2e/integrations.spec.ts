@@ -95,7 +95,7 @@ test('scan, integrate, manual save/auto-sync and scoped disconnect preserve othe
     .getByLabel('Connection type', { exact: true })
     .selectOption('streamable_http');
   await page
-    .getByLabel('HTTPS MCP URL', { exact: true })
+    .getByLabel('MCP endpoint URL', { exact: true })
     .fill('https://example.test/mcp');
   await page
     .getByLabel('Protected headers (write-only JSON)', { exact: true })
@@ -135,3 +135,87 @@ test('scan, integrate, manual save/auto-sync and scoped disconnect preserve othe
   ).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+for (const type of ['npx', 'uvx'])
+  test(`manual ${type} package pins, consent reset and write-only secrets`, async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: 'Connectors', exact: true }).click();
+    await page
+      .getByRole('button', { name: 'Add Manual MCP', exact: true })
+      .click();
+    const dialog = page.getByRole('dialog');
+    await page.getByLabel('MCP name', { exact: true }).fill(`Pinned ${type}`);
+    await page
+      .getByLabel('Connection type', { exact: true })
+      .selectOption(type);
+    await page
+      .getByLabel('Package name', { exact: true })
+      .fill('synthetic-mcp');
+    await page
+      .getByLabel('Exact package version', { exact: true })
+      .fill('latest');
+    await expect(
+      dialog.getByRole('button', { name: 'Save MCP', exact: true }),
+    ).toBeDisabled();
+    await page
+      .getByLabel('Exact package version', { exact: true })
+      .fill('1.2.3');
+    await page
+      .getByLabel('Package executable name (optional)', { exact: true })
+      .fill('synthetic-mcp');
+    await page
+      .getByLabel('Protected environment values (write-only JSON)', {
+        exact: true,
+      })
+      .fill('{"PROVIDER_TOKEN":"SYNTHETIC package form private"}');
+    const approval = page.getByLabel(/I trust this exact executable/);
+    await approval.check();
+    await page
+      .getByLabel('Exact package version', { exact: true })
+      .fill('1.2.4');
+    await expect(approval).not.toBeChecked();
+    await approval.check();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1050 });
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      expect(
+        await dialog.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth + 1,
+        ),
+      ).toBe(true);
+      await page.screenshot({
+        path: `test-results/task3-package-${type}-${width}.png`,
+        fullPage: true,
+      });
+    }
+    const saved = page.waitForRequest(
+      (request) =>
+        request.url().endsWith('/api/connectors/manual') &&
+        request.method() === 'POST',
+    );
+    await dialog.getByRole('button', { name: 'Save MCP', exact: true }).click();
+    expect((await saved).postDataJSON()).toMatchObject({
+      type,
+      packageName: 'synthetic-mcp',
+      packageVersion: '1.2.4',
+      entryPoint: 'synthetic-mcp',
+      approveExecution: true,
+    });
+    await expect(dialog.getByText(/MCP definition saved/)).toBeVisible();
+    expect(await dialog.textContent()).not.toContain(
+      'SYNTHETIC package form private',
+    );
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await page
+      .getByRole('button', { name: new RegExp(`Pinned ${type}`) })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Prepare & test package', exact: true }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => Object.keys(localStorage))).toEqual([]);
+  });

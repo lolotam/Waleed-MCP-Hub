@@ -140,7 +140,7 @@ namespace WaleedHub {
 
         static void SupplyDuplexInput(IntPtr writeHandle, BlockingCollection<byte[]> queue) {
             using (FileStream stream = new FileStream(new SafeFileHandle(writeHandle, true), FileAccess.Write, 4096, false)) {
-                try { foreach (byte[] bytes in queue.GetConsumingEnumerable()) { stream.Write(bytes, 0, bytes.Length); stream.Flush(); } }
+                try { foreach (byte[] bytes in queue.GetConsumingEnumerable()) { try { stream.Write(bytes, 0, bytes.Length); stream.Flush(); } finally { Array.Clear(bytes, 0, bytes.Length); } } }
                 catch (IOException) { }
             }
         }
@@ -162,6 +162,7 @@ namespace WaleedHub {
                     try { int supplied = 0; while (true) {
                         string line = Console.In.ReadLine();
                         if (line == null || line == "cancel") { inputQueue.CompleteAdding(); Interlocked.Exchange(ref cancelled, 1); return; }
+                        if (request.Duplex && line == "eof") { inputQueue.CompleteAdding(); continue; }
                         if (request.Duplex && line.StartsWith("stdin ", StringComparison.Ordinal)) {
                             if (line.Length > 44000) throw new InvalidOperationException();
                             byte[] bytes = Convert.FromBase64String(line.Substring(6)); supplied += bytes.Length;
@@ -247,6 +248,8 @@ namespace WaleedHub {
                 Emit(new { @event = "error", code = "host_unavailable" });
                 return 1;
             } finally {
+                byte[] remaining;
+                while (inputQueue.TryTake(out remaining)) Array.Clear(remaining, 0, remaining.Length);
                 // Closing the last job handle kills only this invocation's members,
                 // even if creation failed or the host itself is force-terminated.
                 Close(ref job); activeJob = IntPtr.Zero;

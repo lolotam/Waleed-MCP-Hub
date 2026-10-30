@@ -2,6 +2,7 @@ import { win32, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, unlink } from 'node:fs/promises';
 import type { Connector } from '@waleed/contracts';
+import { createPlatformProcessRunner } from '../native/platform-runner.js';
 import { createWindowsProcessRunner } from '../native/process-runner.js';
 import type { DockerCommand } from '../docker-profile.js';
 import { assertNoLinks } from '../managed-files.js';
@@ -14,6 +15,7 @@ import { safeMcpHttpTransport } from './http.js';
 import { ContainedStdioTransport } from './stdio.js';
 import { cleanupOwnedContainers } from './container-cleanup.js';
 import type { SecretLease } from '../../auth/bindings.js';
+import type { PackageLaunch } from '../packages.js';
 
 export function isolatedNativeArguments(
   connector: Extract<Connector, { executionMode: 'native' }>,
@@ -37,13 +39,35 @@ export function createCapabilityRuntime(options: {
   workingDirectory: string;
   docker?: DockerCommand;
   fixtureOrigin?: string;
+  preparePackage?: (
+    connector: Extract<Connector, { executionMode: 'package' }>,
+    signal: AbortSignal,
+    allowInstall?: boolean,
+  ) => Promise<PackageLaunch>;
+  prepareBundle?: (
+    connector: Extract<Connector, { executionMode: 'native' }>,
+  ) => Promise<PackageLaunch>;
   resolveBindings?: (
     connector: Connector,
     signal: AbortSignal,
   ) => Promise<SecretLease>;
 }): CapabilityRuntime {
   return {
-    async discover(connector, signal) {
+    async discover(connector, signal, execution) {
+      const packaged =
+        connector.executionMode === 'package'
+          ? await options.preparePackage?.(
+              connector,
+              signal,
+              execution?.allowInstall,
+            )
+          : connector.executionMode === 'native' && connector.bundle
+            ? await options.prepareBundle?.(connector)
+            : undefined;
+      if (connector.executionMode === 'package' && !packaged)
+        throw new RuntimeFault('adapter_pending');
+      if (connector.executionMode === 'native' && connector.bundle && !packaged)
+        throw new RuntimeFault('adapter_pending');
       const bound =
         Object.keys(connector.secretBindings).length ||
         Object.keys(connector.headerBindings).length;
@@ -101,20 +125,29 @@ export function createCapabilityRuntime(options: {
                 signal,
                 options.fixtureOrigin,
                 lease?.headers,
+                connector.localHttpOptIn === true,
               ),
               signal,
             ),
           );
-        if (connector.executionMode === 'native') {
+        if (
+          connector.executionMode === 'native' ||
+          connector.executionMode === 'package'
+        ) {
+          const executable =
+            packaged?.executable ??
+            (connector.executionMode === 'native' ? connector.executable : '');
           if (
-            !/^[a-z]:[\\/]/i.test(connector.executable) ||
-            win32.extname(connector.executable).toLowerCase() !== '.exe'
+            process.platform === 'win32' &&
+            (!/^[a-z]:[\\/]/i.test(executable) ||
+              win32.extname(executable).toLowerCase() !== '.exe')
           )
             throw new RuntimeFault('adapter_pending');
-          await assertNoLinks(connector.executable);
-          const runner = await createWindowsProcessRunner({
-            allowedExecutables: [connector.executable],
-            workingDirectory: options.workingDirectory,
+          await assertNoLinks(executable);
+          const runner = await createPlatformProcessRunner({
+            allowedExecutables: [executable],
+            workingDirectory:
+              packaged?.workingDirectory ?? options.workingDirectory,
             concurrency: 1,
           });
           return clean(
@@ -122,9 +155,14 @@ export function createCapabilityRuntime(options: {
               new ContainedStdioTransport(
                 runner,
                 {
-                  executable: connector.executable,
-                  arguments: isolatedNativeArguments(connector),
+                  executable,
+                  arguments:
+                    packaged?.arguments ??
+                    (connector.executionMode === 'native'
+                      ? isolatedNativeArguments(connector)
+                      : []),
                   environment: {
+                    ...packaged?.environment,
                     ...(connector.environmentLiterals ?? {}),
                     ...lease?.environment,
                   },
