@@ -66,7 +66,9 @@ the tool's real `.exe`. See [adding-mcps.md](adding-mcps.md#npm-package-npx).
   leave **Version** blank for `latest`.
 - **"A dependency is not a registry package"**: something in the tree comes from
   git, a URL, a file or an alias. The hub only installs from `registry.npmjs.org`.
-  Use a [manual install](adding-mcps.md#manual-install-advanced) if you trust it.
+  A [manual install](adding-mcps.md#manual-install-advanced) is possible if you
+  trust the package, but read its warning first: it gives up the managed
+  protections.
 - **"The package is too large"**: the hub refuses trees over 500 MiB unpacked or
   50 000 files, and needs 2 GiB free on the drive of its data folder before it
   starts.
@@ -90,16 +92,30 @@ Something edited, added or removed a file in its install folder (an antivirus
 quarantine, a manual edit, a sync tool). The hub won't start it. Choose
 **Reinstall**, then approve again.
 
-The same check fails when any parent folder of
-`%LOCALAPPDATA%\WaleedMcpHub\packages\` contains a `node_modules` folder, because
-Node would load code from there. Remove or rename that `node_modules`; reinstalling
-won't help.
+The same check fails when the packages folder
+`%LOCALAPPDATA%\WaleedMcpHub\packages\` itself, or any of its parent folders,
+contains a `node_modules` folder, because Node would load code from there. Remove
+or rename that `node_modules`; reinstalling won't help.
 
 ## A package connector says its definition does not match its package record
 
-If you moved the Waleed MCP Hub folder, the stored `node.exe` path no longer
-exists: choose **Reinstall** and approve again. If an environment value starts
-with `NODE_` or is an OpenSSL variable, remove that binding instead.
+An environment value starts with `NODE_` or is an OpenSSL variable. Remove that
+binding under **Edit**; reinstalling won't help.
+
+## A package connector stopped starting after I moved the hub folder
+
+A managed connector runs on the `node.exe` of the hub folder it was installed
+from, and that path is stored in its approved definition. After a move the path
+no longer exists, so **Test capabilities** fails while **Verify files** still
+passes (the installed files did not change), and **Reinstall** is not offered.
+
+- If **Check for update** finds a newer version, **Update to x.y.z** installs it
+  on the current `node.exe`. Approve it again.
+- Otherwise, remove the connector and install the package again, then re-enter
+  its protected values. Moving the hub folder back also works.
+
+The install folder itself lives in `%LOCALAPPDATA%\WaleedMcpHub\packages\` and does
+not move with the hub folder.
 
 ## npm settings on this PC are ignored
 

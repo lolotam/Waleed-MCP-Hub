@@ -88,10 +88,10 @@ accepts a personal access token or API key in a header. If it does, use
 
 ## npm package (npx)
 
-The hub never runs `npx`, `npm`, `.cmd` or `.bat` files, because they can download
-and run different code each time. Instead it installs the package itself, from a
-frozen dependency tree you review first, and runs the result with its own
-`node.exe`.
+The hub never runs an `npx`, `npm`, `.cmd` or `.bat` command you give it, because
+those can download and run different code each time. Instead it installs the
+package itself with its own bundled npm (install scripts off), from a frozen
+dependency tree you review first, and runs the result with its own `node.exe`.
 
 1. **Connectors → Add Manual MCP** → **Connection type**
    `npm package — managed install`.
@@ -148,12 +148,18 @@ knows the job: check the connector list instead.
 ### Manual install (advanced)
 
 For a package the managed install refuses, install it yourself into a folder you
-control and point a native connector at `node.exe` and the entry script:
+control and point a native connector at `node.exe` and the entry script.
+
+> **You lose the managed protections.** A plain `npm install` runs the package's
+> install scripts with your full user rights, uses your own npm settings and
+> tokens, and may fetch from any host the package names. The hub does not check
+> the files before each launch. Keep `--ignore-scripts` unless the server's README
+> says it needs an install script and you trust that package.
 
 1. Install a pinned version into its own folder:
 
    ```powershell
-   npm install --prefix E:\Dev\Tools_and_Utilities\my-mcp some-mcp-package@1.2.3
+   npm install --ignore-scripts --prefix E:\Dev\Tools_and_Utilities\my-mcp some-mcp-package@1.2.3
    ```
 
 2. Find the entry script. Open

@@ -620,11 +620,15 @@ outcome of the newest call.
    An NTFS alternate data stream added to an installed file is not detected. Code
    would have to name the stream to load it, and changing that code is detected;
    a stream can still hide data inside the install folder.
-4. **Best-effort watchdog.** Size and file caps are enforced by a scan every
-   250 ms or less, plus a 4-second kill grace, not by a filesystem quota. npm can
-   overshoot by one interval plus the grace. The 2 GiB free-space reserve, checked
-   before start and on every scan, keeps that overshoot from filling the drive. A
-   real per-folder quota (NTFS quota or FSRM) is possible future work.
+4. **Best-effort watchdog, disk exhaustion still possible.** Size and file caps
+   are enforced by a scan that starts at most 250 ms after the previous scan
+   finished, not by a filesystem quota. The free space is measured only after a
+   scan's walk, and npm keeps writing during the walk, the 250 ms pause and the
+   4-second kill grace. The detection delay therefore includes the scan duration,
+   and there is no hard bound on the overshoot. The 2 GiB free-space floor,
+   checked before start and on every scan, makes filling the drive less likely; it
+   is not reserved space and does not prevent it. A real per-folder quota (NTFS
+   quota or FSRM) is possible future work.
 5. **Package code runs with the user's rights.** After approval, a package server
    runs as the signed-in user inside a Job Object that bounds its lifetime and
    process tree, not its file or network access. Approval of the exact package and

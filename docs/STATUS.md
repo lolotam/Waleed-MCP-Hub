@@ -102,6 +102,11 @@ Updated: 2026-10-30
   from the real registry, approve it and run it from an agent) has not been run,
   and the planned `scripts/smoke-packages.mjs` does not exist yet. Automated tests
   use a loopback fixture registry.
+- After the portable hub folder moves, a managed connector's stored `node.exe`
+  path is gone, but Verify files still passes and the UI offers no **Reinstall**
+  (it appears only for `package_modified`/`invalid_configuration`). The repair is
+  an update to a newer version, or remove and install again. A same-version
+  re-pin control is follow-up work.
 - No secret-backed import save or adoption apply. P4 normalization stays data-only;
   P5 no-secret saving is a distinct registry operation, not runtime approval.
 - P3 adoption preview remains metadata-only, not an approved executable definition
