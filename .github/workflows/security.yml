@@ -54,6 +54,7 @@ jobs:
         with:
           node-version-file: .node-version
       - run: npm ci --ignore-scripts
+      - run: npm run check:npm-bundle
       - run: npm audit --audit-level=moderate
       - run: npm audit signatures
 
