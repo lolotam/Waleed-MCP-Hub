@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BootstrapSchema,
   type Bootstrap,
@@ -64,6 +64,26 @@ const agentNames: Record<string, string> = {
 // The longest wait on one full refresh of the hub state.
 const REFRESH_LIMIT_MS = 20_000;
 
+// Waits for a promise until the signal aborts, then rejects with its reason.
+// The promise itself keeps running.
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal) {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const stop = () => reject(signal.reason);
+    signal.addEventListener('abort', stop, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', stop);
+        resolve(value);
+      },
+      (failure: unknown) => {
+        signal.removeEventListener('abort', stop);
+        reject(failure);
+      },
+    );
+  });
+}
+
 export function App() {
   const [page, setPage] = useState<Page>('Connectors');
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -93,13 +113,30 @@ export function App() {
   const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
   const [search, setSearch] = useState('');
 
+  // The newest refresh owns the page: a new one aborts the one before it,
+  // and an older one that settles late commits nothing, not even its error
+  // or the end of loading.
+  const latestRefresh = useRef<{ controller: AbortController } | null>(null);
   const refresh = useCallback(async () => {
+    latestRefresh.current?.controller.abort();
+    const own = { controller: new AbortController() };
+    latestRefresh.current = own;
+    const current = () => latestRefresh.current === own;
+    // Every wait is bounded, so a stalled hub never leaves the page loading.
+    const timer = window.setTimeout(
+      () =>
+        own.controller.abort(
+          new DOMException('The refresh timed out.', 'TimeoutError'),
+        ),
+      REFRESH_LIMIT_MS,
+    );
+    const signal = own.controller.signal;
     setLoading(true);
     setError('');
-    // Every read is bounded, so a stalled hub never leaves the page loading.
-    const signal = AbortSignal.timeout(REFRESH_LIMIT_MS);
     try {
-      await sessionReady;
+      // The session request is shared and keeps running for a later refresh;
+      // only this wait on it is bounded.
+      await untilAborted(sessionReady, signal);
       const [
         info,
         profileResult,
@@ -136,6 +173,7 @@ export function App() {
           observations: CapabilityObservation[];
         }>('/api/connectors', undefined, signal),
       ]);
+      if (!current()) return;
       setBootstrap({
         ...BootstrapSchema.parse(info),
         revision: profileResult.revision,
@@ -153,10 +191,12 @@ export function App() {
           api<DiscoverySnapshot>('/api/discovery', undefined, signal),
           api<AdoptionPreview>('/api/adoption/preview', undefined, signal),
         ]);
+        if (!current()) return;
         setDiscovery(snapshot);
         setAdoption(preview);
       }
     } catch (error) {
+      if (!current()) return;
       setError(
         error instanceof DOMException && error.name === 'TimeoutError'
           ? 'The hub did not answer in time. Refresh to retry.'
@@ -165,7 +205,11 @@ export function App() {
             : 'The hub is unavailable.',
       );
     } finally {
-      setLoading(false);
+      window.clearTimeout(timer);
+      if (current()) {
+        latestRefresh.current = null;
+        setLoading(false);
+      }
     }
   }, []);
   useEffect(() => {
