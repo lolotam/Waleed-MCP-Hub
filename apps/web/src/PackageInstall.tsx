@@ -278,9 +278,10 @@ export function PackageInstall({
     const controller = new AbortController();
     abort.current = controller;
     const label = `${preview.name}@${preview.version}`;
-    // Until the hub answered, its job may exist: only a 4xx answer proves
-    // that nothing started, so every other failure leaves the outcome unknown
-    // and never offers a retry against the old state.
+    // Until the hub answered, its job may exist: only a refusal of the hub (a
+    // 4xx answer, or a 503 with its code) proves that nothing started, so
+    // every other failure leaves the outcome unknown and never offers a retry
+    // against the old state.
     let started: PackageJob | null = null;
     try {
       try {
@@ -295,8 +296,8 @@ export function PackageInstall({
       } catch (failure) {
         if (
           failure instanceof ApiError &&
-          failure.status >= 400 &&
-          failure.status < 500
+          ((failure.status >= 400 && failure.status < 500) ||
+            (failure.status === 503 && failure.code !== undefined))
         ) {
           if (!mounted.current) return;
           setError(packageFailureText(failure));
@@ -307,13 +308,13 @@ export function PackageInstall({
       }
       if (!mounted.current) return;
       await follow(started, controller.signal, label);
-    } catch {
+    } catch (failure) {
       if (!mounted.current) return;
-      await unknownOutcome(started, label);
+      await unknownOutcome(started, label, failure);
     } finally {
       const values = body.env as Record<string, string> | undefined;
       if (values) for (const key of Object.keys(values)) values[key] = '';
-      abort.current = null;
+      if (abort.current === controller) abort.current = null;
     }
   }
 
@@ -376,16 +377,25 @@ export function PackageInstall({
   }
 
   // The outcome of a job whose answer or progress was lost. The view keeps
-  // the job, if one was read, so it can be checked again.
-  async function unknownOutcome(started: PackageJob | null, label: string) {
-    setUnknownJob(started ? { job: started, label } : null);
-    setStep('result');
+  // the job, if one was read and the hub still knows it, so it can be checked
+  // again. Nothing is shown before the reload settles, so a retry never runs
+  // beside the call that is still unwinding.
+  async function unknownOutcome(
+    started: PackageJob | null,
+    label: string,
+    failure: unknown,
+  ) {
+    const forgotten = failure instanceof ApiError && failure.status === 404;
     const stale = await reload();
     if (!mounted.current) return;
+    setUnknownJob(started && !forgotten ? { job: started, label } : null);
+    setStep('result');
     setError(
-      (started
-        ? 'The job was started but its progress could not be read, so its outcome is unknown. It may still be running: check the job again, or check the connector list before installing again.'
-        : 'The hub may have started the job, but its answer was lost, so the outcome is unknown. Wait a moment, then check the connector list before installing again.') +
+      (!started
+        ? 'The hub may have started the job, but its answer was lost, so the outcome is unknown. Wait a moment, then check the connector list before installing again.'
+        : forgotten
+          ? 'The hub no longer knows this job (it may have restarted), so its outcome is unknown. Check the connector list before installing again.'
+          : 'The job was started but its progress could not be read, so its outcome is unknown. It may still be running: check the job again, or check the connector list before installing again.') +
         stale,
     );
   }
@@ -399,10 +409,10 @@ export function PackageInstall({
     abort.current = controller;
     try {
       await follow(started, controller.signal, label);
-    } catch {
-      if (mounted.current) await unknownOutcome(started, label);
+    } catch (failure) {
+      if (mounted.current) await unknownOutcome(started, label, failure);
     } finally {
-      abort.current = null;
+      if (abort.current === controller) abort.current = null;
     }
   }
 

@@ -88,6 +88,8 @@ async function fakePackageApi(
     failResolve?: boolean;
     losePolls?: number;
     loseStart?: boolean;
+    refuseStart?: boolean;
+    forgetJob?: boolean;
   } = {},
 ) {
   const state: {
@@ -117,6 +119,17 @@ async function fakePackageApi(
       state.installBody = request.postDataJSON() as Record<string, unknown>;
       if (options.loseStart) {
         await route.abort('connectionreset');
+        return;
+      }
+      if (options.refuseStart) {
+        await answer(
+          route,
+          {
+            error: 'unavailable',
+            message: 'Managed packages are not available.',
+          },
+          503,
+        );
         return;
       }
       await answer(
@@ -170,6 +183,14 @@ async function fakePackageApi(
     }
     if (path === `/api/packages/jobs/${INSTALL_JOB}`) {
       state.installPolls += 1;
+      if (options.forgetJob) {
+        await answer(
+          route,
+          { error: 'not_found', message: 'Job not found in this session.' },
+          404,
+        );
+        return;
+      }
       if (state.installPolls <= (options.losePolls ?? 0)) {
         await route.abort('connectionreset');
         return;
@@ -484,6 +505,37 @@ test('a lost start answer leaves the outcome unknown and offers no retry', async
     await expect(page.getByRole('button', { name, exact: true })).toHaveCount(
       0,
     );
+  await expect(
+    page.getByRole('button', { name: 'Close', exact: true }),
+  ).toBeVisible();
+});
+
+test('a 503 refusal of the start returns to Look up with its fixed sentence', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await fakePackageApi(page, { refuseStart: true });
+  await installDemo(page);
+  await expect(page.getByRole('alert')).toHaveText(
+    'Managed packages are not available.',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Look up', exact: true }),
+  ).toBeVisible();
+});
+
+test('a job the hub forgot is not offered for another check', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await fakePackageApi(page, { forgetJob: true });
+  await installDemo(page);
+  await expect(page.getByRole('alert')).toContainText(
+    'The hub no longer knows this job',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Check the job again', exact: true }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole('button', { name: 'Close', exact: true }),
   ).toBeVisible();

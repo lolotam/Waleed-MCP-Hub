@@ -97,6 +97,8 @@ export function packageFailureText(failure: unknown): string {
   const code = PackageErrorCodeSchema.safeParse(failure.code);
   if (code.success) return packageErrorText(code.data);
   if (failure.status === 429) return packageErrorText('busy');
+  if (failure.code === 'audit_unavailable')
+    return 'The hub could not record this request in its audit log. Check the terminal and retry.';
   if (failure.status === 503) return 'Managed packages are not available.';
   if (failure.status === 409)
     return 'The hub state changed or needs recovery review. Reload and retry.';
