@@ -350,5 +350,90 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
         ),
       ).rejects.toThrow(runError);
     });
+
+    it('breaches when the free space of the drive falls below the reserve', async () => {
+      let measurements = 0;
+      let aborted = false;
+      const result = await withWatchdog(
+        {
+          roots: ['dummy'],
+          maxBytes: 10_000,
+          maxFiles: 1000,
+          intervalMs: 15,
+          scan: async () => ({ bytes: 1, files: 1 }),
+          minFreeBytes: 1000,
+          freePath: 'dummy-path',
+          free: async () => {
+            measurements += 1;
+            return measurements === 1 ? 5000 : 10;
+          },
+        },
+        new AbortController().signal,
+        async (signal) => {
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) {
+              aborted = true;
+              resolve();
+            } else {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  aborted = true;
+                  resolve();
+                },
+                { once: true },
+              );
+            }
+          });
+          return 'free-breach';
+        },
+      );
+
+      expect(measurements).toBeGreaterThanOrEqual(2);
+      expect(aborted).toBe(true);
+      expect(result.breached).toBe(true);
+      expect(result.value).toBe('free-breach');
+    });
+
+    it('counts a free space measurement that fails as a breach', async () => {
+      let aborted = false;
+      const result = await withWatchdog(
+        {
+          roots: ['dummy'],
+          maxBytes: 10_000,
+          maxFiles: 1000,
+          intervalMs: 15,
+          scan: async () => ({ bytes: 1, files: 1 }),
+          minFreeBytes: 1000,
+          freePath: 'dummy-path',
+          free: async () => {
+            throw new Error('the drive cannot be measured');
+          },
+        },
+        new AbortController().signal,
+        async (signal) => {
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) {
+              aborted = true;
+              resolve();
+            } else {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  aborted = true;
+                  resolve();
+                },
+                { once: true },
+              );
+            }
+          });
+          return 'free-failure';
+        },
+      );
+
+      expect(aborted).toBe(true);
+      expect(result.breached).toBe(true);
+      expect(result.value).toBe('free-failure');
+    });
   });
 });

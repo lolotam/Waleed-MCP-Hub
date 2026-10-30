@@ -360,6 +360,31 @@ describe('F01 package contracts', () => {
       ).toBe(false);
     });
 
+    it.each([
+      'OPENSSL_CONF',
+      'OPENSSL_MODULES',
+      'OPENSSL_ENGINES',
+      'SSL_CERT_FILE',
+      'SSL_CERT_DIR',
+      'ssl_cert_file',
+    ])('rejects the OpenSSL certificate variable %s', (envName) => {
+      expect(
+        PackageInstallRequestSchema.safeParse({
+          ...baseInstallRequest,
+          env: { [envName]: 'val' },
+        }).success,
+      ).toBe(false);
+    });
+
+    it.each(['OPENSSL_X', 'SSL_CERT'])('accepts %s in env', (envName) => {
+      expect(
+        PackageInstallRequestSchema.safeParse({
+          ...baseInstallRequest,
+          env: { [envName]: 'val' },
+        }).success,
+      ).toBe(true);
+    });
+
     it('accepts API_TOKEN in env', () => {
       expect(
         PackageInstallRequestSchema.safeParse({

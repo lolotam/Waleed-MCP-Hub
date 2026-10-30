@@ -790,6 +790,18 @@ describe('F01 T2: registry and approval of managed npm packages', () => {
       expect(isPackageEnvName('API_KEY')).toBe(false);
     });
 
+    it('isPackageEnvName identifies the OpenSSL certificate variables', () => {
+      expect(isPackageEnvName('OPENSSL_CONF')).toBe(true);
+      expect(isPackageEnvName('OPENSSL_MODULES')).toBe(true);
+      expect(isPackageEnvName('OPENSSL_ENGINES')).toBe(true);
+      expect(isPackageEnvName('SSL_CERT_FILE')).toBe(true);
+      expect(isPackageEnvName('SSL_CERT_DIR')).toBe(true);
+      expect(isPackageEnvName('ssl_cert_file')).toBe(true);
+      expect(isPackageEnvName('OpenSSL_Conf')).toBe(true);
+      expect(isPackageEnvName('OPENSSL_X')).toBe(false);
+      expect(isPackageEnvName('SSL_CERT')).toBe(false);
+    });
+
     it('package connector refuses environment literals starting with NODE_ (uppercase and lowercase)', () => {
       const state = emptyState();
       const context = {
@@ -831,6 +843,40 @@ describe('F01 T2: registry and approval of managed npm packages', () => {
           context,
         ),
       ).toThrow(expect.objectContaining({ code: 'invalid' }));
+    });
+
+    it('package connector refuses the OpenSSL certificate variables', () => {
+      const state = emptyState();
+      const context = {
+        trustedPackage: validPackage,
+        nodeExecutable,
+        packagesDir,
+      };
+
+      for (const name of [
+        'OPENSSL_CONF',
+        'OPENSSL_MODULES',
+        'OPENSSL_ENGINES',
+        'SSL_CERT_FILE',
+        'SSL_CERT_DIR',
+      ]) {
+        const definition = createManagedImportDefinition({
+          environmentLiterals: { [name]: 'C:\\trusted.pem' },
+        });
+        expect(() =>
+          planRegistry(
+            {
+              kind: 'create_connector',
+              expectedRevision: state.revision,
+              definition,
+            },
+            state,
+            definition.id,
+            timestamp,
+            context,
+          ),
+        ).toThrow(expect.objectContaining({ code: 'invalid' }));
+      }
     });
 
     it('unmanaged native connector keeps existing literal behaviour: rejects literals not in allowlist', () => {

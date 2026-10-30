@@ -19,6 +19,11 @@ export interface WatchdogOptions {
   maxFiles: number;
   intervalMs?: number;
   scan?: (roots: readonly string[]) => Promise<WatchdogScan>;
+  // The reserve of the drive the run writes to: below it the run is stopped.
+  minFreeBytes?: number;
+  freePath?: string;
+  // The measurement of the free space. A test injects its own.
+  free?: (path: string) => Promise<number>;
 }
 
 const code = (error: unknown): string | undefined =>
@@ -99,7 +104,9 @@ export const freeBytes = async (path: string): Promise<number> => {
 };
 
 // The watchdog around one npm run: it measures the folders the run writes to
-// and aborts the run when the caps are passed. It is best effort, not a quota:
+// and aborts the run when the caps are passed. It also keeps the free-space
+// reserve of the drive, because the run may not eat the space the hub needs
+// for itself. It is best effort, not a quota:
 // the run is still awaited after a breach, because the process tree has to be
 // gone before anything is deleted. The watchdog never deletes anything itself.
 export async function withWatchdog<T>(
@@ -109,6 +116,7 @@ export async function withWatchdog<T>(
 ): Promise<{ value: T; breached: boolean }> {
   const intervalMs = options.intervalMs ?? 250;
   const scan = options.scan ?? scanRoots;
+  const free = options.free ?? freeBytes;
   const controller = new AbortController();
   let breached = false;
   let stopped = false;
@@ -153,6 +161,25 @@ export async function withWatchdog<T>(
         breached = true;
         controller.abort();
         return;
+      }
+      // The reserve of the drive: the run may not eat the space the hub needs
+      // for itself. A measurement that fails counts as a breach.
+      if (
+        options.minFreeBytes !== undefined &&
+        options.freePath !== undefined
+      ) {
+        let remaining: number;
+        try {
+          remaining = await free(options.freePath);
+        } catch {
+          remaining = -1;
+        }
+        if (stopped) return;
+        if (remaining < options.minFreeBytes) {
+          breached = true;
+          controller.abort();
+          return;
+        }
       }
       await new Promise<void>((release) => {
         wake = release;

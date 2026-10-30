@@ -50,6 +50,9 @@ const MAX_LOCK_BYTES = 16 * 1024 * 1024;
 const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_UNPACKED_BYTES = 500 * 1024 * 1024;
 const MAX_FILE_COUNT = 50_000;
+// The number of installed packages of one tree. A wider tree is refused
+// before a single version document is fetched.
+const MAX_PACKAGE_COUNT = 2000;
 const WARNING_UNPACKED_BYTES = 200 * 1024 * 1024;
 const WARNING_PACKAGE_COUNT = 300;
 const RECENT_RELEASE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -274,6 +277,34 @@ const documentDependencies = (record: Record<string, unknown>): void => {
   }
 };
 
+// The summary of one version document: everything the preview needs from it.
+// Only the summary is kept, so a tree of thousands of packages never holds
+// the documents themselves in memory.
+interface DocumentSummary {
+  installScript: boolean;
+  optional: boolean;
+  unpackedSize: number | null;
+  fileCount: number | null;
+}
+
+// The summary of a version document: the scripts of the package, whether it
+// has optional dependencies and how big it is. A size the registry does not
+// report is null and never counted.
+const summarizeDocument = (
+  record: Record<string, unknown>,
+): DocumentSummary => {
+  const dist = asRecord(record.dist);
+  const size = asNumber(dist?.unpackedSize);
+  const files = asNumber(dist?.fileCount);
+  const optional = asRecord(record.optionalDependencies);
+  return {
+    installScript: documentHasInstallScript(record),
+    optional: optional !== null && Object.keys(optional).length > 0,
+    unpackedSize: size === null || size < 0 ? null : size,
+    fileCount: files === null || files < 0 ? null : files,
+  };
+};
+
 // The staging manifest of one package: the exact bytes the hub writes into
 // the staging project of a lookup and into the install folder of an install.
 // Both have to be the same, so npm resolves and installs the same tree.
@@ -360,6 +391,24 @@ export const resolvePackage = async (
   const entries = normalizeBin(name, document.bin);
   documentDependencies(document);
 
+  // The summaries of the version documents of the installed packages. The
+  // summary of a document is computed as soon as the document arrives and the
+  // document itself is dropped.
+  const rootKey = `node_modules/${name}`;
+  const summaries = new Map<string, DocumentSummary>();
+  // The running totals of the tree: the lookup stops as soon as the tree
+  // grows past the caps, instead of fetching every document first.
+  let runningUnpacked = 0;
+  let runningFiles = 0;
+  const addSummary = (key: string, summary: DocumentSummary): void => {
+    if (summary.unpackedSize !== null) runningUnpacked += summary.unpackedSize;
+    if (summary.fileCount !== null) runningFiles += summary.fileCount;
+    if (runningUnpacked > MAX_UNPACKED_BYTES || runningFiles > MAX_FILE_COUNT)
+      throw new PackageFault('install_limit');
+    summaries.set(key, summary);
+  };
+  addSummary(rootKey, summarizeDocument(document));
+
   // The release date: the full packument carries it, but a packument that is
   // too large or without the field only means that the date is unknown.
   let releasedAt: string | null = null;
@@ -393,6 +442,9 @@ export const resolvePackage = async (
         roots: [paths.root],
         maxBytes: WATCHDOG_MAX_BYTES,
         maxFiles: WATCHDOG_MAX_FILES,
+        // The reserve of the drive is kept while npm runs, not only before it.
+        minFreeBytes: MIN_FREE_BYTES,
+        freePath: options.packagesDir,
       },
       options.signal,
       async (signal) =>
@@ -432,16 +484,18 @@ export const resolvePackage = async (
       { name, version, integrity: integrity.data },
       registry.origin,
     );
+    // A tree that is too wide is refused before a single version document of
+    // a dependency is fetched.
+    if (validated.installed.length > MAX_PACKAGE_COUNT)
+      throw new PackageFault('install_limit');
     options.onProgress?.({
       downloadedBytes: run.downloadedBytes,
       packages: validated.installed.length,
     });
 
     // The version document of every installed package: the dependency
-    // declarations, the size and the scripts of each one.
-    const rootKey = `node_modules/${name}`;
-    const documents = new Map<string, Record<string, unknown>>();
-    documents.set(rootKey, document);
+    // declarations, the size and the scripts of each one. Only the summary
+    // of a document is kept.
     const others = validated.installed.filter((entry) => entry.key !== rootKey);
     await mapLimited(others, PARALLEL_LIMIT, async (entry) => {
       const fetched = asRecord(
@@ -451,22 +505,21 @@ export const resolvePackage = async (
         }),
       );
       if (!fetched) throw new PackageFault('unsupported_dependency');
-      documents.set(entry.key, fetched);
+      documentDependencies(fetched);
+      addSummary(entry.key, summarizeDocument(fetched));
     });
 
+    // The totals of the tree, read from the summaries: the same numbers the
+    // running totals carried.
     let unpackedSize = 0;
     let sizeUnknown = false;
     let fileCount = 0;
     for (const entry of validated.installed) {
-      const fetched = documents.get(entry.key);
-      if (!fetched) throw new PackageFault('unsupported_dependency');
-      documentDependencies(fetched);
-      const dist = asRecord(fetched.dist);
-      const size = asNumber(dist?.unpackedSize);
-      if (size === null || size < 0) sizeUnknown = true;
-      else unpackedSize += size;
-      const files = asNumber(dist?.fileCount);
-      if (files !== null && files >= 0) fileCount += files;
+      const summary = summaries.get(entry.key);
+      if (!summary) throw new PackageFault('unsupported_dependency');
+      if (summary.unpackedSize === null) sizeUnknown = true;
+      else unpackedSize += summary.unpackedSize;
+      if (summary.fileCount !== null) fileCount += summary.fileCount;
     }
     if (unpackedSize > MAX_UNPACKED_BYTES || fileCount > MAX_FILE_COUNT)
       throw new PackageFault('install_limit');
@@ -475,19 +528,14 @@ export const resolvePackage = async (
     const flags = new Set<PackageWarning>();
     const lockPackages = asRecord(asRecord(lock)?.packages) ?? {};
     for (const entry of validated.installed) {
-      const fetched = documents.get(entry.key);
-      if (
-        entry.hasInstallScript ||
-        (fetched && documentHasInstallScript(fetched))
-      )
+      const summary = summaries.get(entry.key);
+      if (entry.hasInstallScript || (summary && summary.installScript))
         flags.add('install_scripts');
       const lockEntry = asRecord(lockPackages[entry.key]);
       const lockKnows =
         lockEntry !== null && typeof lockEntry.hasInstallScript === 'boolean';
-      if (!lockKnows && !fetched) flags.add('install_scripts_unknown');
-      const optional = asRecord(fetched?.optionalDependencies);
-      if (optional && Object.keys(optional).length > 0)
-        flags.add('optional_omitted');
+      if (!lockKnows && !summary) flags.add('install_scripts_unknown');
+      if (summary?.optional) flags.add('optional_omitted');
     }
     if (releasedAt === null) flags.add('release_date_unknown');
     else if (

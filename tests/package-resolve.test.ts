@@ -20,6 +20,7 @@ import {
   npmArguments,
   npmEnvironment,
   npmFault,
+  npmSelfTest,
   prepareJob,
   type JobPaths,
   type NpmPaths,
@@ -39,6 +40,7 @@ import {
 import {
   createPrivateDirectory,
   jobDirectory,
+  removeTree,
 } from '../packages/hub-core/src/packages/store.js';
 import type {
   ProcessRequest,
@@ -740,6 +742,105 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       await expect(store.take(p4.previewId, 'owner-a')).rejects.toMatchObject({
         code: 'preview_expired',
       });
+    });
+  });
+
+  // 4b. The capped preview store
+  describe('4b. The capped preview store', () => {
+    function makePreview(id: string): PackagePreview {
+      return {
+        previewId: id,
+        name: 'test-pkg',
+        version: '1.0.0',
+        description: null,
+        integrity: sha512Integrity('test'),
+        lockHash: createHash('sha256').update('lock').digest('hex'),
+        packageCount: 1,
+        bundledCount: 0,
+        unpackedSize: 100,
+        releasedAt: null,
+        entries: [{ entry: 'cmd', entryPath: 'bin/cmd.js' }],
+        warnings: [],
+        expiresAt: new Date(Date.now() + PREVIEW_TTL_MS).toISOString(),
+      };
+    }
+
+    async function waitForRemoval(path: string): Promise<boolean> {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (!(await pathExists(path))) return true;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return false;
+    }
+
+    it('keeps five previews of one owner and drops the folder of the evicted one', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const store = trackPreviewStore(createPreviewStore({ packagesDir }));
+      const previews: string[] = [];
+      const jobs: string[] = [];
+      for (let index = 0; index < 6; index++) {
+        const preview = makePreview(randomUUID());
+        const jobId = randomUUID();
+        await createPrivateDirectory(jobDirectory(packagesDir, jobId));
+        previews.push(preview.previewId);
+        jobs.push(jobId);
+        store.put({
+          preview,
+          lock: new Uint8Array([index]),
+          jobId,
+          owner: 'owner-a',
+        });
+      }
+
+      // The oldest preview of the owner is gone: it behaves like an expired one.
+      expect(store.peek(previews[0]!, 'owner-a')).toBeNull();
+      await expect(store.take(previews[0]!, 'owner-a')).rejects.toMatchObject({
+        code: 'preview_expired',
+      });
+      // Its staging folder is gone as well.
+      expect(await waitForRemoval(jobDirectory(packagesDir, jobs[0]!))).toBe(
+        true,
+      );
+
+      // The five newest previews are still there.
+      for (const previewId of previews.slice(1))
+        expect(store.peek(previewId, 'owner-a')).not.toBeNull();
+    });
+
+    it('evicts the global oldest when the store is full', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const store = trackPreviewStore(
+        createPreviewStore({ packagesDir, maxTotal: 3 }),
+      );
+      const put = async (owner: string): Promise<string> => {
+        const preview = makePreview(randomUUID());
+        const jobId = randomUUID();
+        await createPrivateDirectory(jobDirectory(packagesDir, jobId));
+        store.put({
+          preview,
+          lock: new Uint8Array([1]),
+          jobId,
+          owner,
+        });
+        return preview.previewId;
+      };
+
+      const first = await put('owner-a');
+      const second = await put('owner-a');
+      const third = await put('owner-b');
+      const fourth = await put('owner-b');
+
+      // The global oldest is gone, the other three are still there.
+      expect(store.peek(first, 'owner-a')).toBeNull();
+      expect(store.peek(second, 'owner-a')).not.toBeNull();
+      expect(store.peek(third, 'owner-b')).not.toBeNull();
+      expect(store.peek(fourth, 'owner-b')).not.toBeNull();
     });
   });
 
@@ -2092,5 +2193,242 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       const reqs = registry.requests();
       expect(reqs.length).toBeGreaterThan(0);
     }, 120_000);
+  });
+
+  // 16. Bounded lookup
+  describe('16. Bounded lookup', () => {
+    it('refuses install_limit for a tree of 2001 packages without fetching a version document', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const registry = await createRegistry();
+      const srvIntegrity = sha512Integrity('srv-wide');
+      registry.setVersion('srv', '1.0.0', {
+        name: 'srv',
+        version: '1.0.0',
+        bin: { srv: 'bin/srv.js' },
+        dist: { integrity: srvIntegrity, unpackedSize: 1000, fileCount: 1 },
+      });
+
+      // The root and 2000 dependencies: one package too many.
+      const lockPackages: Record<string, unknown> = {
+        '': { name: 'staging', version: '1.0.0' },
+        'node_modules/srv': {
+          version: '1.0.0',
+          integrity: srvIntegrity,
+          resolved: `${registry.origin}/srv/-/srv-1.0.0.tgz`,
+        },
+      };
+      for (let index = 0; index < 2000; index++) {
+        lockPackages[`node_modules/wide${index}`] = {
+          version: '1.0.0',
+          integrity: sha512Integrity(`wide-${index}`),
+          resolved: `${registry.origin}/wide${index}/-/wide${index}-1.0.0.tgz`,
+        };
+      }
+
+      const { runner } = createFakeRunner({
+        lock: { lockfileVersion: 3, packages: lockPackages },
+      });
+      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+      await expect(
+        resolvePackage({
+          request: { name: 'srv', version: '1.0.0' },
+          owner: 'test-owner',
+          packagesDir,
+          signal: new AbortController().signal,
+          previews,
+          registry: registry.registry,
+          runner,
+        }),
+      ).rejects.toMatchObject({ code: 'install_limit' });
+
+      // Not a single version document of a dependency was fetched.
+      const documents = registry
+        .requests()
+        .filter((url) => /^\/wide\d+\/1\.0\.0$/.test(url));
+      expect(documents).toHaveLength(0);
+    }, 60_000);
+
+    it('stops fetching version documents when the running unpacked size passes the cap', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const registry = await createRegistry();
+      const srvIntegrity = sha512Integrity('srv-size');
+      registry.setVersion('srv', '1.0.0', {
+        name: 'srv',
+        version: '1.0.0',
+        bin: { srv: 'bin/srv.js' },
+        dist: { integrity: srvIntegrity, unpackedSize: 1000, fileCount: 1 },
+      });
+
+      // 200 packages of 10 MiB: the cap of 500 MiB is passed after 50 of them.
+      const count = 200;
+      const lockPackages: Record<string, unknown> = {
+        '': { name: 'staging', version: '1.0.0' },
+        'node_modules/srv': {
+          version: '1.0.0',
+          integrity: srvIntegrity,
+          resolved: `${registry.origin}/srv/-/srv-1.0.0.tgz`,
+        },
+      };
+      for (let index = 0; index < count; index++) {
+        const name = `big${index}`;
+        const integrity = sha512Integrity(`big-${index}`);
+        lockPackages[`node_modules/${name}`] = {
+          version: '1.0.0',
+          integrity,
+          resolved: `${registry.origin}/${name}/-/${name}-1.0.0.tgz`,
+        };
+        registry.setVersion(name, '1.0.0', {
+          name,
+          version: '1.0.0',
+          dist: { integrity, unpackedSize: 10 * 1024 * 1024, fileCount: 1 },
+        });
+      }
+
+      const { runner } = createFakeRunner({
+        lock: { lockfileVersion: 3, packages: lockPackages },
+      });
+      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+      await expect(
+        resolvePackage({
+          request: { name: 'srv', version: '1.0.0' },
+          owner: 'test-owner',
+          packagesDir,
+          signal: new AbortController().signal,
+          previews,
+          registry: registry.registry,
+          runner,
+        }),
+      ).rejects.toMatchObject({ code: 'install_limit' });
+
+      // The lookup stopped long before the last package of the tree.
+      const documents = registry
+        .requests()
+        .filter((url) => /^\/big\d+\/1\.0\.0$/.test(url));
+      expect(documents.length).toBeLessThan(count);
+      expect(documents.length).toBeLessThan(100);
+    }, 60_000);
+
+    it('keeps the preview and the warnings of an ordinary tree identical', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const registry = await createRegistry();
+      const srvIntegrity = sha512Integrity('srv-ordinary');
+      const depIntegrity = sha512Integrity('dep-ordinary');
+
+      registry.setVersion('srv', '1.0.0', {
+        name: 'srv',
+        version: '1.0.0',
+        description: 'An ordinary package',
+        bin: { srv: 'bin/srv.js' },
+        scripts: { postinstall: 'node build.js' },
+        dependencies: { dep: '^2.0.0' },
+        optionalDependencies: { opt: '^1.0.0' },
+        dist: { integrity: srvIntegrity, unpackedSize: 1000, fileCount: 5 },
+      });
+      registry.setVersion('dep', '2.1.0', {
+        name: 'dep',
+        version: '2.1.0',
+        gypfile: true,
+        dist: { integrity: depIntegrity, unpackedSize: 2000, fileCount: 10 },
+      });
+
+      const lockObject = {
+        name: 'staging',
+        version: '1.0.0',
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'staging', version: '1.0.0' },
+          'node_modules/srv': {
+            version: '1.0.0',
+            integrity: srvIntegrity,
+            resolved: `${registry.origin}/srv/-/srv-1.0.0.tgz`,
+          },
+          'node_modules/dep': {
+            version: '2.1.0',
+            integrity: depIntegrity,
+            resolved: `${registry.origin}/dep/-/dep-2.1.0.tgz`,
+            hasInstallScript: true,
+          },
+        },
+      };
+      const lockBytes = Buffer.from(
+        JSON.stringify(lockObject, null, 2),
+        'utf8',
+      );
+
+      const { runner } = createFakeRunner({ lock: lockObject });
+      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+      const preview = await resolvePackage({
+        request: { name: 'srv', version: '1.0.0' },
+        owner: 'test-owner',
+        packagesDir,
+        signal: new AbortController().signal,
+        previews,
+        registry: registry.registry,
+        runner,
+        now: () => new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      expect(preview.name).toBe('srv');
+      expect(preview.version).toBe('1.0.0');
+      expect(preview.description).toBe('An ordinary package');
+      expect(preview.integrity).toBe(srvIntegrity);
+      expect(preview.lockHash).toBe(
+        createHash('sha256').update(lockBytes).digest('hex'),
+      );
+      expect(preview.packageCount).toBe(2);
+      expect(preview.bundledCount).toBe(0);
+      expect(preview.unpackedSize).toBe(3000);
+      expect(preview.releasedAt).toBeNull();
+      expect(preview.entries).toEqual([
+        { entry: 'srv', entryPath: 'bin/srv.js' },
+      ]);
+      expect(preview.warnings).toEqual([
+        'install_scripts',
+        'optional_omitted',
+        'release_date_unknown',
+      ]);
+    });
+  });
+
+  // 17. The real self-test of the bundled npm
+  describe('17. The bundled npm', () => {
+    it.skipIf(process.platform !== 'win32')(
+      'passes the npm self-test against the bundled npm',
+      async () => {
+        const tempDir = await createTempDir();
+        const packagesDir = join(tempDir, 'packages');
+        await mkdir(packagesDir, { recursive: true });
+
+        const registry = await createRegistry();
+        const paths = await prepareJob(
+          packagesDir,
+          randomUUID(),
+          registry.registry,
+        );
+        try {
+          await npmSelfTest({
+            paths,
+            registry: registry.registry,
+            signal: AbortSignal.timeout(60_000),
+            nodeExecutable: process.execPath,
+          });
+        } finally {
+          await removeTree(paths.root, packagesDir).catch(() => false);
+        }
+      },
+      120_000,
+    );
   });
 });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
-import { ConnectorSchema, StateSchema, type Connector, type HubState, type ImportDefinition, type PackageProvenance, type Profile, type RegistryOperation } from '@waleed/contracts';
+import { ConnectorSchema, StateSchema, isPackageEnvName as isRefusedPackageEnvName, type Connector, type HubState, type ImportDefinition, type PackageProvenance, type Profile, type RegistryOperation } from '@waleed/contracts';
 import { HubError } from '../errors.js';
 import { normalizeImport, clearImport } from '../imports/normalize.js';
 
@@ -14,9 +14,10 @@ export const hashBytes = (value: string | Buffer) => createHash('sha256').update
 // The managed package layout is defined here and nowhere else: the store, the
 // installer and the registry all build the same entry path from it.
 export const NO_GLOBAL_SEARCH_PATHS = '--no-global-search-paths';
-// Nothing that starts with NODE_ may reach a package connector, so no external
-// code can be preloaded and no TLS trust can be changed from outside the install.
-export const isPackageEnvName = (name: string) => /^NODE_/i.test(name);
+// Nothing that starts with NODE_ and none of the OpenSSL certificate
+// variables may reach a package connector: they change how the bundled Node
+// and npm preload code and trust TLS.
+export const isPackageEnvName = (name: string) => isRefusedPackageEnvName(name);
 export function packageEntryFile(packagesDir: string, pkg: PackageProvenance): string {
   return win32.join(packagesDir, pkg.installId, 'node_modules', ...pkg.name.split('/'), ...pkg.entryPath.split('/'));
 }
@@ -77,7 +78,7 @@ function checkedDefinition(definition: ImportDefinition, state: HubState, contex
     if (definition.executable !== context.nodeExecutable) throw new HubError('invalid', 'A package connector runs on the hub runtime.');
     if (definition.arguments[0] !== NO_GLOBAL_SEARCH_PATHS) throw new HubError('invalid', 'A package connector needs the fixed runtime flag.');
     if (definition.arguments[1] !== packageEntryFile(context.packagesDir, pkg)) throw new HubError('invalid', 'A package connector runs the installed entry file.');
-    for (const key of [...Object.keys(environmentLiterals), ...Object.keys(definition.secretBindings)]) if (isPackageEnvName(key)) throw new HubError('invalid', 'Environment names starting with NODE_ are refused on package connectors.');
+    for (const key of [...Object.keys(environmentLiterals), ...Object.keys(definition.secretBindings)]) if (isPackageEnvName(key)) throw new HubError('invalid', 'Environment names starting with NODE_ and the OpenSSL certificate variables are refused on package connectors.');
     // The user arguments follow the entry script, so they are not interpreter
     // flags: only the credential and literal checks apply to them.
     checkedSource({ id, name, description, enabled, command: 'package-entry', args: definition.arguments.slice(2), environmentLiterals });

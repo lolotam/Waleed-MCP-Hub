@@ -32,12 +32,18 @@ import {
   type CommitState,
   type SaveOutcome,
 } from './install.js';
-import { DEFAULT_REGISTRY, type RegistryTarget } from './npm.js';
+import {
+  DEFAULT_REGISTRY,
+  npmSelfTest,
+  prepareJob,
+  type RegistryTarget,
+} from './npm.js';
 import { createPreviewStore, type PreviewStore } from './previews.js';
 import { resolvePackage } from './resolve.js';
 import {
   createPackageLock,
   reconcilePackages,
+  removeTree,
   type PackageLock,
 } from './store.js';
 import { verifyPackageFiles } from './verify.js';
@@ -53,6 +59,12 @@ const MAX_ENV_NAMES = 16;
 // install away, so the save retries before it gives up.
 const SAVE_ATTEMPTS = 40;
 const SAVE_RETRY_MS = 250;
+// The deadline of the npm self-test: it runs on its own signal, never on the
+// signal of a job.
+const SELF_TEST_TIMEOUT_MS = 60_000;
+// The folder of the self-test: a fixed id, so the reconciliation pass can
+// keep it while the test runs.
+const SELF_TEST_JOB_ID = '00000000-0000-4000-8000-000000000001';
 // The placeholder provenance of the dry run: a valid record that names no
 // package, so the plan can be built without the real install.
 const PLACEHOLDER_INTEGRITY = `sha512-${'A'.repeat(86)}==`;
@@ -64,6 +76,9 @@ export interface PackageServiceAdapter {
   registry?: RegistryTarget;
   runner?: ProcessRunner;
   now?: () => number;
+  // The self-test of the npm the service runs. A test injects its own; it
+  // replaces the real one whatever the runner is.
+  selfTest?: () => Promise<void>;
 }
 
 // The narrow host of the service: the lifecycle offers more than the service
@@ -156,6 +171,77 @@ export function createPackageService(
   let closed = false;
   let installs = 0;
   let lookups = 0;
+
+  // The startup self-test of the npm: the pinned npm is checked once, before
+  // the first job runs npm. The test starts lazily, so creating the service
+  // stays synchronous and cheap.
+  let selfTestPromise: Promise<void> | null = null;
+  // The folder of the self-test stays protected for the life of the service:
+  // the reconciliation pass never deletes it while the test runs.
+  let selfTestStarted = false;
+
+  // The real self-test: the bundled npm in its own job folder, which is
+  // removed again when the test is over.
+  const bundledSelfTest = async (): Promise<void> => {
+    const paths = await prepareJob(
+      adapter.packagesDir,
+      SELF_TEST_JOB_ID,
+      registry,
+    );
+    try {
+      await npmSelfTest({
+        paths,
+        registry,
+        // The test has its own deadline: a cancelled job never stops it.
+        signal: AbortSignal.timeout(SELF_TEST_TIMEOUT_MS),
+        nodeExecutable: adapter.nodeExecutable,
+      });
+    } finally {
+      await removeTree(paths.root, adapter.packagesDir).catch(() => false);
+    }
+  };
+
+  // The real self-test runs only for the bundled npm; an injected one replaces
+  // it whatever the runner is.
+  const selfTest =
+    adapter.selfTest ?? (adapter.runner === undefined ? bundledSelfTest : null);
+
+  const startSelfTest = (): Promise<void> => {
+    selfTestStarted = true;
+    return Promise.resolve().then(() => selfTest!());
+  };
+
+  // Every resolve and install job waits for the self-test before npm runs. A
+  // cancelled job stops waiting, but the test keeps running: a broken npm
+  // never becomes the result of a cancelled job.
+  const ensureSelfTest = async (signal: AbortSignal): Promise<void> => {
+    if (!selfTest) return;
+    selfTestPromise ??= startSelfTest();
+    const promise = selfTestPromise;
+    // The memo never becomes an unhandled rejection, whoever waits for it.
+    promise.catch(() => undefined);
+    if (signal.aborted) throw new PackageFault('cancelled');
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => reject(new PackageFault('cancelled'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        () => {
+          signal.removeEventListener('abort', onAbort);
+          resolve();
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+      // The signal may have been aborted between the check and the listener.
+      if (signal.aborted) onAbort();
+    }).catch((error: unknown) => {
+      // A broken npm fails the job, never the service.
+      if (error instanceof PackageFault) throw error;
+      throw new PackageFault('install_failed');
+    });
+  };
 
   const snapshot = (entry: JobRecord): PackageJob => structuredClone(entry.job);
 
@@ -253,6 +339,7 @@ export function createPackageService(
   ): Promise<void> =>
     (async () => {
       try {
+        await ensureSelfTest(signal);
         const record = await previews.take(options.previewId, entry.owner);
         entry.folderId = record.jobId;
         entry.job.progress = {
@@ -354,6 +441,7 @@ export function createPackageService(
     ]);
     entry.done = (async () => {
       try {
+        await ensureSelfTest(signal);
         const preview: PackagePreview = await resolvePackage({
           request,
           owner,
@@ -757,6 +845,8 @@ export function createPackageService(
       if (entry.folderId) active.add(entry.folderId);
     }
     for (const id of previews.jobIds()) active.add(id);
+    // The folder of the self-test is never deleted by the reconciliation.
+    if (selfTestStarted) active.add(SELF_TEST_JOB_ID);
     return active;
   };
 

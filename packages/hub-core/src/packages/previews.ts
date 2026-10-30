@@ -18,6 +18,9 @@ export interface PreviewStoreOptions {
   ttlMs?: number;
   now?: () => number;
   packagesDir?: string;
+  // The number of previews one owner keeps and the number the store keeps.
+  maxPerOwner?: number;
+  maxTotal?: number;
 }
 
 export interface PreviewStore {
@@ -45,6 +48,8 @@ export function createPreviewStore(
   const ttlMs = options.ttlMs ?? PREVIEW_TTL_MS;
   const now = options.now ?? (() => Date.now());
   const packagesDir = options.packagesDir;
+  const maxPerOwner = options.maxPerOwner ?? 5;
+  const maxTotal = options.maxTotal ?? 50;
   const stored = new Map<string, StoredPreview>();
 
   // The staging folder of an expired preview is deleted; a folder that cannot
@@ -65,6 +70,28 @@ export function createPreviewStore(
     clearTimeout(entry.timer);
   };
 
+  // The store is capped: an owner keeps a few previews and the store keeps a
+  // few more, so a flood of lookups cannot fill the disk with staging
+  // folders. The oldest preview goes first: the oldest of its owner for the
+  // per-owner cap, the oldest of the store for the total cap.
+  const evict = (owner: string): void => {
+    for (;;) {
+      const ownerEntries = [...stored.values()].filter(
+        (entry) => entry.record.owner === owner,
+      );
+      if (ownerEntries.length > maxPerOwner) {
+        const oldest = ownerEntries[0]!;
+        forget(oldest.record.preview.previewId);
+        void dropJob(oldest.record.jobId);
+        continue;
+      }
+      const globalOldest = [...stored.values()][0];
+      if (!globalOldest || stored.size <= maxTotal) return;
+      forget(globalOldest.record.preview.previewId);
+      void dropJob(globalOldest.record.jobId);
+    }
+  };
+
   return {
     ttlMs,
     put(record) {
@@ -79,6 +106,7 @@ export function createPreviewStore(
       }, ttlMs);
       timer.unref?.();
       stored.set(previewId, { record, expiresAt, timer });
+      evict(record.owner);
     },
     async take(previewId, owner) {
       const entry = stored.get(previewId);

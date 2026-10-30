@@ -275,6 +275,9 @@ export async function installPackage(
         roots: [jobFolder, installFolder],
         maxBytes: WATCHDOG_MAX_BYTES,
         maxFiles: WATCHDOG_MAX_FILES,
+        // The reserve of the drive is kept while npm runs, not only before it.
+        minFreeBytes: MIN_FREE_BYTES,
+        freePath: options.packagesDir,
         ...(options.watchdog?.intervalMs === undefined
           ? {}
           : { intervalMs: options.watchdog.intervalMs }),

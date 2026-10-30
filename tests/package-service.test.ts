@@ -296,6 +296,7 @@ describe('package-service', { timeout: 60_000 }, () => {
       runnerOptions?: FakeProcessRunnerOptions;
       now?: () => number;
       secretBackend?: ReturnType<typeof memorySecrets>;
+      selfTest?: () => Promise<void>;
       packageConfig?: {
         name?: string;
         version?: string;
@@ -333,6 +334,7 @@ describe('package-service', { timeout: 60_000 }, () => {
         registry: registry.registry,
         runner: fakeRunner.runner,
         ...(options.now ? { now: options.now } : {}),
+        ...(options.selfTest ? { selfTest: options.selfTest } : {}),
       },
     });
     lifecycles.push(lifecycle);
@@ -1251,5 +1253,83 @@ describe('package-service', { timeout: 60_000 }, () => {
     const job = service.job(installJob.id, 'owner-a');
     expect(job.state).toBe('failed');
     expect(job.error).toBe('install_limit');
+  });
+
+  it('14. A failing self-test fails every job and is never retried', async () => {
+    let calls = 0;
+    const { service } = await setupService({
+      selfTest: async () => {
+        calls += 1;
+        throw new Error('the bundled npm is broken');
+      },
+    });
+
+    const first = service.resolve({ name: 'srv', version: '1.0.0' }, 'owner-a');
+    const firstDone = await waitFor(service, first, 'owner-a');
+    expect(firstDone.state).toBe('failed');
+    expect(firstDone.error).toBe('install_failed');
+
+    const second = service.resolve(
+      { name: 'srv', version: '1.0.0' },
+      'owner-a',
+    );
+    const secondDone = await waitFor(service, second, 'owner-a');
+    expect(secondDone.state).toBe('failed');
+    expect(secondDone.error).toBe('install_failed');
+
+    // The self-test ran once: a broken npm never starts a retry storm.
+    expect(calls).toBe(1);
+  });
+
+  it('15. The self-test runs once across two jobs', async () => {
+    let calls = 0;
+    const { service } = await setupService({
+      selfTest: async () => {
+        calls += 1;
+      },
+    });
+
+    const first = service.resolve({ name: 'srv', version: '1.0.0' }, 'owner-a');
+    const firstDone = await waitFor(service, first, 'owner-a');
+    expect(firstDone.state).toBe('succeeded');
+
+    const second = service.resolve(
+      { name: 'srv', version: '1.0.0' },
+      'owner-a',
+    );
+    const secondDone = await waitFor(service, second, 'owner-a');
+    expect(secondDone.state).toBe('succeeded');
+
+    expect(calls).toBe(1);
+  });
+
+  it('16. A cancelled job does not stop the next job', async () => {
+    let calls = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { service } = await setupService({
+      selfTest: async () => {
+        calls += 1;
+        await held;
+      },
+    });
+
+    const job = service.resolve({ name: 'srv', version: '1.0.0' }, 'owner-a');
+    while (calls === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    service.cancel(job.id, 'owner-a');
+    const cancelled = await waitFor(service, job, 'owner-a');
+    expect(cancelled.state).toBe('cancelled');
+
+    // The self-test keeps running: the next job finds the same result.
+    release();
+    const next = service.resolve({ name: 'srv', version: '1.0.0' }, 'owner-a');
+    const nextDone = await waitFor(service, next, 'owner-a');
+    expect(nextDone.state).toBe('succeeded');
+    expect(calls).toBe(1);
   });
 });
