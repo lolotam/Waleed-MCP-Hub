@@ -74,3 +74,11 @@ export {
   createWindowsProcessRunner,
   type WindowsRunnerOptions,
 } from './adapters/native/process-runner.js';
+export {
+  ensureInstallRecord,
+  readBootRecord,
+  readInstallRecord,
+  writeBootRecord,
+  type BootRecord,
+  type InstallRecord,
+} from './runtime/boot.js';

@@ -10,6 +10,8 @@ import {
   createWindowsDiscoveryPorts,
   createDiscoveryService,
   localRuntimeAdapters,
+  ensureInstallRecord,
+  writeBootRecord,
 } from '@waleed/hub-core';
 import { createHubServer } from './app.js';
 
@@ -36,6 +38,10 @@ async function main() {
   // executes an operation or rewrites registry/Docker/agent/secret state.
   try {
     await safety.reconcile(await store.read());
+    // The install record names this installation and never changes; the boot
+    // record names this hub generation and changes with every start.
+    await ensureInstallRecord(directory);
+    await writeBootRecord(directory);
   } catch (error) {
     await safety.close();
     await store.close();

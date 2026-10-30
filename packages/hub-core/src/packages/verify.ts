@@ -38,11 +38,32 @@ const exists = async (path: string): Promise<boolean> => {
     throw error;
   }
 };
-async function digest(path: string): Promise<string> {
+// An aborted verification is a cancellation, never a modified package: the
+// walk stops and the open hash stream is destroyed.
+const cancelled = () => new RuntimeFault('cancelled');
+const throwIfAborted = (signal?: AbortSignal): void => {
+  if (signal?.aborted) throw cancelled();
+};
+async function digest(path: string, signal?: AbortSignal): Promise<string> {
   const hash = createHash('sha256');
   const stream = createReadStream(path);
-  for await (const chunk of stream) hash.update(chunk);
-  return hash.digest('hex');
+  if (!signal) {
+    for await (const chunk of stream) hash.update(chunk);
+    return hash.digest('hex');
+  }
+  const onAbort = () => stream.destroy(cancelled());
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    throwIfAborted(signal);
+    for await (const chunk of stream) hash.update(chunk);
+    throwIfAborted(signal);
+    return hash.digest('hex');
+  } catch (error) {
+    stream.destroy();
+    throw signal.aborted ? cancelled() : error;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 // The installed-file manifest: one line per regular file, sorted, hashed
@@ -50,11 +71,14 @@ async function digest(path: string): Promise<string> {
 // folder fails the walk.
 export async function buildManifest(
   installDir: string,
+  signal?: AbortSignal,
 ): Promise<PackageManifest> {
   const lines: string[] = [];
   let bytes = 0;
   const walk = async (directory: string, prefix: string): Promise<void> => {
+    throwIfAborted(signal);
     for (const entry of await readdir(directory)) {
+      throwIfAborted(signal);
       const path = join(directory, entry);
       const relative = prefix ? `${prefix}/${entry}` : entry;
       const info = await lstat(path);
@@ -67,7 +91,8 @@ export async function buildManifest(
       // The caps are checked before hashing, so an oversized file is never read.
       bytes += info.size;
       if (lines.length >= MAX_FILES || bytes > MAX_BYTES) throw modified();
-      lines.push(`${relative}\0${info.size}\0${await digest(path)}`);
+      lines.push(`${relative}\0${info.size}\0${await digest(path, signal)}`);
+      throwIfAborted(signal);
     }
   };
   const root = await lstat(installDir);
@@ -89,9 +114,12 @@ const samePath = (left: string, right: string): boolean =>
 export async function verifyPackageFiles(
   connector: Connector,
   packagesDir: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (connector.executionMode !== 'native' || !connector.package) return;
   const pkg = connector.package;
+  // An aborted operation never touches a file.
+  throwIfAborted(signal);
   if (connector.arguments[0] !== NO_GLOBAL_SEARCH_PATHS) throw modified();
   const derived = packagesDirOf(connector.arguments[1] ?? '', pkg);
   if (!derived || !samePath(derived, packagesDir)) throw modified();
@@ -115,12 +143,13 @@ export async function verifyPackageFiles(
     } finally {
       bytes.fill(0);
     }
-    if ((await buildManifest(installDir)).hash !== pkg.manifestHash)
+    if ((await buildManifest(installDir, signal)).hash !== pkg.manifestHash)
       throw modified();
     // Node resolves bare imports by walking up the parent folders, so no parent
     // of the install may hold a node_modules entry.
     let parent = resolve(packagesDir);
     for (;;) {
+      throwIfAborted(signal);
       if (await exists(join(parent, 'node_modules'))) throw modified();
       const up = dirname(parent);
       if (up === parent) break;

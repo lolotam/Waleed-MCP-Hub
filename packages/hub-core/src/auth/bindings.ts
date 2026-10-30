@@ -32,6 +32,9 @@ export function assertBinding(
 export interface SecretLease {
   environment: Record<string, string>;
   headers: Record<string, string>;
+  // The earliest expiry of the OAuth values the lease resolved. It is absent
+  // when no resolved reference carries one.
+  notAfter?: number;
   dispose(): void;
 }
 export function createBindingResolver(
@@ -47,6 +50,7 @@ export function createBindingResolver(
     const buffers: Buffer[] = [];
     const environment: Record<string, string> = {},
       headers: Record<string, string> = {};
+    let notAfter: number | undefined;
     const dispose = () => {
       buffers.forEach((buffer) => buffer.fill(0));
       for (const key of Object.keys(environment)) delete environment[key];
@@ -97,6 +101,11 @@ export function createBindingResolver(
               token.expiresAt <= now() + 30_000
             )
               throw new RuntimeFault('auth_expired');
+            if (typeof token.expiresAt === 'number')
+              notAfter =
+                notAfter === undefined
+                  ? token.expiresAt
+                  : Math.min(notAfter, token.expiresAt);
             text = token.accessToken;
           }
           if (location === 'header') {
@@ -111,7 +120,12 @@ export function createBindingResolver(
           } else environment[name] = text;
         }
       }
-      return { environment, headers, dispose };
+      return {
+        environment,
+        headers,
+        ...(notAfter === undefined ? {} : { notAfter }),
+        dispose,
+      };
     } catch (error) {
       dispose();
       throw error instanceof RuntimeFault
