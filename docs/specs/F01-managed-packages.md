@@ -217,6 +217,13 @@ no redirects to other hosts, and size limits.
      (`unsupported_dependency`) any spec that is not a registry semver range or
      tag: `file:`, `link:`, `workspace:`, `npm:` aliases, git, URLs and paths. A
      package with such an optional dependency is refused, not silently trimmed.
+     A tag in a dependency spec has a narrower grammar than the Look up
+     selector: it starts with an ASCII letter and has at most 64 characters
+     (`/^[A-Za-z][A-Za-z0-9._-]{0,63}$/`), because npm itself resolves these
+     specs during the install. A dependency tag such as `_next` or `123next`
+     is refused (`unsupported_dependency`). The Look up selector of step 1 is
+     not bound by this rule: it is only a key into the packument, so `_next`
+     and `123next` are valid there.
 5. Warnings (each must be ticked before install): the root or any non-bundled
    package has install scripts, where "has install scripts" means the frozen lock
    entry has `hasInstallScript: true`, **or** its full version document has a

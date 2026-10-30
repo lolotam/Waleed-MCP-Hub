@@ -218,6 +218,10 @@ describe('package-resolve', { timeout: 60_000 }, () => {
         './a',
         'C:\\a',
         '~/a',
+        // A dependency tag keeps the narrow grammar: letter first, 64 at most.
+        '_next',
+        '123next',
+        'a'.repeat(65),
       ];
       for (const spec of invalidSpecs) {
         expect(isRegistrySpec(spec), `expected false for: ${spec}`).toBe(false);
