@@ -10,6 +10,7 @@ import {
 } from '@waleed/contracts';
 import {
   api,
+  ApiError,
   packageErrorText,
   packageFailureText,
   packageWarningText,
@@ -92,6 +93,11 @@ export function PackageInstall({
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [failureCode, setFailureCode] = useState<PackageErrorCode | null>(null);
+  // An accepted job whose progress could not be read.
+  const [unknownJob, setUnknownJob] = useState<{
+    job: PackageJob;
+    label: string;
+  } | null>(null);
   const running = step === 'resolving' || step === 'installing';
   const reportRunning = useRef(onRunning);
   reportRunning.current = onRunning;
@@ -267,74 +273,135 @@ export function PackageInstall({
     }
     // The request object is blanked again when it settles.
     setJob(null);
+    setUnknownJob(null);
     setStep('installing');
     const controller = new AbortController();
     abort.current = controller;
-    // Once the hub accepted the job, its outcome is unknown until a terminal
-    // state is read: a lost poll never offers a retry against the old state.
-    let accepted = false;
+    const label = `${preview.name}@${preview.version}`;
+    // Until the hub answered, its job may exist: only a 4xx answer proves
+    // that nothing started, so every other failure leaves the outcome unknown
+    // and never offers a retry against the old state.
+    let started: PackageJob | null = null;
     try {
-      const started = PackageJobSchema.parse(
-        await api<PackageJob>(
-          seed.mode === 'install'
-            ? '/api/packages/install'
-            : '/api/packages/replace',
-          body,
-        ),
-      );
-      accepted = true;
-      if (!mounted.current) return;
-      setJob(started);
-      const final = await pollPackageJob(
-        started,
-        (next) => {
-          if (mounted.current) setJob(next);
-        },
-        controller.signal,
-      );
-      if (!mounted.current || controller.signal.aborted) return;
-      if (final.state === 'succeeded' && final.result) {
-        const label = `${preview.name}@${preview.version}`;
-        const saved = final.result.outcome === 'saved';
-        setNotice(
-          seed.mode === 'install'
-            ? saved
-              ? `Installed ${label} as connector ${final.result.connectorId}. Saving is not approval: approve its exact definition in the connector list before it can run.`
-              : `Installed ${label} as connector ${final.result.connectorId}, but not every step was saved. Review the connector before use.`
-            : saved
-              ? `Replaced with ${label}. The new definition needs approval again.`
-              : `Replaced with ${label}, but not every step was saved. Review the connector before use.`,
+      try {
+        started = PackageJobSchema.parse(
+          await api<PackageJob>(
+            seed.mode === 'install'
+              ? '/api/packages/install'
+              : '/api/packages/replace',
+            body,
+          ),
         );
-        setFailureCode(null);
-        setStep('result');
-        await refresh();
-        return;
+      } catch (failure) {
+        if (
+          failure instanceof ApiError &&
+          failure.status >= 400 &&
+          failure.status < 500
+        ) {
+          if (!mounted.current) return;
+          setError(packageFailureText(failure));
+          setStep('lookup');
+          return;
+        }
+        throw failure;
       }
-      setFailureCode(final.error);
-      setError(packageErrorText(final.error ?? 'install_failed'));
-      if (final.error === 'save_uncertain') {
-        // The save may have landed: the list is reloaded and this view
-        // offers no retry against the old state.
-        setStep('result');
-        await refresh();
-        return;
-      }
-      setStep('lookup');
-    } catch (failure) {
       if (!mounted.current) return;
-      if (accepted) {
-        setError(
-          'The job was started but its progress could not be read, so its outcome is unknown. The connector list was reloaded: check it before installing again.',
-        );
-        setStep('result');
-        await refresh().catch(() => undefined);
-        return;
-      }
-      setError(packageFailureText(failure));
-      setStep('lookup');
+      await follow(started, controller.signal, label);
+    } catch {
+      if (!mounted.current) return;
+      await unknownOutcome(started, label);
     } finally {
       const values = body.env as Record<string, string> | undefined;
       if (values) for (const key of Object.keys(values)) values[key] = '';
+      abort.current = null;
+    }
+  }
+
+  // The connector list is reloaded after every outcome. A failed reload never
+  // decides that outcome: it only adds that the list is stale.
+  async function reload(): Promise<string> {
+    try {
+      await refresh();
+      return '';
+    } catch {
+      return ' The connector list could not be reloaded; reload the page to see it.';
+    }
+  }
+
+  // Follows an accepted job to its end. Only a failed poll throws.
+  async function follow(
+    started: PackageJob,
+    signal: AbortSignal,
+    label: string,
+  ) {
+    setJob(started);
+    const final = await pollPackageJob(
+      started,
+      (next) => {
+        if (mounted.current) setJob(next);
+      },
+      signal,
+    );
+    if (!mounted.current || signal.aborted) return;
+    setUnknownJob(null);
+    if (final.state === 'succeeded' && final.result) {
+      const saved = final.result.outcome === 'saved';
+      setNotice(
+        seed.mode === 'install'
+          ? saved
+            ? `Installed ${label} as connector ${final.result.connectorId}. Saving is not approval: approve its exact definition in the connector list before it can run.`
+            : `Installed ${label} as connector ${final.result.connectorId}, but not every step was saved. Review the connector before use.`
+          : saved
+            ? `Replaced with ${label}. The new definition needs approval again.`
+            : `Replaced with ${label}, but not every step was saved. Review the connector before use.`,
+      );
+      setFailureCode(null);
+      setError('');
+      setStep('result');
+      const stale = await reload();
+      if (stale && mounted.current) setError(stale.trim());
+      return;
+    }
+    setFailureCode(final.error);
+    if (final.error === 'save_uncertain') {
+      // The save may have landed: this view offers no retry against the old
+      // state.
+      setStep('result');
+      const stale = await reload();
+      if (mounted.current) setError(packageErrorText('save_uncertain') + stale);
+      return;
+    }
+    setError(packageErrorText(final.error ?? 'install_failed'));
+    setStep('lookup');
+  }
+
+  // The outcome of a job whose answer or progress was lost. The view keeps
+  // the job, if one was read, so it can be checked again.
+  async function unknownOutcome(started: PackageJob | null, label: string) {
+    setUnknownJob(started ? { job: started, label } : null);
+    setStep('result');
+    const stale = await reload();
+    if (!mounted.current) return;
+    setError(
+      (started
+        ? 'The job was started but its progress could not be read, so its outcome is unknown. It may still be running: check the job again, or check the connector list before installing again.'
+        : 'The hub may have started the job, but its answer was lost, so the outcome is unknown. Wait a moment, then check the connector list before installing again.') +
+        stale,
+    );
+  }
+
+  async function checkAgain() {
+    if (!unknownJob) return;
+    const { job: started, label } = unknownJob;
+    setError('');
+    setStep('installing');
+    const controller = new AbortController();
+    abort.current = controller;
+    try {
+      await follow(started, controller.signal, label);
+    } catch {
+      if (mounted.current) await unknownOutcome(started, label);
+    } finally {
       abort.current = null;
     }
   }
@@ -596,9 +663,20 @@ export function PackageInstall({
 
       <footer className="dialog-footer package-footer">
         {step === 'result' ? (
-          <button type="button" onClick={dismiss}>
-            Close
-          </button>
+          <>
+            <button type="button" onClick={dismiss}>
+              Close
+            </button>
+            {unknownJob && (
+              <button
+                className="primary"
+                type="button"
+                onClick={() => void checkAgain()}
+              >
+                Check the job again
+              </button>
+            )}
+          </>
         ) : (
           <>
             {showCancel && (

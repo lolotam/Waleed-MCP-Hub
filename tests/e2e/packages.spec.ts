@@ -84,7 +84,11 @@ function job(overrides: Record<string, unknown>) {
 }
 async function fakePackageApi(
   page: Page,
-  options: { failResolve?: boolean; losePoll?: boolean } = {},
+  options: {
+    failResolve?: boolean;
+    losePolls?: number;
+    loseStart?: boolean;
+  } = {},
 ) {
   const state: {
     resolvePolls: number;
@@ -111,6 +115,10 @@ async function fakePackageApi(
     }
     if (path === '/api/packages/install') {
       state.installBody = request.postDataJSON() as Record<string, unknown>;
+      if (options.loseStart) {
+        await route.abort('connectionreset');
+        return;
+      }
       await answer(
         route,
         job({
@@ -162,7 +170,7 @@ async function fakePackageApi(
     }
     if (path === `/api/packages/jobs/${INSTALL_JOB}`) {
       state.installPolls += 1;
-      if (options.losePoll) {
+      if (state.installPolls <= (options.losePolls ?? 0)) {
         await route.abort('connectionreset');
         return;
       }
@@ -436,11 +444,7 @@ test('an import proposal is listed separately and opens the package flow', async
   });
 });
 
-test('a lost poll after the install started never offers a retry', async ({
-  page,
-}) => {
-  await page.goto(await launch());
-  await fakePackageApi(page, { losePoll: true });
+async function installDemo(page: Page) {
   await page
     .getByRole('button', { name: 'Add Manual MCP', exact: true })
     .click();
@@ -452,11 +456,35 @@ test('a lost poll after the install started never offers a retry', async ({
   await page.getByLabel(/This package has install scripts/).check();
   await page.getByLabel(/This release is younger than 7 days/).check();
   await page.getByRole('button', { name: 'Install', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('its outcome is unknown');
+}
+
+test('a few lost polls are retried and the install still completes', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  const state = await fakePackageApi(page, { losePolls: 2 });
+  await installDemo(page);
+  await expect(page.getByText(/Saving is not approval/)).toBeVisible({
+    timeout: 15_000,
+  });
+  expect(state.installPolls).toBeGreaterThan(2);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('a lost start answer leaves the outcome unknown and offers no retry', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await fakePackageApi(page, { loseStart: true });
+  await installDemo(page);
+  await expect(page.getByRole('alert')).toContainText(
+    'its answer was lost, so the outcome is unknown',
+  );
+  for (const name of ['Look up', 'Install', 'Look up again'])
+    await expect(page.getByRole('button', { name, exact: true })).toHaveCount(
+      0,
+    );
   await expect(
-    page.getByRole('button', { name: 'Look up', exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole('button', { name: 'Install', exact: true }),
-  ).toHaveCount(0);
+    page.getByRole('button', { name: 'Close', exact: true }),
+  ).toBeVisible();
 });

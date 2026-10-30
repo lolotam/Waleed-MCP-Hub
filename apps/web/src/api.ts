@@ -128,20 +128,37 @@ export function packageWarningText(warning: PackageWarning): string {
 
 // The poll of a package job: every half second the job is read again while
 // it is queued or running. The signal stops the loop when the view goes away.
+// A failed read is retried with a growing pause, so a connection blip, a 429
+// or a hub hiccup never abandons a job that is still running. Only a job the
+// hub no longer knows (404) or a long run of failed reads ends the poll.
+const POLL_RETRY_LIMIT = 12;
 export async function pollPackageJob(
   job: PackageJob,
   onUpdate: (job: PackageJob) => void,
   signal?: AbortSignal,
 ): Promise<PackageJob> {
   let current = job;
+  let failures = 0;
   onUpdate(current);
   while (current.state === 'queued' || current.state === 'running') {
     if (signal?.aborted) return current;
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    const pause = failures ? Math.min(500 * 2 ** failures, 5000) : 500;
+    await new Promise((resolve) => window.setTimeout(resolve, pause));
     if (signal?.aborted) return current;
-    current = PackageJobSchema.parse(
-      await api<PackageJob>(`/api/packages/jobs/${current.id}`),
-    );
+    try {
+      current = PackageJobSchema.parse(
+        await api<PackageJob>(`/api/packages/jobs/${current.id}`),
+      );
+    } catch (failure) {
+      failures += 1;
+      if (
+        (failure instanceof ApiError && failure.status === 404) ||
+        failures >= POLL_RETRY_LIMIT
+      )
+        throw failure;
+      continue;
+    }
+    failures = 0;
     onUpdate(current);
   }
   return current;
