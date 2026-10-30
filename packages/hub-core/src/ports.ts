@@ -13,6 +13,13 @@ export interface ProcessRequest {
   stream?: {
     started(write: (data: string) => void): void;
     stdout(data: Buffer): void;
+    // Session runs only: the stderr chunks the transport accounts for.
+    stderr?(data: Buffer): void;
+  };
+  // Present only for a session run: a pooled peer that keeps its process alive
+  // between operations. It requires the duplex stream seam above.
+  session?: {
+    inputLimitBytes: number;
   };
 }
 export interface ProcessResult {

@@ -16,6 +16,9 @@ export interface WindowsRunnerOptions {
   // The ceiling of this runner: a package install needs ten minutes, an MCP
   // target keeps the two minutes it always had.
   maxTimeoutMs?: number;
+  // Opt-in session mode: a pooled peer keeps one process alive between
+  // operations and asks for the session budgets.
+  session?: boolean;
 }
 
 // The default ceiling of every runner that does not ask for a longer one.
@@ -23,6 +26,8 @@ const DEFAULT_MAX_TIMEOUT_MS = 120_000;
 // No run may be shorter than this and none may be longer than ten minutes.
 const MIN_TIMEOUT_MS = 50;
 const MAX_TIMEOUT_MS = 600_000;
+// A session peer lives for an hour plus the operation that ends it.
+const SESSION_MAX_TIMEOUT_MS = 3_660_000;
 
 const invalid = () =>
   new HubError(
@@ -43,11 +48,17 @@ const emptyResult = (outcome: ProcessResult['outcome']): ProcessResult => ({
   stderr: '',
 });
 
-function validate(request: ProcessRequest, maxTimeoutMs: number) {
+function validate(
+  request: ProcessRequest,
+  maxTimeoutMs: number,
+  sessionRunner: boolean,
+) {
   if (
     request.stream &&
     (typeof request.stream.started !== 'function' ||
       typeof request.stream.stdout !== 'function' ||
+      (request.stream.stderr !== undefined &&
+        typeof request.stream.stderr !== 'function') ||
       request.stdin !== undefined)
   )
     throw invalid();
@@ -76,7 +87,26 @@ function validate(request: ProcessRequest, maxTimeoutMs: number) {
   if (
     !Number.isInteger(request.timeoutMs) ||
     request.timeoutMs < MIN_TIMEOUT_MS ||
-    request.timeoutMs > maxTimeoutMs ||
+    request.timeoutMs > maxTimeoutMs
+  )
+    throw invalid();
+  if (request.session !== undefined) {
+    // A session run is opt-in, duplex, and bounded by the session budgets.
+    const limits = request.session;
+    if (
+      !sessionRunner ||
+      typeof limits !== 'object' ||
+      limits === null ||
+      !request.stream ||
+      !Number.isInteger(request.outputLimitBytes) ||
+      request.outputLimitBytes < 1 ||
+      request.outputLimitBytes > 64 * 1024 * 1024 ||
+      !Number.isInteger(limits.inputLimitBytes) ||
+      limits.inputLimitBytes < 1 ||
+      limits.inputLimitBytes > 16 * 1024 * 1024
+    )
+      throw invalid();
+  } else if (
     !Number.isInteger(request.outputLimitBytes) ||
     request.outputLimitBytes < 1 ||
     request.outputLimitBytes > 1024 * 1024
@@ -103,6 +133,7 @@ export async function createWindowsProcessRunner(
 ): Promise<ProcessRunner> {
   if (process.platform !== 'win32') throw unavailable();
   const concurrency = options.concurrency ?? 2;
+  const sessionRunner = options.session === true;
   const maxTimeoutMs = options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
   if (
     !Number.isInteger(concurrency) ||
@@ -110,7 +141,9 @@ export async function createWindowsProcessRunner(
     concurrency > 8 ||
     !Number.isInteger(maxTimeoutMs) ||
     maxTimeoutMs < MIN_TIMEOUT_MS ||
-    maxTimeoutMs > MAX_TIMEOUT_MS ||
+    maxTimeoutMs > (sessionRunner ? SESSION_MAX_TIMEOUT_MS : MAX_TIMEOUT_MS) ||
+    // A session runner states its own ceiling: there is no session default.
+    (sessionRunner && options.maxTimeoutMs === undefined) ||
     options.allowedExecutables.length < 1 ||
     options.allowedExecutables.length > 16 ||
     !localPath(options.workingDirectory)
@@ -177,13 +210,14 @@ export async function createWindowsProcessRunner(
 
   return {
     async run(request) {
-      validate(request, maxTimeoutMs);
+      validate(request, maxTimeoutMs, sessionRunner);
       // Snapshot before the first await: edits to a caller-owned definition must
       // not change a command/environment after it has passed validation.
       request = {
         ...request,
         arguments: [...request.arguments],
         environment: { ...request.environment },
+        ...(request.session ? { session: { ...request.session } } : {}),
       };
       if (request.signal.aborted) return emptyResult('cancelled');
       const deadline = Date.now() + request.timeoutMs;
@@ -216,6 +250,11 @@ export async function createWindowsProcessRunner(
         WorkingDirectory: directory,
         Deadline: deadline,
         OutputLimitBytes: request.outputLimitBytes,
+        // A plain payload stays exactly as it was; only a session run names
+        // the session budgets the host has to enforce.
+        ...(request.session
+          ? { Session: true, InputLimitBytes: request.session.inputLimitBytes }
+          : {}),
       });
       if (Buffer.byteLength(payload, 'utf8') > 64 * 1024) throw invalid();
       active++;
@@ -243,6 +282,11 @@ export async function createWindowsProcessRunner(
           let reason: ProcessResult['outcome'] | undefined;
           let inputBytes = 0;
           let started = false;
+          // A session run may write up to its own input budget; a plain run
+          // keeps the one megabyte it always had.
+          const inputLimit = request.session
+            ? request.session.inputLimitBytes
+            : 1024 * 1024;
           let grace: ReturnType<typeof setTimeout> | undefined;
           const stop = (outcome: ProcessResult['outcome']) => {
             if (closed || reason) return;
@@ -309,15 +353,27 @@ export async function createWindowsProcessRunner(
                   )
                     throw unavailable();
                   const data = Buffer.from(frame.data, 'base64');
-                  if (frame.event === 'stdout' && request.stream)
-                    request.stream.stdout(data);
                   const allowed = Math.max(
                     0,
                     Math.min(data.length, request.outputLimitBytes - retained),
                   );
-                  (frame.event === 'stdout' ? stdout : stderr).push(
-                    data.subarray(0, allowed),
-                  );
+                  if (request.session) {
+                    // A session run keeps byte counts only: no chunk array, no
+                    // aggregate string, no output in the result.
+                    // Bytes past the budget are never forwarded.
+                    const forwarded = data.subarray(0, allowed);
+                    if (allowed > 0) {
+                      if (frame.event === 'stdout')
+                        request.stream?.stdout(forwarded);
+                      else request.stream?.stderr?.(forwarded);
+                    }
+                  } else {
+                    if (frame.event === 'stdout' && request.stream)
+                      request.stream.stdout(data);
+                    (frame.event === 'stdout' ? stdout : stderr).push(
+                      data.subarray(0, allowed),
+                    );
+                  }
                   retained += allowed;
                   if (allowed !== data.length) stop('output_limit');
                 } else if (frame.event === 'result') {
@@ -351,7 +407,7 @@ export async function createWindowsProcessRunner(
                       typeof data !== 'string' ||
                       Buffer.byteLength(data, 'utf8') > 32 * 1024 ||
                       (inputBytes += Buffer.byteLength(data, 'utf8')) >
-                        1024 * 1024
+                        inputLimit
                     ) {
                       stop('output_limit');
                       return;
