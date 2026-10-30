@@ -27,6 +27,10 @@ export function isManagedPackage(
 
 // The results of the file verification of the hub.
 type VerifyResult = 'verified' | 'package_modified' | 'invalid_configuration';
+// Session results belong to one revision: a replace bumps the revision, so
+// the results of the old package never stick to the new one.
+const sessionKey = (connector: ManagedConnector) =>
+  `${connector.id}:${connector.revision}`;
 // What the managed panel of a package connector always says.
 const MANAGED_PANEL =
   "Managed package: the hub's node.exe, the --no-global-search-paths flag and the entry file are fixed by the install; editing can change the name, description, enabled state, the arguments after the entry and the environment.";
@@ -164,7 +168,7 @@ export function ConnectorList({
       );
       setVerifications((current) => ({
         ...current,
-        [connector.id]: result.result,
+        [sessionKey(connector)]: result.result,
       }));
     } catch (failure) {
       setError(
@@ -181,7 +185,7 @@ export function ConnectorList({
     setError('');
     setUpdates((current) => ({
       ...current,
-      [connector.id]: { state: 'checking' },
+      [sessionKey(connector)]: { state: 'checking' },
     }));
     const controller = new AbortController();
     aborts.current.add(controller);
@@ -196,7 +200,7 @@ export function ConnectorList({
         (next) => {
           setPackageJobs((current) => ({
             ...current,
-            [connector.id]: next,
+            [sessionKey(connector)]: next,
           }));
         },
         controller.signal,
@@ -206,7 +210,7 @@ export function ConnectorList({
         const version = final.preview.version;
         setUpdates((current) => ({
           ...current,
-          [connector.id]: {
+          [sessionKey(connector)]: {
             state: version === record.version ? 'up_to_date' : 'found',
             version,
           },
@@ -215,13 +219,13 @@ export function ConnectorList({
       }
       setUpdates((current) => ({
         ...current,
-        [connector.id]: { state: 'failed' },
+        [sessionKey(connector)]: { state: 'failed' },
       }));
       setError(packageErrorText(final.error ?? 'install_failed'));
     } catch (failure) {
       setUpdates((current) => ({
         ...current,
-        [connector.id]: { state: 'failed' },
+        [sessionKey(connector)]: { state: 'failed' },
       }));
       setError(
         failure instanceof Error
@@ -264,8 +268,8 @@ export function ConnectorList({
               : connector.executionMode === 'docker'
                 ? connector.image
                 : connector.endpoint;
-          const verification = verifications[connector.id];
-          const update = updates[connector.id];
+          const verification = verifications[sessionKey(connector)];
+          const update = updates[sessionKey(connector)];
           const reinstall =
             managed &&
             (verification === 'package_modified' ||
@@ -422,11 +426,15 @@ export function ConnectorList({
                     </p>
                   )}
                   {update?.state === 'checking' &&
-                    packageJobs[connector.id] && (
+                    packageJobs[sessionKey(connector)] && (
                       <p role="status" className="notice">
                         Update lookup:{' '}
-                        {packageJobs[connector.id]!.phase.replaceAll('_', ' ')}{' '}
-                        · {packageJobs[connector.id]!.progress.packages}{' '}
+                        {packageJobs[sessionKey(connector)]!.phase.replaceAll(
+                          '_',
+                          ' ',
+                        )}{' '}
+                        ·{' '}
+                        {packageJobs[sessionKey(connector)]!.progress.packages}{' '}
                         packages
                       </p>
                     )}
