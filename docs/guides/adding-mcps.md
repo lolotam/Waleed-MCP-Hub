@@ -90,8 +90,11 @@ accepts a personal access token or API key in a header. If it does, use
 
 The hub never runs an `npx`, `npm`, `.cmd` or `.bat` command you give it, because
 those can download and run different code each time. Instead it installs the
-package itself with its own bundled npm (install scripts off), from a frozen
-dependency tree you review first, and runs the result with its own `node.exe`.
+package itself with its own bundled npm (install scripts off). Look up resolves
+and freezes the whole dependency tree before you approve; the preview shows a
+summary of it (version, package count, size, lock hash), not each dependency's
+name. Install uses exactly that frozen tree, and the hub runs the result with its
+own `node.exe`.
 
 1. **Connectors → Add Manual MCP** → **Connection type**
    `npm package — managed install`.

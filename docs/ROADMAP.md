@@ -31,8 +31,8 @@ targets from one screen.
 
 1. **Run npm and Python packages directly.** Most servers are published as
    `npx -y pkg` or `uvx pkg`. **npm: done (F01, D024).** The hub looks up an exact
-   version and its full dependency tree, shows it for review, installs it from the
-   frozen lock into its own folder, and checks every file before each launch
+   version and freezes its full dependency tree, shows a summary for review, installs
+   it from the frozen lock into its own folder, and checks every file before each launch
    ([guide](guides/adding-mcps.md#npm-package-npx)). **Python: next (F01b)**, after
    decisions on interpreter provenance, wheel targeting and credential isolation.
    Until then, `uvx` servers are installed by hand.
