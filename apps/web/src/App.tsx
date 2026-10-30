@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   BootstrapSchema,
   type Bootstrap,
@@ -14,6 +14,7 @@ import {
   type PackageProposal,
 } from '@waleed/contracts';
 import { api, sessionReady } from './api.js';
+import { latestRunner, untilAborted } from './latest.js';
 import { Icon } from './Icon.js';
 import { ProfileDialog } from './ProfileDialog.js';
 import { DiscoveryPanel } from './DiscoveryPanel.js';
@@ -64,26 +65,6 @@ const agentNames: Record<string, string> = {
 // The longest wait on one full refresh of the hub state.
 const REFRESH_LIMIT_MS = 20_000;
 
-// Waits for a promise until the signal aborts, then rejects with its reason.
-// The promise itself keeps running.
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal) {
-  return new Promise<T>((resolve, reject) => {
-    if (signal.aborted) return reject(signal.reason);
-    const stop = () => reject(signal.reason);
-    signal.addEventListener('abort', stop, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener('abort', stop);
-        resolve(value);
-      },
-      (failure: unknown) => {
-        signal.removeEventListener('abort', stop);
-        reject(failure);
-      },
-    );
-  });
-}
-
 export function App() {
   const [page, setPage] = useState<Page>('Connectors');
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -113,105 +94,88 @@ export function App() {
   const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
   const [search, setSearch] = useState('');
 
-  // The newest refresh owns the page: a new one aborts the one before it,
-  // and an older one that settles late commits nothing, not even its error
-  // or the end of loading.
-  const latestRefresh = useRef<{ controller: AbortController } | null>(null);
-  const refresh = useCallback(async () => {
-    latestRefresh.current?.controller.abort();
-    const own = { controller: new AbortController() };
-    latestRefresh.current = own;
-    const current = () => latestRefresh.current === own;
-    // Every wait is bounded, so a stalled hub never leaves the page loading.
-    const timer = window.setTimeout(
-      () =>
-        own.controller.abort(
-          new DOMException('The refresh timed out.', 'TimeoutError'),
-        ),
-      REFRESH_LIMIT_MS,
-    );
-    const signal = own.controller.signal;
-    setLoading(true);
-    setError('');
-    try {
-      // The session request is shared and keeps running for a later refresh;
-      // only this wait on it is bounded.
-      await untilAborted(sessionReady, signal);
-      const [
-        info,
-        profileResult,
-        agentResult,
-        events,
-        security,
-        recovery,
-        connectorResult,
-      ] = await Promise.all([
-        api('/api/bootstrap', undefined, signal),
-        api<{
-          profiles: Profile[];
-          revision: number;
-          materializations: Array<Materialization & { stale: boolean }>;
-        }>('/api/profiles', undefined, signal),
-        api<{ agents: Array<AgentObservation & Partial<DiscoveredAgent>> }>(
-          '/api/agents',
-          undefined,
-          signal,
-        ),
-        api<{ events: HubState['activity'] }>(
-          '/api/activity',
-          undefined,
-          signal,
-        ),
-        api<{ events: SecurityEvent[] }>(
-          '/api/security-activity',
-          undefined,
-          signal,
-        ),
-        api<{ blocked: boolean }>('/api/recovery', undefined, signal),
-        api<{
-          connectors: ManagedConnector[];
-          observations: CapabilityObservation[];
-        }>('/api/connectors', undefined, signal),
+  // The newest refresh owns the page, and every refresh is bounded, so a
+  // stalled hub never leaves the page loading. See latestRunner.
+  const [runRefresh] = useState(() => latestRunner(REFRESH_LIMIT_MS));
+  const refresh = useCallback(
+    () =>
+      runRefresh({
+        begin: () => {
+          setLoading(true);
+          setError('');
+        },
+        work: (signal, current) => loadHub(signal, current),
+        fail: (error) =>
+          setError(
+            error instanceof DOMException && error.name === 'TimeoutError'
+              ? 'The hub did not answer in time. Refresh to retry.'
+              : error instanceof Error
+                ? error.message
+                : 'The hub is unavailable.',
+          ),
+        end: () => setLoading(false),
+      }),
+    [runRefresh],
+  );
+  async function loadHub(signal: AbortSignal, current: () => boolean) {
+    // The session request is shared and keeps running for a later refresh;
+    // only this wait on it is bounded.
+    await untilAborted(sessionReady, signal);
+    const [
+      info,
+      profileResult,
+      agentResult,
+      events,
+      security,
+      recovery,
+      connectorResult,
+    ] = await Promise.all([
+      api('/api/bootstrap', undefined, signal),
+      api<{
+        profiles: Profile[];
+        revision: number;
+        materializations: Array<Materialization & { stale: boolean }>;
+      }>('/api/profiles', undefined, signal),
+      api<{ agents: Array<AgentObservation & Partial<DiscoveredAgent>> }>(
+        '/api/agents',
+        undefined,
+        signal,
+      ),
+      api<{ events: HubState['activity'] }>('/api/activity', undefined, signal),
+      api<{ events: SecurityEvent[] }>(
+        '/api/security-activity',
+        undefined,
+        signal,
+      ),
+      api<{ blocked: boolean }>('/api/recovery', undefined, signal),
+      api<{
+        connectors: ManagedConnector[];
+        observations: CapabilityObservation[];
+      }>('/api/connectors', undefined, signal),
+    ]);
+    if (!current()) return;
+    setBootstrap({
+      ...BootstrapSchema.parse(info),
+      revision: profileResult.revision,
+    });
+    setProfiles(profileResult.profiles);
+    setConnectors(connectorResult.connectors);
+    setObservations(connectorResult.observations);
+    setMaterializations(profileResult.materializations);
+    setAgents(agentResult.agents);
+    setActivity(events.events);
+    setSecurityEvents(security.events);
+    setRecoveryBlocked(recovery.blocked);
+    if (BootstrapSchema.parse(info).capabilities.discovery) {
+      const [snapshot, preview] = await Promise.all([
+        api<DiscoverySnapshot>('/api/discovery', undefined, signal),
+        api<AdoptionPreview>('/api/adoption/preview', undefined, signal),
       ]);
       if (!current()) return;
-      setBootstrap({
-        ...BootstrapSchema.parse(info),
-        revision: profileResult.revision,
-      });
-      setProfiles(profileResult.profiles);
-      setConnectors(connectorResult.connectors);
-      setObservations(connectorResult.observations);
-      setMaterializations(profileResult.materializations);
-      setAgents(agentResult.agents);
-      setActivity(events.events);
-      setSecurityEvents(security.events);
-      setRecoveryBlocked(recovery.blocked);
-      if (BootstrapSchema.parse(info).capabilities.discovery) {
-        const [snapshot, preview] = await Promise.all([
-          api<DiscoverySnapshot>('/api/discovery', undefined, signal),
-          api<AdoptionPreview>('/api/adoption/preview', undefined, signal),
-        ]);
-        if (!current()) return;
-        setDiscovery(snapshot);
-        setAdoption(preview);
-      }
-    } catch (error) {
-      if (!current()) return;
-      setError(
-        error instanceof DOMException && error.name === 'TimeoutError'
-          ? 'The hub did not answer in time. Refresh to retry.'
-          : error instanceof Error
-            ? error.message
-            : 'The hub is unavailable.',
-      );
-    } finally {
-      window.clearTimeout(timer);
-      if (current()) {
-        latestRefresh.current = null;
-        setLoading(false);
-      }
+      setDiscovery(snapshot);
+      setAdoption(preview);
     }
-  }, []);
+  }
   useEffect(() => {
     void refresh();
   }, [refresh]);

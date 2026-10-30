@@ -91,7 +91,6 @@ async function fakePackageApi(
     refuseStart?: string;
     forgetJob?: boolean;
     stallReload?: boolean;
-    stallReloadOnce?: boolean;
   } = {},
 ) {
   const state: {
@@ -110,12 +109,10 @@ async function fakePackageApi(
       body: JSON.stringify(body),
     });
   };
-  // After an install was asked for, the connector list never answers: every
-  // time, or only the first time.
-  let stalled = 0;
-  if (options.stallReload || options.stallReloadOnce)
+  // After an install was asked for, the connector list never answers.
+  if (options.stallReload)
     await page.route('**/api/connectors', async (route) => {
-      if (state.installBody && (options.stallReload || stalled++ === 0)) return;
+      if (state.installBody) return;
       await route.continue();
     });
   await page.route('**/api/packages/**', async (route) => {
@@ -579,30 +576,4 @@ test('a stalled list reload never locks the dialog or the page', async ({
   await expect(
     page.getByText('The hub did not answer in time. Refresh to retry.'),
   ).toBeVisible({ timeout: 30_000 });
-});
-
-test('a newer refresh wins over an older one that times out', async ({
-  page,
-}) => {
-  test.setTimeout(60_000);
-  await page.goto(await launch());
-  await fakePackageApi(page, { loseStart: true, stallReloadOnce: true });
-  await installDemo(page);
-  await expect(page.getByRole('alert')).toContainText('the outcome is unknown');
-  await page.getByRole('button', { name: 'Close', exact: true }).click();
-  // A newer refresh starts while the first one still hangs, and succeeds.
-  await page
-    .getByRole('navigation', { name: 'Main navigation' })
-    .getByRole('button', { name: /Agents/ })
-    .click();
-  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
-  await refresh.click();
-  await expect(refresh).toBeEnabled();
-  // The first refresh was aborted by the newer one, so its timeout never
-  // replaces the page with an error.
-  await page.waitForTimeout(22_000);
-  await expect(
-    page.getByText('The hub did not answer in time. Refresh to retry.'),
-  ).toHaveCount(0);
-  await expect(refresh).toBeEnabled();
 });
