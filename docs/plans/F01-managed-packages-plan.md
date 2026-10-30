@@ -68,7 +68,8 @@ trustedPackage? }`: a `package` is accepted only when `trustedPackage` equals it
   three editing rules exactly (refuse a supplied `package`; for a managed connector
   refuse mode/executable/fixed-argument changes and rebuild from allowed fields plus
   stored provenance; never add one to an unmanaged connector).
-- `/^NODE_/i` environment names refused on package connectors in `edit_connector`
+- `/^NODE_/i` and OpenSSL (`OPENSSL_CONF`, `OPENSSL_MODULES`, `OPENSSL_ENGINES`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`) environment names refused on package connectors in `edit_connector`
   and in the credential API before any secret is stored or state committed.
 - Internal `replacePackage` operation (used by T7) with a connector-revision check.
 - Acceptance: any package field change changes `definitionHash`; a registry
@@ -92,7 +93,7 @@ Files: new `packages/hub-core/src/packages/store.ts`, new
   re-reads the registry under the lock (rules in the spec).
 - Manifest builder with caps, link and `nlink` rejection; `verifyPackage(connector)`
   (marker, links, lock hash, manifest, no parent `node_modules`, fixed
-  `--no-global-search-paths` argument; a `/^NODE_/i` env name →
+  `--no-global-search-paths` argument; a refused env name →
   `invalid_configuration`).
 - Call `verifyPackage` before secret resolution at the three launch points and before
   discovery in `checks.ts`; a separate `verifyPackageFiles` export for Verify files.

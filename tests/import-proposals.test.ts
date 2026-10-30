@@ -195,8 +195,8 @@ describe(
                 command: 'npx',
                 args: ['-y', 'pkg@1.2.3'],
                 env: {
-                  Z_TOKEN: 'secret-val-z',
-                  A_TOKEN: 'secret-val-a',
+                  Z_TOKEN: 'placeholder-z',
+                  A_TOKEN: 'placeholder-a',
                 },
                 environmentLiterals: {
                   NODE_ENV: 'production',

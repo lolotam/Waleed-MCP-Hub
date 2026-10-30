@@ -44,9 +44,27 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
       await writeFile(join(root1, 'sub', 'b.txt'), Buffer.alloc(200));
       await writeFile(join(root2, 'c.txt'), Buffer.alloc(500));
 
+      // Three files and the folder "sub": a folder counts as one entry.
       const result = await scanRoots([root1, root2]);
-      expect(result.files).toBe(3);
+      expect(result.files).toBe(4);
       expect(result.bytes).toBe(800);
+    });
+
+    it('counts every folder, so a tree of empty folders reaches the cap', async () => {
+      const root = join(await createTempDir(), 'root');
+      for (let index = 0; index < 50; index++)
+        await mkdir(join(root, `d${index}`, 'inner'), { recursive: true });
+
+      const result = await scanRoots([root]);
+      expect(result.files).toBe(100);
+      expect(result.bytes).toBe(0);
+
+      const watched = await withWatchdog(
+        { roots: [root], maxBytes: 10_000, maxFiles: 99, intervalMs: 15 },
+        new AbortController().signal,
+        async () => 'done',
+      );
+      expect(watched.breached).toBe(true);
     });
 
     it('counts a missing root as 0', async () => {
@@ -238,6 +256,7 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
     it('starts the next scan at least intervalMs after the previous one finished', async () => {
       const intervals: number[] = [];
       let lastFinishedAt = 0;
+      let runSettled = false;
       const intervalMs = 40;
 
       await withWatchdog(
@@ -248,7 +267,9 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
           intervalMs,
           scan: async () => {
             const now = Date.now();
-            if (lastFinishedAt > 0) {
+            // The final measurement after the run is not a loop scan: only
+            // the spacing of the loop is measured here.
+            if (lastFinishedAt > 0 && !runSettled) {
               intervals.push(now - lastFinishedAt);
             }
             await new Promise((r) => setTimeout(r, 10));
@@ -260,6 +281,7 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
         async () => {
           // Long enough that three spaced scans fit even on a loaded machine.
           await new Promise((r) => setTimeout(r, 600));
+          runSettled = true;
           return 'ok';
         },
       );
@@ -271,7 +293,7 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
       }
     });
 
-    it('starts no scan after the run settles', async () => {
+    it('measures the finished tree once after the run settles and never loops again', async () => {
       let scansAfterSettle = 0;
       let runSettled = false;
 
@@ -295,7 +317,62 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
       );
 
       await new Promise((r) => setTimeout(r, 100));
-      expect(scansAfterSettle).toBe(0);
+      expect(scansAfterSettle).toBe(1);
+    });
+
+    it('reports a breach of the finished tree although the run ended while a scan was in flight', async () => {
+      let runSettled = false;
+      let scans = 0;
+      const result = await withWatchdog(
+        {
+          roots: ['dummy'],
+          maxBytes: 10_000,
+          maxFiles: 1000,
+          intervalMs: 5,
+          scan: async () => {
+            scans += 1;
+            // The scan in flight when the run ends sees the small tree; the
+            // tree is over the cap once the run is over.
+            await new Promise((r) => setTimeout(r, 30));
+            return runSettled
+              ? { bytes: 50_000, files: 1 }
+              : { bytes: 1, files: 1 };
+          },
+        },
+        new AbortController().signal,
+        async () => {
+          await new Promise((r) => setTimeout(r, 10));
+          runSettled = true;
+          return 'over';
+        },
+      );
+
+      expect(scans).toBeGreaterThanOrEqual(2);
+      expect(result.breached).toBe(true);
+      expect(result.value).toBe('over');
+    });
+
+    it('reports a free-space breach of the finished run', async () => {
+      let runSettled = false;
+      const result = await withWatchdog(
+        {
+          roots: ['dummy'],
+          maxBytes: 10_000,
+          maxFiles: 1000,
+          intervalMs: 1000,
+          scan: async () => ({ bytes: 1, files: 1 }),
+          minFreeBytes: 1000,
+          freePath: 'dummy-path',
+          free: async () => (runSettled ? 10 : 5000),
+        },
+        new AbortController().signal,
+        async () => {
+          runSettled = true;
+          return 'low';
+        },
+      );
+
+      expect(result.breached).toBe(true);
     });
 
     it('forwards caller abort to the run signal while breached stays false', async () => {

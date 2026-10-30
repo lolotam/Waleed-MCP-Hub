@@ -4,9 +4,10 @@ import { dirname, join, resolve } from 'node:path';
 import { PackageFault } from './fault.js';
 
 // The caps of the watchdog: the unpacked tree plus the tarballs the cache
-// keeps beside it.
+// keeps beside it. The entry cap counts folders as well as files, so it sits
+// above the 50 000 files a tree may hold.
 export const WATCHDOG_MAX_BYTES = 800 * 1024 * 1024;
-export const WATCHDOG_MAX_FILES = 60_000;
+export const WATCHDOG_MAX_FILES = 80_000;
 
 export interface WatchdogScan {
   bytes: number;
@@ -34,9 +35,10 @@ const code = (error: unknown): string | undefined =>
 const vanishing = (error: unknown): boolean =>
   ['ENOENT', 'ENOTDIR', 'EPERM', 'EBUSY', 'EACCES'].includes(code(error) ?? '');
 
-// The measurement of the folders npm writes to. Every entry that is not a
-// folder counts as one file with its size; a link counts as one file and is
-// never entered; a folder that is gone counts as nothing.
+// The measurement of the folders npm writes to. Every entry counts as one
+// file: a folder too, so a tree of empty folders cannot pass the cap unseen.
+// A file adds its size; a link counts and is never entered; a folder that is
+// gone counts as nothing.
 export const scanRoots = async (
   roots: readonly string[],
 ): Promise<WatchdogScan> => {
@@ -64,6 +66,7 @@ export const scanRoots = async (
         throw error;
       }
       if (info.isDirectory()) {
+        files += 1;
         await walk(path);
         continue;
       }
@@ -140,6 +143,21 @@ export async function withWatchdog<T>(
   if (signal.aborted) controller.abort();
   else signal.addEventListener('abort', onAbort, { once: true });
 
+  // The measurement against the caps and the reserve. A scan or a free-space
+  // reading that fails counts as a breach: the hub fails closed.
+  const passed = async (): Promise<boolean> => {
+    try {
+      const result = await scan(options.roots);
+      if (result.bytes > options.maxBytes || result.files > options.maxFiles)
+        return true;
+      if (options.minFreeBytes !== undefined && options.freePath !== undefined)
+        return (await free(options.freePath)) < options.minFreeBytes;
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
   // The scans never overlap: the next one starts after the previous one
   // finished and after the delay.
   const loop = async (): Promise<void> => {
@@ -197,6 +215,11 @@ export async function withWatchdog<T>(
   try {
     const value = await run(controller.signal);
     stop();
+    // A run that ends while a scan is in flight would drop that scan's
+    // result: the loop is awaited and the finished tree is measured once
+    // more, so a tree over the caps at the end is still a breach.
+    await scanning;
+    if (!breached && (await passed())) breached = true;
     return { value, breached };
   } catch (error) {
     stop();

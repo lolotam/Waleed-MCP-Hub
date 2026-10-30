@@ -104,8 +104,10 @@ package?: {
   3. if the stored connector has no `package`, the edit can never add one.
      There is no conversion between managed and unmanaged connectors by editing.
 - Environment names matching `/^NODE_/i` (for example `NODE_OPTIONS`, `NODE_PATH`,
-  `NODE_EXTRA_CA_CERTS`) are refused on package connectors, so nothing can preload
-  code or change TLS trust from outside the install. The same rule applies on every
+  `NODE_EXTRA_CA_CERTS`) and the OpenSSL variables `OPENSSL_CONF`,
+  `OPENSSL_MODULES`, `OPENSSL_ENGINES`, `SSL_CERT_FILE` and `SSL_CERT_DIR` are
+  refused on package connectors, so nothing can preload code or provider modules or
+  change TLS trust from outside the install. The same rule applies on every
   write path: `edit_connector`, the install/replace save, and the credential API
   (`auth/credentials.ts`), which checks it before storing any secret or committing
   state. Launch verification checks it again; a violation there is
@@ -288,7 +290,7 @@ the same steps and never starts a process:
    install, up to the drive root, may contain a `node_modules` entry; the arguments
    start with `--no-global-search-paths` (global folders such as
    `<node.exe dir>\lib\node` and `HOME`-based ones are never searched); and the
-   target environment carries no `/^NODE_/i` name (that last case is
+   target environment carries no refused name (`/^NODE_/i` or an OpenSSL variable) (that last case is
    `invalid_configuration`). Tests plant an omitted optional dependency in a parent
    `node_modules` (expects `package_modified`) and one beside the bundled runtime in
    `<node.exe dir>\lib\node` (expects the server not to load it).
