@@ -108,9 +108,11 @@ export async function startAllowListProxy(
     // A CONNECT hands over the raw client socket.
     const client = duplex as Socket;
     const authority = (request.url ?? '').slice(0, 300);
-    if (attempts.length < MAX_RECORDED) attempts.push(authority);
     client.on('error', () => client.destroy());
+    // Only the npm run knows the token: a request without it is refused and
+    // not recorded, so another local process cannot make a run look foreign.
     if (!authorized(request)) return refuse(client, 407);
+    if (attempts.length < MAX_RECORDED) attempts.push(authority);
     const entry = target(authority);
     if (!entry) return refuse(client, 403);
     if (exceeded || tunnels.size >= maxTunnels) return refuse(client, 503);

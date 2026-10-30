@@ -191,7 +191,8 @@ async function removeEntryTree(path: string): Promise<boolean> {
       await rmdir(path);
     } catch (error) {
       if (code(error) === 'ENOENT') return true;
-      if (busy(error)) return false;
+      // An entry created after the listing: the tree is kept for a later pass.
+      if (busy(error) || code(error) === 'ENOTEMPTY') return false;
       throw error;
     }
     return true;
@@ -265,7 +266,6 @@ export async function reconcilePackages(
     for (const connector of state.connectors)
       if (connector.executionMode === 'native' && connector.package)
         referenced.add(connector.package.installId);
-    const active = options.activeJobs();
     // A lookup that starts during the pass must not lose its folder while npm
     // runs in it: the live jobs are read again before every deletion that
     // depends on a job id.
@@ -289,7 +289,7 @@ export async function reconcilePackages(
       // marker and keeps failing verification until it is reinstalled.
       if (referenced.has(installId)) continue;
       const jobId = await readMarker(options.packagesDir, installId);
-      if (jobId && active.has(jobId)) continue;
+      if (jobId && isActive(jobId)) continue;
       await removeMarker(options.packagesDir, installId);
     }
     for (const entry of entries) {

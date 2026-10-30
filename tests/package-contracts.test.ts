@@ -590,11 +590,12 @@ describe('F01 package contracts', () => {
     const validProposal: PackageProposal = {
       name: 'srv',
       version: null,
+      requestedVersion: '^1.2.0',
       arguments: ['--stdio'],
       envNames: ['API_KEY'],
     };
 
-    it('accepts version: null', () => {
+    it('accepts version: null with the range the entry asked for', () => {
       expect(PackageProposalSchema.parse(validProposal)).toEqual(validProposal);
     });
 
@@ -602,9 +603,17 @@ describe('F01 package contracts', () => {
       expect(
         PackageProposalSchema.safeParse({
           ...validProposal,
-          env: { API_KEY: 'placeholder-a2' },
+          env: { LOG_LEVEL: 'debug' },
         }).success,
       ).toBe(false);
+    });
+
+    it('takes only the upper-case env names Install accepts', () => {
+      for (const envNames of [['apiKey'], ['Api_Key'], ['1_KEY']])
+        expect(
+          PackageProposalSchema.safeParse({ ...validProposal, envNames })
+            .success,
+        ).toBe(false);
     });
   });
 

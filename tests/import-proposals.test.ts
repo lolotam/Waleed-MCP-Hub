@@ -87,6 +87,7 @@ describe(
         expect(entry.packageProposal).toEqual({
           name: 'pkg',
           version: '1.2.3',
+          requestedVersion: null,
           arguments: ['--flag'],
           envNames: ['API_TOKEN'],
         });
@@ -120,16 +121,24 @@ describe(
     });
 
     it('handles package versions, scopes, --yes flag, and environment literal names', () => {
-      for (const spec of ['pkg', 'pkg@latest', 'pkg@^1.2.0']) {
+      for (const [spec, requestedVersion] of [
+        ['pkg', null],
+        ['pkg@latest', 'latest'],
+        ['pkg@^1.2.0', '^1.2.0'],
+        ['pkg@next', 'next'],
+      ] as const) {
         const draft = normalizeImport(
           JSON.stringify({
             mcpServers: { test: { command: 'npx', args: [spec] } },
           }),
         );
         try {
+          // A range or tag is kept for the user to see; it is never treated
+          // as the exact version Install runs.
           expect(draft.entries[0]!.packageProposal).toMatchObject({
             name: 'pkg',
             version: null,
+            requestedVersion,
           });
         } finally {
           clearImport(draft);
@@ -148,6 +157,7 @@ describe(
           expect(draft.entries[0]!.packageProposal).toEqual({
             name: '@scope/pkg',
             version: '2.0.0',
+            requestedVersion: null,
             arguments: [],
             envNames: [],
           });
@@ -175,6 +185,7 @@ describe(
           expect(draftYes.entries[0]!.packageProposal).toEqual({
             name: 'pkg',
             version: '1.0.0',
+            requestedVersion: null,
             arguments: ['--flag'],
             envNames: [],
           });
@@ -206,9 +217,10 @@ describe(
           }),
         );
         try {
+          // NODE_ENV is refused on package connectors, so the proposal does
+          // not ask for it.
           expect(draft.entries[0]!.packageProposal?.envNames).toEqual([
             'A_TOKEN',
-            'NODE_ENV',
             'Z_TOKEN',
           ]);
         } finally {
@@ -238,12 +250,19 @@ describe(
         const draft = normalizeImport(
           JSON.stringify({
             mcpServers: {
-              test: { command: 'npx', args },
+              test: {
+                command: 'npx',
+                args,
+                env: { API_TOKEN: 'placeholder-refused' },
+              },
             },
           }),
         );
         try {
           const entry = draft.entries[0]!;
+          // A refused entry can never use its values, so none stays behind.
+          expect(draft.secrets.size, `secrets kept for ${label}`).toBe(0);
+          expect(draft.references, `references kept for ${label}`).toEqual([]);
           expect(
             entry.definition,
             `definition should be null for ${label}`,
@@ -395,6 +414,7 @@ describe(
       expect(proposalEntry.packageProposal).toEqual({
         name: 'pkg',
         version: '1.2.3',
+        requestedVersion: null,
         arguments: [],
         envNames: [],
       });

@@ -9,6 +9,7 @@ import {
   EndpointSchema,
   ImportDefinitionSchema,
   PackageProposalSchema,
+  isPackageEnvName,
   type ImportDefinition,
   type ImportEntry,
   type ImportIssue,
@@ -63,10 +64,11 @@ const literalValues: Record<string, readonly string[]> = {
   CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: ['1'],
 };
 
-// The proposal contract owns the package name and the exact-version shape; the
-// import layer never re-implements either rule.
+// The proposal contract owns the package name, the exact-version shape and the
+// env name rule; the import layer never re-implements them.
 const proposalName = PackageProposalSchema.shape.name;
 const proposalVersion = PackageProposalSchema.shape.version;
+const proposalEnvName = PackageProposalSchema.shape.envNames.element;
 // A dist-tag or a semver range: no scheme, path or separator characters, so a
 // git, URL, file or alias spec can never reach the proposal.
 const rangeOrTag = /^[0-9A-Za-z*^~<>=][0-9A-Za-z.*+~^<>=| -]*$/;
@@ -94,17 +96,26 @@ function packageProposal(
     (!raw || raw.length > 256 || !rangeOrTag.test(raw) || /^\s|\s$/.test(raw))
   )
     return null;
+  const exact = raw !== null && proposalVersion.safeParse(raw).success;
   const parsed = PackageProposalSchema.safeParse({
     name,
-    version:
-      raw !== null && proposalVersion.safeParse(raw).success ? raw : null,
+    version: exact ? raw : null,
+    requestedVersion: exact ? null : raw,
     arguments: packageArgs.slice(1),
+    // A name Install rejects is left out: one that is not upper case, and one
+    // a package connector refuses (NODE_* and the OpenSSL variables).
     envNames: [
       ...new Set([
         ...Object.keys(secretBindings),
         ...Object.keys(environmentLiterals),
       ]),
-    ].sort(),
+    ]
+      .filter(
+        (envName) =>
+          proposalEnvName.safeParse(envName).success &&
+          !isPackageEnvName(envName),
+      )
+      .sort(),
   });
   return parsed.success ? parsed.data : null;
 }
@@ -693,22 +704,22 @@ export function normalizeImport(source: string): PrivateImport {
         const proposal = issues.length
           ? null
           : packageProposal(npxArguments, secretBindings, environmentLiterals);
+        // The extracted values are discarded whether or not a proposal comes
+        // out: the install form asks for them again, and a refused entry can
+        // never use them, so nothing of a value stays in the draft.
+        const prefix = `draft-${key}-`;
+        for (const [id, value] of [...draft.secrets])
+          if (id.startsWith(prefix)) {
+            value.fill(0);
+            draft.secrets.delete(id);
+          }
+        draft.references = draft.references.filter(
+          (reference) => !reference.id.startsWith(prefix),
+        );
+        warnings.delete('secrets_memory_only');
         if (proposal) {
           result.packageProposal = proposal;
           result.selected = false;
-          // The extracted values are discarded: the install form asks for them
-          // again, so nothing of a value reaches the DTO, the draft or the
-          // proposal.
-          const prefix = `draft-${key}-`;
-          for (const [id, value] of [...draft.secrets])
-            if (id.startsWith(prefix)) {
-              value.fill(0);
-              draft.secrets.delete(id);
-            }
-          draft.references = draft.references.filter(
-            (reference) => !reference.id.startsWith(prefix),
-          );
-          warnings.delete('secrets_memory_only');
         } else if (!inline) issue('invalid_command', 'package_spec');
       }
       // Field labels are metadata only. Mask any known extracted value repeated

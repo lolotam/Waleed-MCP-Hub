@@ -1,5 +1,5 @@
-import type { Stats } from 'node:fs';
-import { lstat, readdir, statfs } from 'node:fs/promises';
+import type { Dir, Dirent, Stats } from 'node:fs';
+import { lstat, opendir, statfs } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { PackageFault } from './fault.js';
 
@@ -74,33 +74,47 @@ export const scanRoots = async (
     denied += 1;
     if (denied > WATCHDOG_MAX_UNREADABLE) throw error;
   };
+  // A folder is read one entry at a time, so a folder of a million names
+  // costs no more memory than one entry, and the read stops at the cap.
   const walk = async (directory: string): Promise<void> => {
-    let names: string[];
+    let dir: Dir;
     try {
-      names = await readdir(directory);
+      dir = await opendir(directory);
     } catch (error) {
       if (vanishing(error)) return;
       deny(error);
       return;
     }
-    for (const name of names) {
-      if (over()) return;
-      const path = join(directory, name);
-      let info: Stats;
-      try {
-        info = await lstat(path);
-      } catch (error) {
-        if (vanishing(error)) continue;
-        deny(error);
-        files += 1;
-        continue;
+    try {
+      while (!over()) {
+        let entry: Dirent | null;
+        try {
+          entry = await dir.read();
+        } catch (error) {
+          // The folder went away or turned unreadable part way through.
+          if (!vanishing(error)) deny(error);
+          return;
+        }
+        if (entry === null) return;
+        const path = join(directory, entry.name);
+        let info: Stats;
+        try {
+          info = await lstat(path);
+        } catch (error) {
+          if (vanishing(error)) continue;
+          deny(error);
+          files += 1;
+          continue;
+        }
+        if (info.isDirectory()) {
+          files += 1;
+          await walk(path);
+          continue;
+        }
+        count(info);
       }
-      if (info.isDirectory()) {
-        files += 1;
-        await walk(path);
-        continue;
-      }
-      count(info);
+    } finally {
+      await dir.close().catch(() => undefined);
     }
   };
   for (const root of roots) {

@@ -65,13 +65,20 @@ export async function createHubServer(options: ServerOptions) {
     },
   });
 
+  // A request counts against its session only when the session is live: a
+  // made-up cookie counts against the address, so rotating cookie values
+  // cannot win a fresh budget.
+  const rateLimitKey = (request: FastifyRequest): string => {
+    const id = request.cookies.waleed_hub_session;
+    return id !== undefined && sessions.get(id) ? `session:${id}` : request.ip;
+  };
+
   // The rate limit of the package routes: sixty requests a minute per
   // session, and sixty a minute per address when there is no session.
   const packageRateLimit = {
     max: 60,
     timeWindow: '1 minute',
-    keyGenerator: (request: FastifyRequest) =>
-      request.cookies.waleed_hub_session ?? request.ip,
+    keyGenerator: rateLimitKey,
   };
 
   // The rate limit of the read-only package routes: the web UI polls the job
@@ -80,8 +87,7 @@ export async function createHubServer(options: ServerOptions) {
   const packageReadRateLimit = {
     max: 600,
     timeWindow: '1 minute',
-    keyGenerator: (request: FastifyRequest) =>
-      request.cookies.waleed_hub_session ?? request.ip,
+    keyGenerator: rateLimitKey,
   };
 
   const routes: Record<string, RefusalInput['route']> = {

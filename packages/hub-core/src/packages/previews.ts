@@ -32,7 +32,9 @@ export interface PreviewStore {
   // The job folder id of every stored record. A record that expired but was
   // not swept yet still counts: its folder is still on disk.
   jobIds(): ReadonlySet<string>;
-  dispose(): void;
+  // Forgets every preview and deletes its staging folder; a folder that cannot
+  // be removed stays for the reconciliation pass.
+  dispose(): Promise<void>;
   readonly ttlMs?: number;
 }
 
@@ -133,9 +135,11 @@ export function createPreviewStore(
     jobIds() {
       return new Set([...stored.values()].map((entry) => entry.record.jobId));
     },
-    dispose() {
+    async dispose() {
+      const jobIds = [...stored.values()].map((entry) => entry.record.jobId);
       for (const [previewId] of stored) forget(previewId);
       stored.clear();
+      await Promise.all(jobIds.map((jobId) => dropJob(jobId)));
     },
   };
 }

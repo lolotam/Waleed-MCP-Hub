@@ -42,6 +42,7 @@ import { createPreviewStore, type PreviewStore } from './previews.js';
 import { resolvePackage } from './resolve.js';
 import {
   createPackageLock,
+  jobDirectory,
   reconcilePackages,
   removeTree,
   type PackageLock,
@@ -62,9 +63,6 @@ const SAVE_RETRY_MS = 250;
 // The deadline of the npm self-test: it runs on its own signal, never on the
 // signal of a job.
 const SELF_TEST_TIMEOUT_MS = 60_000;
-// The folder of the self-test: a fixed id, so the reconciliation pass can
-// keep it while the test runs.
-const SELF_TEST_JOB_ID = '00000000-0000-4000-8000-000000000001';
 // The placeholder provenance of the dry run: a valid record that names no
 // package, so the plan can be built without the real install.
 const PLACEHOLDER_INTEGRITY = `sha512-${'A'.repeat(86)}==`;
@@ -179,16 +177,17 @@ export function createPackageService(
   // the first job runs npm. The test starts lazily, so creating the service
   // stays synchronous and cheap.
   let selfTestPromise: Promise<void> | null = null;
+  // The folder of the running self-test. A fresh id per test: a folder left
+  // by an earlier process is never active, so the reconciliation removes it.
+  let selfTestJobId: string | null = null;
 
   // The real self-test: the bundled npm in its own job folder, which is
-  // removed again when the test is over.
+  // removed again when the test is over, also when preparing it fails.
   const bundledSelfTest = async (): Promise<void> => {
-    const paths = await prepareJob(
-      adapter.packagesDir,
-      SELF_TEST_JOB_ID,
-      registry,
-    );
+    const jobId = randomUUID();
+    selfTestJobId = jobId;
     try {
+      const paths = await prepareJob(adapter.packagesDir, jobId, registry);
       await npmSelfTest({
         paths,
         registry,
@@ -197,7 +196,11 @@ export function createPackageService(
         nodeExecutable: adapter.nodeExecutable,
       });
     } finally {
-      await removeTree(paths.root, adapter.packagesDir).catch(() => false);
+      await removeTree(
+        jobDirectory(adapter.packagesDir, jobId),
+        adapter.packagesDir,
+      ).catch(() => false);
+      selfTestJobId = null;
     }
   };
 
@@ -868,9 +871,8 @@ export function createPackageService(
       if (entry.folderId) active.add(entry.folderId);
     }
     for (const id of previews.jobIds()) active.add(id);
-    // The folder of the self-test is never deleted by the reconciliation: it
-    // counts as active from the start, not only while the test runs.
-    active.add(SELF_TEST_JOB_ID);
+    // The folder of the self-test is kept while the test runs.
+    if (selfTestJobId !== null) active.add(selfTestJobId);
     return active;
   };
 
@@ -930,7 +932,7 @@ export function createPackageService(
       entry.controller.abort();
     }
     await Promise.allSettled([...records.values()].map((entry) => entry.done));
-    previews.dispose();
+    await previews.dispose();
     // The reconciliation of the startup and a running one finish before the
     // service ends.
     await startup.catch(() => undefined);

@@ -715,11 +715,24 @@ $stream = [System.IO.File]::Open('${unrefFile.replace(/'/g, "''")}', [System.IO.
     ]);
     processesToKill.push(ps);
 
+    // PowerShell that ends before LOCKED fails the test at once, with its
+    // exit code and error output, instead of waiting for the suite timeout.
+    let psErrors = '';
+    ps.stderr.on('data', (d: Buffer) => {
+      psErrors += d.toString();
+    });
     await new Promise<void>((resolve, reject) => {
-      ps.stdout.on('data', (d) => {
+      ps.stdout.on('data', (d: Buffer) => {
         if (d.toString().includes('LOCKED')) resolve();
       });
       ps.on('error', reject);
+      ps.on('exit', (exitCode) =>
+        reject(
+          new Error(
+            `PowerShell exited (${exitCode}) before LOCKED: ${psErrors}`,
+          ),
+        ),
+      );
     });
 
     // Verify on this machine that removeTree really returns false for it

@@ -253,7 +253,7 @@ describe('package-install', { timeout: 60_000 }, () => {
 
   afterEach(async () => {
     for (const store of previewStores) {
-      store.dispose();
+      await store.dispose();
     }
     previewStores.length = 0;
 
@@ -1103,50 +1103,62 @@ describe('package-install', { timeout: 60_000 }, () => {
       );
     });
 
-    it('fails with install_failed when _logs or .npmrc is inside node_modules', async () => {
-      const tempDir = await createTempDir();
-      const packagesDir = join(tempDir, 'packages');
-      await mkdir(packagesDir, { recursive: true });
+    it.each([
+      [
+        'a _logs folder',
+        (prefix: string) =>
+          mkdir(join(prefix, 'node_modules', '_logs'), { recursive: true }),
+      ],
+      [
+        'an .npmrc file',
+        (prefix: string) =>
+          writeFile(join(prefix, 'node_modules', 'srv', '.npmrc'), ''),
+      ],
+    ])(
+      'fails with install_failed when %s is inside node_modules',
+      async (_label, plant) => {
+        const tempDir = await createTempDir();
+        const packagesDir = join(tempDir, 'packages');
+        await mkdir(packagesDir, { recursive: true });
 
-      const registry = await createRegistry();
-      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
-      const { record, runner } = await buildPreview(
-        registry,
-        packagesDir,
-        previews,
-        {
-          runnerOptions: {
-            onCi: async (call) => {
-              await createDefaultCiFiles(call.prefixDir!, 'srv', '1.0.0', {
-                srv: 'bin/srv.js',
-              });
-              await mkdir(join(call.prefixDir!, 'node_modules', '_logs'), {
-                recursive: true,
-              });
+        const registry = await createRegistry();
+        const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+        const { record, runner } = await buildPreview(
+          registry,
+          packagesDir,
+          previews,
+          {
+            runnerOptions: {
+              onCi: async (call) => {
+                await createDefaultCiFiles(call.prefixDir!, 'srv', '1.0.0', {
+                  srv: 'bin/srv.js',
+                });
+                await plant(call.prefixDir!);
+              },
             },
           },
-        },
-      );
+        );
 
-      await expect(
-        installPackage({
-          record,
-          entry: 'srv',
-          acknowledgedWarnings: record.preview.warnings,
-          packagesDir,
-          lock: createPackageLock(),
-          signal: new AbortController().signal,
-          save: createSaveSpy(),
-          runner,
-        }),
-      ).rejects.toMatchObject({ code: 'install_failed' });
+        await expect(
+          installPackage({
+            record,
+            entry: 'srv',
+            acknowledgedWarnings: record.preview.warnings,
+            packagesDir,
+            lock: createPackageLock(),
+            signal: new AbortController().signal,
+            save: createSaveSpy(),
+            runner,
+          }),
+        ).rejects.toMatchObject({ code: 'install_failed' });
 
-      const entries = await readdir(packagesDir);
-      expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
-      expect(await pathExists(jobDirectory(packagesDir, record.jobId))).toBe(
-        false,
-      );
-    });
+        const entries = await readdir(packagesDir);
+        expect(entries.filter((e) => !e.startsWith('.'))).toEqual([]);
+        expect(await pathExists(jobDirectory(packagesDir, record.jobId))).toBe(
+          false,
+        );
+      },
+    );
 
     it('fails with install_failed when a hardlinked file exists in tree', async () => {
       const tempDir = await createTempDir();

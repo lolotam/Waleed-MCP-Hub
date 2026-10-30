@@ -1752,4 +1752,23 @@ describe('package-service', { timeout: 60_000 }, () => {
     ).rejects.toMatchObject({ code: 'unavailable' });
     expect(env.API_KEY).toBe('');
   });
+
+  it('21. A self-test folder left by an earlier process is reconciled away', async () => {
+    const { service, packagesDir } = await setupService({
+      selfTest: async () => undefined,
+    });
+    // The fixed folder of an older hub that stopped during its self-test. No
+    // live job owns it, so the pass deletes it and the next self-test starts
+    // in a fresh folder.
+    const stale = jobDirectory(
+      packagesDir,
+      '00000000-0000-4000-8000-000000000001',
+    );
+    await mkdir(join(stale, 'project'), { recursive: true });
+    await writeFile(join(stale, 'user.npmrc'), '');
+
+    await service.reconcile();
+
+    await expect(lstat(stale)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });

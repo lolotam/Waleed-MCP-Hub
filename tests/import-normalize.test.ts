@@ -500,6 +500,7 @@ describe('deterministic data-only import normalization', () => {
     expect(result.packageProposal).toEqual({
       name: 'synthetic',
       version: '1.2.3',
+      requestedVersion: null,
       arguments: [],
       envNames: [],
     });

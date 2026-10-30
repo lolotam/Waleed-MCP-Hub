@@ -393,30 +393,39 @@ export const npmSelfTest = async (
   ).trim();
   if (version !== bundledNpmVersion()) throw failed();
 
-  const reported = await run((proxyUrl) => [
-    bundledNpmCli(),
-    'config',
-    'get',
+  const allowKeys = [
     'allow-directory',
     'allow-file',
     'allow-git',
     'allow-remote',
-    ...isolationArguments(paths, options.registry, proxyUrl),
-  ]);
-  const values = new Map<string, string>();
-  for (const line of reported.split(/\r?\n/)) {
-    const separator = line.indexOf('=');
-    if (separator <= 0) continue;
-    values.set(
-      line.slice(0, separator).trim(),
-      line.slice(separator + 1).trim(),
-    );
-  }
-  for (const key of [
-    'allow-directory',
-    'allow-file',
-    'allow-git',
-    'allow-remote',
-  ])
-    if (values.get(key) !== 'none') throw failed();
+  ];
+  const settings = async (withAllowFlags: boolean) => {
+    const reported = await run((proxyUrl) => [
+      bundledNpmCli(),
+      'config',
+      'get',
+      ...allowKeys,
+      ...isolationArguments(paths, options.registry, proxyUrl).filter(
+        (argument) => withAllowFlags || !argument.startsWith('--allow-'),
+      ),
+    ]);
+    const values = new Map<string, string>();
+    for (const line of reported.split(/\r?\n/)) {
+      const separator = line.indexOf('=');
+      if (separator <= 0) continue;
+      values.set(
+        line.slice(0, separator).trim(),
+        line.slice(separator + 1).trim(),
+      );
+    }
+    return values;
+  };
+  // npm echoes back any key given on the command line, known or not, so the
+  // flags alone prove nothing. Without them npm reports its own default for a
+  // setting it knows and "undefined" for one it does not.
+  const defaults = await settings(false);
+  for (const key of allowKeys)
+    if (!['all', 'none'].includes(defaults.get(key) ?? '')) throw failed();
+  const enforced = await settings(true);
+  for (const key of allowKeys) if (enforced.get(key) !== 'none') throw failed();
 };

@@ -53,11 +53,9 @@ const PackageArgumentsSchema = z
       .refine((arg) => !arg.includes('\0')),
   )
   .max(128);
-const EnvNameSchema = z
-  .string()
-  .min(1)
-  .max(100)
-  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+// The same upper-case rule as every other credential binding of the hub, so a
+// name an import proposes is a name Install accepts.
+const EnvNameSchema = z.string().regex(/^[A-Z_][A-Z0-9_]{0,99}$/);
 // Nothing that starts with NODE_ may reach a package connector, so no external
 // code can be preloaded and no TLS trust can be changed from outside the
 // install. The OpenSSL variables change how the bundled Node and npm trust
@@ -72,10 +70,7 @@ const REFUSED_PACKAGE_ENV_NAMES = new Set([
 export const isPackageEnvName = (name: string): boolean =>
   /^NODE_/i.test(name) || REFUSED_PACKAGE_ENV_NAMES.has(name.toUpperCase());
 const PackageEnvSchema = z
-  .record(
-    z.string().regex(/^[A-Z_][A-Z0-9_]{0,99}$/),
-    z.string().min(1).max(8192),
-  )
+  .record(EnvNameSchema, z.string().min(1).max(8192))
   .refine(
     (env) => !Object.keys(env).some((key) => isPackageEnvName(key)),
     'Environment names starting with NODE_ and the OpenSSL certificate variables are refused on package connectors.',
@@ -200,9 +195,13 @@ export const PackageJobSchema = z.strictObject({
     .nullable(),
 });
 // An imported npx entry: names and arguments only, never credential values.
+// A range or dist-tag the entry asked for is kept as requestedVersion, so the
+// user sees it before Look up picks an exact release. envNames holds only the
+// names a package connector accepts.
 export const PackageProposalSchema = z.strictObject({
   name: PackageNameSchema,
   version: ExactVersionSchema.nullable(),
+  requestedVersion: z.string().min(1).max(256).nullable(),
   arguments: PackageArgumentsSchema,
   envNames: z.array(EnvNameSchema).max(64),
 });

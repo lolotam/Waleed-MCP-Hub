@@ -107,10 +107,12 @@ package?: {
      as the trusted record;
   3. if the stored connector has no `package`, the edit can never add one.
      There is no conversion between managed and unmanaged connectors by editing.
-- Environment names matching `/^NODE_/i` (for example `NODE_OPTIONS`, `NODE_PATH`,
+- Environment names are upper case (`/^[A-Z_][A-Z0-9_]{0,99}$/`), the rule of every
+  credential binding of the hub, so no two names of one connector differ only in
+  case. Names matching `/^NODE_/i` (for example `NODE_OPTIONS`, `NODE_PATH`,
   `NODE_EXTRA_CA_CERTS`) and the OpenSSL variables `OPENSSL_CONF`,
-  `OPENSSL_MODULES`, `OPENSSL_ENGINES`, `SSL_CERT_FILE` and `SSL_CERT_DIR` are
-  refused on package connectors, so nothing can preload code or provider modules or
+  `OPENSSL_MODULES`, `OPENSSL_ENGINES`, `SSL_CERT_FILE` and `SSL_CERT_DIR`,
+  compared without regard to case, are refused on package connectors, so nothing can preload code or provider modules or
   change TLS trust from outside the install. The same rule applies on every
   write path: `edit_connector`, the install/replace save, and the credential API
   (`auth/credentials.ts`), which checks it before storing any secret or committing
@@ -169,7 +171,10 @@ no redirects to other hosts, and size limits.
    full packument's `time[version]` (≤ 32 MiB, streamed); if that is too large or
    missing, the preview shows "release date unknown" as a warning.
 2. Refuse when: the version does not exist or was unpublished (`version_not_found`),
-   there is no `bin` (`no_entry`).
+   there is no `bin` (`no_entry`). After the lock is frozen, a tree of more than
+   2 000 packages, bundled copies included, is refused (`install_limit`). Version
+   documents are read up to their size cap and only a small summary of each is
+   kept; the lookup stops as soon as a limit is passed.
 3. Freeze the tree: create a job folder `<data>\packages\.jobs\<jobId>\` (private
    ACL) with `project\package.json` =
    `{"private":true,"dependencies":{"<name>":"<version>"}}` written first, then run
@@ -213,7 +218,14 @@ no redirects to other hosts, and size limits.
    are reported, not guessed).
 6. The preview is stored server-side with a random `previewId` (owner session, 10-
    minute expiry, single use). It contains the frozen lock, its hash, root integrity,
-   entry candidates and warnings. The staging folder is deleted on expiry.
+   entry candidates and warnings. A session keeps at most 5 previews and the hub at
+   most 50; past either cap the oldest preview is dropped, as if it had expired.
+   The Look up job folder (staging project and npm cache) lives as long as its
+   preview, so Install can reuse the cache. It is deleted when Install takes the
+   preview (Install deletes it when it ends), when the preview expires or is
+   dropped, and when the hub shuts down; a failed Look up deletes it at once.
+   Every Look up checks the 2 GiB reserve before it starts, so kept caches cannot
+   take the drive below it.
 
 ## Install
 
@@ -224,7 +236,10 @@ no redirects to other hosts, and size limits.
   or the file count would exceed 50 000 (from `dist.fileCount` where present); the
   proxy closes at 300 MiB downloaded; a watchdog measures the job folder and the
   install folder together (project, cache, temp, install) and kills the process tree
-  past the caps. The watchdog is **best-effort**, not a hard quota: each scan takes
+  past its own caps of 800 MiB and 80 000 entries. They sit above the 500 MiB and
+  50 000 files of a tree because the watchdog also counts the cached tarballs, the
+  staging project and every folder; the manifest caps of the installed tree stay
+  the hard limits. The watchdog is **best-effort**, not a hard quota: each scan takes
   time, timers can fire late, and stopping the host takes up to its 4-second kill
   grace, so npm can keep writing until the tree is dead. Scans start at most 250 ms
   after the previous one finished; on breach the hub cancels, waits for the process
@@ -240,8 +255,11 @@ no redirects to other hosts, and size limits.
   timers, and assert cleanup ordering (process gone before deletion).
 - Layout: the install is built in place at `<data>\packages\<installId>\` (private
   ACL). The transaction marker is a sibling file `<data>\packages\<installId>.installing`,
-  never inside the hashed tree. Temp and cache stay in the job folder, which is
-  deleted when the job ends.
+  never inside the hashed tree. The marker holds the job ID and is written
+  **before** the install folder is created, so reconciliation never sees the
+  install folder of a running job without its marker; reconciliation asks again
+  whether the job is live for each marker and each folder, not from one snapshot.
+  Temp and cache stay in the job folder, which is deleted when the job ends.
 - Steps: write the frozen `package-lock.json` and the same `package.json` into the
   install folder, then run bundled npm `ci --ignore-scripts --omit=dev
 --omit=optional --no-audit --no-fund --logs-max=0` there with the isolation
@@ -252,7 +270,15 @@ entryPath`; entry file is a regular file inside the folder; no `.npmrc`, `_logs`
   deletes the folder and marker.
 - Publish and save happen in one critical section under the hub's **package lock**
   (an in-process mutex also taken by reconciliation): remove the marker, then save
-  the connector. A crash after publishing but before saving leaves an unreferenced
+  the connector. Lock order: the package lock first, then the registry mutation
+  slot inside it for the save. The slot never waits: a second mutation fails with
+  `busy`, and the save retries for a bounded time. Nothing that holds the slot
+  takes the package lock: after `remove_connector` commits, it starts a
+  reconciliation pass without waiting for it, and reconciliation only reads the
+  registry, so it never needs the slot. Only one hub
+  process uses a data folder: the runtime takes an exclusive `writer.lock` in it at
+  start and a second hub refuses to start, so the in-process lock covers every
+  writer. A crash after publishing but before saving leaves an unreferenced
   folder that reconciliation deletes. The job reports `saved` only after both.
 - Commit states (see "Jobs"): **precommit** until the package lock is taken for
   publish+save; **committing** while it is held; then **committed** or
@@ -267,10 +293,11 @@ entryPath`; entry file is a regular file inside the folder; no `.npmrc`, `_logs`
 - npm searches parent folders for a project root and reads that project's
   `.npmrc`. The hub writes `package.json` into the working folder before the first
   npm run, passes `--prefix <that folder>`, `--workspaces=false`,
-  `--include-workspace-root=false`. With the prefix given on the command line,
-  npm does not search parent folders, so an ancestor `package.json` or `.npmrc`
-  (such as the one `npm login` writes to the user's home folder) is never read and
-  is not refused. The hub refuses to start only if a parent folder of
+  `--include-workspace-root=false`. The working folder already holds
+  `package.json`, so npm's search for the project root stops there, and the user
+  and global configuration files are named explicitly (below). An ancestor
+  `package.json` or `.npmrc` (such as the one `npm login` writes to the user's home
+  folder) is therefore never read and is not refused. The hub refuses to start only if a parent folder of
   `<data>\packages\` contains `node_modules`, because Node itself searches parent
   folders for modules at launch.
 - `--userconfig` and `--globalconfig` point at empty files in the job folder;
@@ -280,9 +307,10 @@ entryPath`; entry file is a regular file inside the folder; no `.npmrc`, `_logs`
   `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` set to empty folders inside the job folder,
   `npm_config_*` not forwarded, no `PATH`. Secrets never enter installer processes.
 - Output is captured for exit status only; it is never shown, returned or logged.
-  The job folder (cache, logs, temp) is deleted when the job ends.
-- Tests run Look up and Install under an ancestor project with a hostile `.npmrc`
-  holding sentinel credentials and a foreign registry, and assert neither is used.
+  The job folder (cache, logs, temp) is deleted when the job ends; a Look up job
+  folder lives on with its preview (see "Resolve", step 6).
+- Tests run Look up and Install under an ancestor folder with a hostile `.npmrc`
+  naming a foreign registry, and assert it is not used.
 
 ## Launch verification
 
@@ -365,13 +393,17 @@ entry, acknowledgedWarnings[]}`. Reinstall uses a preview of the same version. T
 
 - `npx [-y|--yes] <pkg>@<x.y.z> [args]` becomes a _package proposal_ (name, version,
   args). Unpinned `npx [-y] <pkg> [args]` becomes a proposal labelled "version chosen
-  at Look up". Proposals never install during import preview. The import preview
+  at Look up". A range or dist-tag (`<pkg>@^1.2.0`, `<pkg>@next`) is kept as
+  `requestedVersion` and shown, so the user sees what the entry asked for before
+  Look up picks an exact release. The proposal lists only the environment names
+  Install accepts: lower-case names and the refused ones (`NODE_*`, the OpenSSL
+  variables) are left out. Proposals never install during import preview. The import preview
   lists proposals separately from ordinary definitions; applying the import saves
   only the ordinary definitions (proposals never block it), and each proposal has an
   **Install** button that opens Look up → Install with name, version and arguments
   filled in.
-- Credential values extracted from an imported `npx` entry are discarded, never put
-  in the proposal DTO; the install form asks for them again and says why.
+- Credential values extracted from an imported `npx` entry are discarded, whether
+  or not the entry becomes a proposal, and never put in the proposal DTO; the install form asks for them again and says why.
 - `npx -c`, `--call`, `-p/--package`, multiple packages, git/URL/path specs and any
   `uvx` entry stay refused (uvx waits for F01b).
 
@@ -388,6 +420,10 @@ connectorName, arguments[], env{}}` → job. Refused if the preview is expired, 
 - `POST /api/packages/verify/<connectorId>`: **Verify files**; full verification,
   never starts a process. **Check connection** stays the existing capability check,
   which now verifies files first.
+- Limits: the package routes answer `busy` (HTTP 429) past 60 requests a minute,
+  and the job poll past 600 a minute. A live session has its own budget; any other
+  request counts against its address. At most one install and two lookups run at
+  a time; a further one answers `busy`.
 
 ## Errors (sanitized codes)
 

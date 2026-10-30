@@ -1133,19 +1133,17 @@ describe('9. Reconciliation (reconcilePackages)', () => {
     const folder = jobDirectory(packagesDir, jobId);
 
     // The lookup starts while the pass runs: its folder appears after the
-    // pass began, and the live jobs know the job only from the second read
-    // on.
-    let calls = 0;
-    const activeJobs = () => {
-      calls += 1;
-      return calls >= 2 ? new Set([jobId]) : new Set<string>();
-    };
+    // pass began, and the live jobs know the job only from then on. The pass
+    // reads the live jobs again before each deletion, so it sees the job.
+    let started = false;
+    const activeJobs = () => (started ? new Set([jobId]) : new Set<string>());
 
     const result = await reconcilePackages({
       packagesDir,
       readState: async () => {
         await mkdir(folder, { recursive: true });
         await writeFile(join(folder, 'active.txt'), 'active');
+        started = true;
         return emptyState();
       },
       activeJobs,

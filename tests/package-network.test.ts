@@ -319,6 +319,12 @@ describe('package network', () => {
       );
       expect(resDiffLength.statusCode).toBe(407);
 
+      // A refused CONNECT for another host is not recorded: a local process
+      // without the token cannot make the run look like a foreign attempt.
+      const resForeign = await sendRawConnect(proxyPort, 'foreign.invalid:443');
+      expect(resForeign.statusCode).toBe(407);
+      expect(proxy.connections()).toEqual([]);
+
       expect(upstreamConnections).toBe(0);
     });
 
@@ -563,7 +569,7 @@ describe('package network', () => {
       expect(elapsed).toBeGreaterThanOrEqual(80);
     });
 
-    it('9. connections() lists requested authorities in order and contains no headers or token', async () => {
+    it('9. connections() lists authenticated authorities in order and contains no headers or token', async () => {
       const proxy = await trackProxy(
         await startAllowListProxy({
           allow: [{ host: '127.0.0.1', port: 8080 }],
@@ -575,17 +581,15 @@ describe('package network', () => {
       const authHeader = getProxyAuthHeader(proxy.url);
 
       await sendRawConnect(proxyPort, 'target1.test:8080', { authHeader });
-      await sendRawConnect(proxyPort, 'target2.test:9090');
-      await sendRawConnect(proxyPort, 'target3.test:7070', {
+      await sendRawConnect(proxyPort, 'target2.test:9090', { authHeader });
+      // Refused before authentication: never recorded.
+      await sendRawConnect(proxyPort, 'target3.test:7070');
+      await sendRawConnect(proxyPort, 'target4.test:6060', {
         authHeader: 'Basic invalid',
       });
 
       const list = proxy.connections();
-      expect(list).toEqual([
-        'target1.test:8080',
-        'target2.test:9090',
-        'target3.test:7070',
-      ]);
+      expect(list).toEqual(['target1.test:8080', 'target2.test:9090']);
 
       for (const item of list) {
         expect(item).not.toContain(token);

@@ -693,6 +693,36 @@ describe('package-api', { timeout: 60_000 }, () => {
     expect(other.statusCode).toBe(200);
   });
 
+  it('21b. Made-up session cookies never reach a package route and win no budget', async () => {
+    const { hub } = await setup();
+
+    // Every request carries a new cookie value no session owns. The session
+    // check refuses each one before the route runs, so rotating cookie values
+    // starts no work at all.
+    for (let attempt = 0; attempt <= 60; attempt++) {
+      const response = await hub.app.inject({
+        method: 'POST',
+        url: '/api/packages/verify/srv',
+        headers: {
+          host,
+          origin,
+          cookie: `waleed_hub_session=forged-${attempt}`,
+        },
+      });
+      expect(response.statusCode).toBe(401);
+    }
+
+    // A live session from the same address keeps its own budget.
+    const session = await login(hub);
+    const own = await hub.app.inject({
+      method: 'POST',
+      url: '/api/packages/verify/srv',
+      headers: session,
+    });
+    expect(own.statusCode).not.toBe(429);
+    expect(own.statusCode).not.toBe(401);
+  });
+
   it('22. The job poll of a session answers 200 six hundred times; the six hundred and first answers 429', async () => {
     const { hub } = await setup();
     const headers = await login(hub);

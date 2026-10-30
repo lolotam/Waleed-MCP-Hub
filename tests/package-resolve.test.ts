@@ -150,7 +150,7 @@ describe('package-resolve', { timeout: 60_000 }, () => {
 
   afterEach(async () => {
     for (const store of previewStores) {
-      store.dispose();
+      await store.dispose();
     }
     previewStores.length = 0;
 
@@ -734,15 +734,19 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(await pathExists(timerJobDir)).toBe(false);
 
-      // dispose clears every record
+      // dispose clears every record and deletes its staging folder
       const p4 = makePreview(randomUUID());
+      const disposeJobId = randomUUID();
+      const disposeJobDir = jobDirectory(packagesDir, disposeJobId);
+      await createPrivateDirectory(disposeJobDir);
       store.put({
         preview: p4,
         lock: new Uint8Array([8]),
-        jobId: randomUUID(),
+        jobId: disposeJobId,
         owner: 'owner-a',
       });
-      store.dispose();
+      await store.dispose();
+      expect(await pathExists(disposeJobDir)).toBe(false);
       await expect(store.take(p4.previewId, 'owner-a')).rejects.toMatchObject({
         code: 'preview_expired',
       });
@@ -2337,10 +2341,9 @@ describe('package-resolve', { timeout: 60_000 }, () => {
         // The .npmrc of the user: npm never reads it, because every npm run
         // of the hub names its own configuration files.
         const sentinelHost = 'sentinel-npmrc.invalid';
-        const sentinelToken = 'sentinel-npmrc-value';
         await writeFile(
           join(tempDir, '.npmrc'),
-          `registry=https://${sentinelHost}/\n//${sentinelHost}/:_authToken=${sentinelToken}\n`,
+          `registry=https://${sentinelHost}/\n`,
           'utf8',
         );
 
@@ -2409,14 +2412,14 @@ describe('package-resolve', { timeout: 60_000 }, () => {
 
         // The sentinel never reaches the output of the lookup, the preview or
         // the stored job record.
-        expect(JSON.stringify(preview)).not.toContain(sentinelToken);
+        expect(JSON.stringify(preview)).not.toContain(sentinelHost);
         const record = await previews.take(
           preview.previewId,
           'test-owner-npmrc',
         );
-        expect(JSON.stringify(record.preview)).not.toContain(sentinelToken);
+        expect(JSON.stringify(record.preview)).not.toContain(sentinelHost);
         expect(Buffer.from(record.lock).toString('utf8')).not.toContain(
-          sentinelToken,
+          sentinelHost,
         );
 
         // The npm run used the configuration files of the job, not the ones
