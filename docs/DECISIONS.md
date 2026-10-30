@@ -645,6 +645,74 @@ outcome of the newest call.
 Python packages (`uvx`) stay out of scope until F01b decides interpreter
 provenance, wheel targeting and credential isolation.
 
+## D025 — Persistent connector sessions in the agent bridge (2026-10-30)
+
+F03 (spec `docs/specs/F03-persistent-sessions.md`, plan
+`docs/plans/F03-persistent-sessions-plan.md`) keeps one live peer per connector
+inside each agent's bridge process and reuses it across `tools/list` and
+`tools/call`, so stateful servers (an SSH session, a browser tab) work. Fixed
+inputs: 5-minute idle timeout, 60-minute maximum session life, graceful
+re-initialisation after a hub restart, pooling for native stdio, remote
+Streamable HTTP and SSE, and Docker, and Windows Job Object containment. The
+design went through six Codex review rounds (18, 15, 7, 6, 5 and 3 findings, all
+accepted; verdict tables in the plan).
+
+Rules that make reuse no weaker than one peer per call:
+
+- **Validation before every SDK request**, after the caller holds the peer
+  exclusively: unblocked ledger, agent integrated, valid boot record, connector
+  enabled and approved, unchanged definition hash and credential references,
+  lease not near expiry, then a synchronous final gate (generation, state,
+  cancellation, max age by the clock) with no `await` before the dispatch. New
+  peers are authorised (state checks, then package verification) before any
+  secret is resolved or any process starts.
+- **Security invalidation is not retirement.** A failed check, a timeout or a
+  cancellation after dispatch aborts the peer at once and discards its result;
+  only reaching max age or idle retires gracefully. A failed call is never
+  replayed.
+- **Snapshots are serialised and numbered on completion**; reconciliation of
+  watched files is decided inside the same mutex, so an older observation never
+  overrides a newer one.
+- **Hub restart** is detected through `boot.json`, a boot ID the hub writes after
+  recovery reconciliation. A mismatch replaces the peer inside the request that
+  notices it. A missing or malformed boot record fails closed.
+- **Budgets** per operation, per session and between operations are enforced in
+  the C# process host, the stdio transport and, for remote servers, by framing
+  JSON and SSE bodies before the SDK parses them. Session runs keep byte counts,
+  not output.
+- **SDK use**: pooled peers call `client.request` directly (no tool-metadata
+  cache, no client-side schema validation), with operation-owned abort
+  controllers so a finished request never sends a late cancellation.
+- **Docker ownership** rests on container labels (installation ID from
+  `install.json`, agent, bridge, nonce) and OS-held named pipes: each bridge
+  listens on its own pipe for life, and recovery for an agent holds a pipe
+  mutex. Only a conclusively absent owner, or this bridge's own abandoned
+  launch, allows removal. Launch and removal phases are recorded in markers and
+  never expire by time.
+
+**Residual limits (accepted, stated rather than claimed away):**
+
+1. **Remote state.** Closing a remote session (`DELETE`) is best-effort; the
+   server may keep state or keep working after a cancelled call. The hub only
+   stops its own participation.
+2. **Lazy loading.** A running Node package server can load a file that changes
+   between verification and load; the D024 check-to-launch race now spans the
+   session, not only start-up.
+3. **Transient ledger states.** A ledger that is `prepared` and then `committed`
+   between two snapshots may never be observed; its committed registry change is
+   caught by the next validation.
+4. **Echo detection** catches lease values in the representations
+   `assertNoCredentialEcho` checks. Split or re-encoded values are not detected.
+   Secrets live in the bridge for up to 61 minutes instead of one call;
+   immutable JS strings cannot be wiped (D019).
+5. **Docker manual reconciliation.** A launch whose CLI was killed before Docker
+   acknowledged a container ID keeps its marker until the container is found.
+   More than 16 such markers block Docker for that agent until a person removes
+   them (troubleshooting guide). Pre-F03 markers are never auto-recovered.
+6. **Server-side sharing.** Two agents never share a bridge-owned peer, lease or
+   transport; a server that shares state by credential or globally is outside
+   the hub's control.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint
