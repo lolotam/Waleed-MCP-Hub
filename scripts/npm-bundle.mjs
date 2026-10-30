@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gunzipSync, gzipSync } from 'node:zlib';
+import { crc32, gunzipSync, gzipSync } from 'node:zlib';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const output = join(root, 'vendor', 'npm-12.2.1-patched.tgz');
@@ -81,28 +81,53 @@ function paxRecords(data) {
   return records;
 }
 
-// Reads regular files and directories; refuses links and devices so nothing but
-// plain package contents can pass through.
+// Pax keys that only describe metadata this reader does not use. Any other key
+// (size, linkpath, ...) would change how another tar reader sees the entry.
+const cosmeticPaxKeys = new Set([
+  'mtime',
+  'atime',
+  'ctime',
+  'uid',
+  'gid',
+  'uname',
+  'gname',
+]);
+
+// Reads regular files and directories of a single plain ustar stream. Links,
+// devices, global or GNU headers, bad checksums and data after the end marker
+// are refused, so nothing is read differently from how node-tar would read it.
 function readTarball(gzipped) {
   const tar = gunzipSync(gzipped);
   const entries = new Map();
   let override = {};
-  for (let offset = 0; offset + BLOCK <= tar.length;) {
+  for (let offset = 0; ;) {
+    if (offset + BLOCK > tar.length) throw new Error('Truncated tarball');
     const header = tar.subarray(offset, offset + BLOCK);
-    if (header.every((byte) => byte === 0)) break;
+    if (header.every((byte) => byte === 0)) {
+      if (!tar.subarray(offset).every((byte) => byte === 0))
+        throw new Error('Data after the tar end marker');
+      return entries;
+    }
+    const unsigned = Buffer.from(header).fill(0x20, 148, 156);
+    if (
+      unsigned.reduce((total, byte) => total + byte, 0) !==
+      octal(header, 148, 8)
+    )
+      throw new Error('Bad tar header checksum');
+    if (field(header, 257, 6) !== 'ustar')
+      throw new Error('Not a ustar header');
     const size = octal(header, 124, 12);
     const type = String.fromCharCode(header[156] || 0x30);
     const data = Buffer.from(
       tar.subarray(offset + BLOCK, offset + BLOCK + size),
     );
+    if (data.length !== size) throw new Error('Truncated tar entry');
     offset += BLOCK + Math.ceil(size / BLOCK) * BLOCK;
     if (type === 'x') {
       override = paxRecords(data);
-      continue;
-    }
-    if (type === 'g') continue;
-    if (type === 'L') {
-      override = { path: data.toString('utf8').replace(/\0+$/, '') };
+      for (const key of Object.keys(override))
+        if (key !== 'path' && !cosmeticPaxKeys.has(key))
+          throw new Error(`Unsupported pax key ${key}`);
       continue;
     }
     const prefix = field(header, 345, 155);
@@ -121,7 +146,6 @@ function readTarball(gzipped) {
       data: type === '5' ? Buffer.alloc(0) : data,
     });
   }
-  return entries;
 }
 
 function writeOctal(block, offset, length, value) {
@@ -180,7 +204,8 @@ function paxHeader(path) {
   return [header('PaxHeader', '', record.length, 0o644, 'x'), padded(record)];
 }
 
-function writeTarball(entries) {
+// The uncompressed tar stream; deterministic for a given set of entries.
+function tarStream(entries) {
   const blocks = [];
   for (const path of [...entries.keys()].sort()) {
     const entry = entries.get(path);
@@ -193,7 +218,7 @@ function writeTarball(entries) {
     blocks.push(padded(entry.data));
   }
   blocks.push(Buffer.alloc(BLOCK * 2));
-  return gzipSync(Buffer.concat(blocks), { level: 9 });
+  return Buffer.concat(blocks);
 }
 
 // The official npm files, minus the two bundled packages, plus the official
@@ -216,37 +241,40 @@ async function expectedEntries() {
   return entries;
 }
 
-function compare(actual, expected) {
-  const problems = [];
-  for (const [path, entry] of expected) {
-    const found = actual.get(path);
-    if (!found) problems.push(`missing ${path}`);
-    else if (
-      found.type !== entry.type ||
-      found.mode !== entry.mode ||
-      !found.data.equals(entry.data)
-    )
-      problems.push(`differs ${path}`);
+// The vendored file must decompress to exactly the expected tar stream, as one
+// gzip member with nothing after it: the trailer's CRC32 and size cover the
+// whole stream, which rules out appended members and trailing bytes.
+function verifyBundle(vendored, expected) {
+  let actual;
+  try {
+    actual = gunzipSync(vendored);
+  } catch {
+    return 'the vendored file is not valid gzip';
   }
-  for (const path of actual.keys())
-    if (!expected.has(path)) problems.push(`unexpected ${path}`);
-  return problems;
+  if (!actual.equals(expected))
+    return 'the vendored contents differ from the official composition';
+  const trailer = vendored.length - 8;
+  if (
+    vendored.readUInt32LE(trailer) !== crc32(expected) ||
+    vendored.readUInt32LE(trailer + 4) !== expected.length % 2 ** 32
+  )
+    return 'the vendored file is not a single gzip member';
+  return null;
 }
 
 const command = process.argv[2];
 if (command === 'build') {
-  const tarball = writeTarball(await expectedEntries());
+  const tarball = gzipSync(tarStream(await expectedEntries()), { level: 9 });
   await mkdir(dirname(output), { recursive: true });
   await writeFile(output, tarball);
   console.log(`Wrote ${output} (${sha512(tarball)}).`);
 } else if (command === 'verify') {
-  const problems = compare(
-    readTarball(await readFile(output)),
-    await expectedEntries(),
+  const problem = verifyBundle(
+    await readFile(output),
+    tarStream(await expectedEntries()),
   );
-  if (problems.length) {
-    console.error(problems.slice(0, 50).join('\n'));
-    console.error(`npm bundle verification failed (${problems.length}).`);
+  if (problem) {
+    console.error(`npm bundle verification failed: ${problem}.`);
     process.exit(1);
   }
   console.log(
