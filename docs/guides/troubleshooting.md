@@ -56,9 +56,82 @@ The server wants credentials the hub doesn't have:
 
 ## Saving fails with "unsupported executable"
 
-`npx`, `uvx`, `.cmd`, `.bat` and scripts aren't run directly. Install the package
-and use `node.exe` + entry script, or the tool's real `.exe`. See
-[adding-mcps.md](adding-mcps.md#npm-package-npx).
+`npx`, `uvx`, `.cmd`, `.bat` and scripts aren't run directly. For an npm package,
+use the **npm package — managed install** connection type. For anything else, use
+the tool's real `.exe`. See [adding-mcps.md](adding-mcps.md#npm-package-npx).
+
+## npm package installs
+
+- **"No release matches that version, range or tag"**: check the spelling, or
+  leave **Version** blank for `latest`.
+- **"A dependency is not a registry package"**: something in the tree comes from
+  git, a URL, a file or an alias. The hub only installs from `registry.npmjs.org`.
+  A [manual install](adding-mcps.md#manual-install-advanced) is possible if you
+  trust the package, but read its warning first: it gives up the managed
+  protections.
+- **"The package is too large"**: the hub refuses trees over 500 MiB unpacked or
+  50 000 files, and needs 2 GiB free on the drive of its data folder before it
+  starts.
+- **"This preview has expired"**: a preview lasts 10 minutes and can be used once.
+  Choose **Look up again**.
+- **"Another package job is running"**: one install and two lookups run at a time.
+  Wait for the other job, then retry.
+- **"The hub could not record this request in its audit log"**: the hub refuses
+  changes it cannot audit. The terminal running the hub shows the reason; fix it,
+  then retry.
+- **"The install finished but saving could not be confirmed"**, or **"The hub no
+  longer knows this job"**: refresh the connector list before installing again. A
+  leftover install folder that no connector uses is deleted the next time the hub
+  starts.
+- **"The hub did not answer in time. Refresh to retry."**: the page gave up
+  waiting after 20 seconds. Choose **Refresh**; nothing was changed by the wait.
+
+## A package connector says "The installed files have changed since install"
+
+Something edited, added or removed a file in its install folder (an antivirus
+quarantine, a manual edit, a sync tool). The hub won't start it. Choose
+**Reinstall**, then approve again.
+
+The same check fails when the packages folder
+`%LOCALAPPDATA%\WaleedMcpHub\packages\` itself, or any of its parent folders,
+contains a `node_modules` folder, because Node would load code from there. Remove
+or rename that `node_modules`; reinstalling won't help.
+
+## A package connector says its definition does not match its package record
+
+An environment variable name starts with `NODE_` or is an OpenSSL variable name
+(`OPENSSL_CONF`, `OPENSSL_MODULES`, `OPENSSL_ENGINES`, `SSL_CERT_FILE`,
+`SSL_CERT_DIR`); that is the only cause of this message. Check the names, not the
+values. Remove that binding under **Edit**, then **Approve execution** again and
+run **Test capabilities**. The row also
+offers **Reinstall** and mentions a moved hub folder, but neither applies here:
+reinstalling won't help. (A moved hub folder shows a different symptom, see the
+[next section](#a-package-connector-stopped-starting-after-i-moved-the-hub-folder).)
+
+## A package connector stopped starting after I moved the hub folder
+
+A managed connector runs on the `node.exe` of the hub folder it was installed
+from, and that path is stored in its approved definition. After a move the path
+no longer exists, so **Test capabilities** ends in **error** with the reason
+**protocol error**, and agents get "The connector is unavailable". **Verify
+files** still passes (the installed files did not change), and **Reinstall** is
+not offered.
+
+- If **Check for update** finds a newer version, **Update to x.y.z** installs it
+  on the current `node.exe`. **Approve execution** again, then run **Test
+  capabilities**.
+- Otherwise, remove the connector and install the package again, re-enter its
+  protected values, then **Approve execution** and run **Test capabilities**.
+  Moving the hub folder back also works.
+
+The install folder itself lives in `%LOCALAPPDATA%\WaleedMcpHub\packages\` and does
+not move with the hub folder.
+
+## npm settings on this PC are ignored
+
+That is intended. Look up and Install ignore your `.npmrc` files (user, global and
+any parent project), proxies, registry settings and `npm login` tokens, and use
+the npm version bundled with the hub, not the one on your `PATH`.
 
 ## An agent shows no hub tools
 

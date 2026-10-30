@@ -30,11 +30,12 @@ targets from one screen.
 ## P0 — connect any server
 
 1. **Run npm and Python packages directly.** Most servers are published as
-   `npx -y pkg` or `uvx pkg`, and today users must install them by hand
-   ([guide](guides/adding-mcps.md#npm-package-npx)). Add a managed installer: the
-   hub resolves an exact version, installs it into its own cache, shows the package
-   and version for approval, and runs `node.exe` or the tool's `.exe`. Pinned
-   versions keep the "approve exactly what runs" rule.
+   `npx -y pkg` or `uvx pkg`. **npm: done (F01, D024).** The hub looks up an exact
+   version and freezes its full dependency tree, shows a summary for review, installs
+   it from the frozen lock into its own folder, and checks every file before each launch
+   ([guide](guides/adding-mcps.md#npm-package-npx)). **Python: next (F01b)**, after
+   decisions on interpreter provenance, wheel targeting and credential isolation.
+   Until then, `uvx` servers are installed by hand.
 2. **General OAuth for remote servers.** Only Linear read-only works today. Implement
    the MCP authorization spec: protected-resource metadata discovery, PKCE, client
    ID metadata documents with dynamic client registration as fallback
@@ -51,7 +52,8 @@ targets from one screen.
    add form, so users fill in only their keys.
 5. **Import from agents you already use.** Read `mcpServers` from Claude Desktop,
    Cursor, VS Code, Codex TOML and OpenCode JSONC, convert `npx`/`uvx` entries via
-   item 1, and move secrets into the protected store. The adoption preview exists
+   item 1 (pasted `npx` entries already become package proposals with an
+   **Install** button), and move secrets into the protected store. The adoption preview exists
    but apply is disabled.
 6. **Local HTTP servers (opt-in).** Allow `http://127.0.0.1:<port>` endpoints after
    explicit confirmation, for servers that run locally over HTTP.

@@ -1,6 +1,6 @@
 # Waleed MCP Hub — Actual Project Status
 
-Updated: 2026-10-29
+Updated: 2026-10-30
 
 ## Completed in this project
 
@@ -77,6 +77,12 @@ Updated: 2026-10-29
   env/headers, loopback Docker ports, explicit execution consent and optional sync.
 - P9 portable-folder packaging with bundled Node 24/production dependencies,
   Windows launchers/shortcut installer, named-pipe single instance and protected shutdown.
+- F01 managed npm packages (D024): Look up and Install from a frozen lock with
+  the bundled, repacked npm behind a registry-only proxy; a provenance-bound
+  approval; file verification before every launch; Verify files, Check for
+  update, Update and Reinstall; reconciliation of install folders; `npx` import
+  entries offered as package proposals; and the web UI for all of it (PR #3 back
+  end, PR #4 UI).
 
 ## Not implemented
 
@@ -89,7 +95,21 @@ Updated: 2026-10-29
   credentials into agent files or Docker profile headers. Live remote-provider/agent
   compatibility remains unverified; Docker profile materialization is unchanged.
 - The process runner deliberately rejects
-  `.cmd`/`.bat` shims until a dedicated safe adapter is verified.
+  `.cmd`/`.bat` shims until a dedicated safe adapter is verified. npm packages go
+  through the managed install instead (D024); Python packages (`uvx`, F01b) do not
+  have one yet.
+- The F01 live acceptance smoke (install `@modelcontextprotocol/server-filesystem`
+  from the real registry, approve it and run it from an agent) has not been run,
+  and the planned `scripts/smoke-packages.mjs` does not exist yet. Automated tests
+  use a loopback fixture registry.
+- After the portable hub folder moves, a managed connector's stored `node.exe`
+  path is gone, but Verify files still passes and the UI offers no **Reinstall**
+  (it appears only for `package_modified`/`invalid_configuration`). The repair is
+  an update to a newer version, or remove and install again. A same-version
+  re-pin control is follow-up work. Conversely, `invalid_configuration` (raised
+  only for a refused `NODE_*`/OpenSSL environment name) shows **Reinstall** and
+  the moved-folder hint, although only removing the binding fixes it; the UI
+  should tell the two causes apart.
 - No secret-backed import save or adoption apply. P4 normalization stays data-only;
   P5 no-secret saving is a distinct registry operation, not runtime approval.
 - P3 adoption preview remains metadata-only, not an approved executable definition
@@ -125,6 +145,7 @@ Updated: 2026-10-29
 | P8 functional frontend                  | Scanner/manual-MCP workflows implemented; full release UI gate remains pending                |
 | P9 Windows startup/recovery             | Portable folder/launchers implemented; real Edge/shortcut manual gates remain pending         |
 | P10 final validation/rollout            | Not started                                                                                   |
+| F01 managed npm packages                | Merged (PR #3, #4); automated gates verified; live registry smoke pending                     |
 
 ## Existing pilot — separate from this project's completion
 
@@ -141,7 +162,25 @@ Verify each installed agent's effective scope, trust/reconnect and MCP tool disc
 only with explicit configuration-change consent. Exercise real Edge App Mode and the
 shortcut installer. Retain live-account OAuth, second-login DPAPI and live Docker
 image cleanup gates. No pilot adoption apply or automated recovery is enabled;
-project/agent usage metrics stay R2. There is no Git repository, commit or deployment.
+project/agent usage metrics stay R2. Changes land through reviewed GitHub pull
+requests; nothing is deployed.
+
+## F01 verification evidence (2026-10-30)
+
+- PR #3 (T1–T8, back end) and PR #4 (T9, web UI) were squash-merged only after
+  `main`'s required checks passed: Windows typecheck/lint/test/build, CodeQL,
+  gitleaks over the full history, dependency audit and dependency review. Every
+  review thread was resolved first.
+- Before each PR #4 push, all 13 local gates passed: audit, format, typecheck,
+  lint, boundaries, secrets, bundle, test, build, three Windows gates and e2e.
+  Local gitleaks found no leaks. The final run had 688 unit tests and 24
+  Playwright tests.
+- `npm run check:npm-bundle` proves the vendored npm tarball holds exactly the
+  official npm 12.2.1 files, with the bundled `undici` and `ip-address` replaced
+  by the official `undici@6.29.1` and `ip-address@10.7.4`;
+  `npm audit --audit-level=moderate` passes without exceptions.
+- Not yet exercised: the live registry smoke above. The residual risks are listed
+  in D024.
 
 ## P7–P9 scope and verification evidence (2026-10-28–29)
 

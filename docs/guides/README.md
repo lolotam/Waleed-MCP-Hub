@@ -9,5 +9,5 @@ Practical how-tos for using the hub. For the design and safety model, see the
   OpenCode, VS Code, Cursor, Antigravity, Kimi and Kilo, where each config lives,
   and how to reconnect.
 - [Troubleshooting](troubleshooting.md): white window, approval and auth errors,
-  agents that show no tools.
+  npm package installs and changed package files, agents that show no tools.
 - [Roadmap](../ROADMAP.md): what's planned and how it compares with similar projects.
