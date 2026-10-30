@@ -22,7 +22,7 @@ export function ManualMcpDialog({
 }: {
   revision: number;
   close: () => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<boolean>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null),
     form = useRef<HTMLFormElement>(null),

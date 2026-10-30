@@ -19,7 +19,7 @@ export function OperationDialog({
   input: OperationDialogInput;
   revision: number;
   close: () => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const editor = useRef<HTMLTextAreaElement>(null);

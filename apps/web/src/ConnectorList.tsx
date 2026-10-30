@@ -105,7 +105,7 @@ export function ConnectorList({
   secrets: boolean;
   authenticate: (connector: ManagedConnector) => void;
   operate: (input: OperationDialogInput) => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
   openPackage: (seed: PackageSeed) => void;
 }) {
   const [job, setJob] = useState<RuntimeJob | null>(null);

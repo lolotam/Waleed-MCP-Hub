@@ -31,7 +31,9 @@ describe('latestRunner', () => {
   it('commits and ends a call that stays the newest', async () => {
     const log: string[] = [];
     const run = latestRunner(1000);
-    await run(recorder('a', log, Promise.resolve()));
+    await expect(run(recorder('a', log, Promise.resolve()))).resolves.toBe(
+      true,
+    );
     expect(log).toEqual(['a:begin', 'a:commit', 'a:end']);
   });
 
@@ -43,8 +45,9 @@ describe('latestRunner', () => {
     const a = run(recorder('a', log, first.opened));
     const b = run(recorder('b', log, second.opened));
     second.open();
-    await b;
-    await a;
+    await expect(b).resolves.toBe(true);
+    // The superseded call reports the outcome of the newest call.
+    await expect(a).resolves.toBe(true);
     expect(log).toEqual(['a:begin', 'b:begin', 'b:commit', 'b:end']);
   });
 
@@ -75,7 +78,7 @@ describe('latestRunner', () => {
     const never = gate();
     const a = run(recorder('a', log, never.opened));
     await vi.advanceTimersByTimeAsync(20_000);
-    await a;
+    await expect(a).resolves.toBe(false);
     expect(log).toEqual(['a:begin', 'a:fail:TimeoutError', 'a:end']);
   });
 
@@ -91,6 +94,32 @@ describe('latestRunner', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     await a;
     expect(log).toEqual(['a:begin', 'b:begin', 'b:commit', 'b:end']);
+  });
+});
+
+describe('latestRunner outcome', () => {
+  it('resolves to false for a call whose work fails', async () => {
+    const log: string[] = [];
+    const run = latestRunner(1000);
+    const failed = Promise.reject(new DOMException('down', 'NetworkError'));
+    await expect(run(recorder('a', log, failed))).resolves.toBe(false);
+    expect(log).toEqual(['a:begin', 'a:fail:NetworkError', 'a:end']);
+  });
+
+  it('gives a superseded call the failure of the newest call', async () => {
+    const log: string[] = [];
+    const run = latestRunner(1000);
+    const first = gate();
+    const a = run(recorder('a', log, first.opened));
+    const b = run(
+      recorder(
+        'b',
+        log,
+        Promise.reject(new DOMException('down', 'NetworkError')),
+      ),
+    );
+    await expect(b).resolves.toBe(false);
+    await expect(a).resolves.toBe(false);
   });
 });
 

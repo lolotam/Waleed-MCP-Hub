@@ -39,21 +39,23 @@ export interface LatestSteps {
 // and every call is aborted with a TimeoutError after `limitMs`. A call that
 // was superseded commits nothing (no failure and no end) and resolves only
 // after the newest call settles, so its caller never sees stale data as fresh.
+// Every call resolves to whether the newest call's work succeeded.
 export function latestRunner(limitMs: number) {
   interface Run {
     controller: AbortController;
-    done: Promise<void>;
+    done: Promise<boolean>;
   }
   let latest: Run | null = null;
-  return async function run(steps: LatestSteps): Promise<void> {
+  return async function run(steps: LatestSteps): Promise<boolean> {
     latest?.controller.abort();
-    let finish = () => {};
+    let finish: (ok: boolean) => void = () => {};
     const own: Run = {
       controller: new AbortController(),
-      done: new Promise<void>((resolve) => {
+      done: new Promise<boolean>((resolve) => {
         finish = resolve;
       }),
     };
+    let ok = false;
     latest = own;
     const current = () => latest === own;
     const timer = setTimeout(
@@ -66,6 +68,7 @@ export function latestRunner(limitMs: number) {
     steps.begin();
     try {
       await steps.work(own.controller.signal, current);
+      ok = current();
     } catch (error) {
       if (current()) steps.fail(error);
     } finally {
@@ -74,9 +77,10 @@ export function latestRunner(limitMs: number) {
         latest = null;
         steps.end();
       }
-      finish();
+      finish(ok);
     }
     for (let newest = latest; newest && newest !== own; newest = latest)
-      await newest.done;
+      ok = await newest.done;
+    return ok;
   };
 }

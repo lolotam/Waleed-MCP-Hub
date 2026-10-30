@@ -91,6 +91,7 @@ async function fakePackageApi(
     refuseStart?: string;
     forgetJob?: boolean;
     stallReload?: boolean;
+    failReload?: boolean;
   } = {},
 ) {
   const state: {
@@ -109,6 +110,16 @@ async function fakePackageApi(
       body: JSON.stringify(body),
     });
   };
+  // After an install was asked for, the connector list read fails.
+  if (options.failReload)
+    await page.route('**/api/connectors', async (route) => {
+      if (!state.installBody) return route.continue();
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'internal_error', message: 'Failed.' }),
+      });
+    });
   // After an install was asked for, the connector list never answers.
   if (options.stallReload)
     await page.route('**/api/connectors', async (route) => {
@@ -576,4 +587,13 @@ test('a stalled list reload never locks the dialog or the page', async ({
   await expect(
     page.getByText('The hub did not answer in time. Refresh to retry.'),
   ).toBeVisible({ timeout: 30_000 });
+});
+
+test('a failed list reload adds the stale-list sentence', async ({ page }) => {
+  await page.goto(await launch());
+  await fakePackageApi(page, { loseStart: true, failReload: true });
+  await installDemo(page);
+  await expect(page.getByRole('dialog').getByRole('alert')).toContainText(
+    'The connector list could not be reloaded; reload the page to see it.',
+  );
 });

@@ -10,7 +10,7 @@ export function ProfileDialog({
 }: {
   revision: number;
   close: () => void;
-  saved: () => Promise<void>;
+  saved: () => Promise<unknown>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);

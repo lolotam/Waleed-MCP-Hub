@@ -38,7 +38,7 @@ export function ImportDialog({
 }: {
   revision: number;
   close: () => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
   savePreview: (
     preview: OperationPreview,
     definitions: ImportDefinition[],

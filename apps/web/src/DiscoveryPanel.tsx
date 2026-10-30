@@ -14,7 +14,7 @@ export function DiscoveryPanel({
 }: {
   snapshot: DiscoverySnapshot | null;
   preview: AdoptionPreview | null;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
 }) {
   const [job, setJob] = useState<DiscoveryJob | null>(null);
   const [error, setError] = useState('');

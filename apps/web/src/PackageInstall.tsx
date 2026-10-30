@@ -68,7 +68,7 @@ export function PackageInstall({
 }: {
   seed: PackageSeed;
   close: () => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<boolean>;
   onRunning?: (running: boolean) => void;
   showCancel?: boolean;
 }) {
@@ -338,7 +338,7 @@ export function PackageInstall({
     let timer = 0;
     try {
       const settled = await Promise.race([
-        refresh().then(() => true),
+        refresh(),
         new Promise<false>((resolve) => {
           timer = window.setTimeout(() => resolve(false), RELOAD_LIMIT_MS);
         }),
@@ -769,7 +769,7 @@ export function PackageDialog({
 }: {
   seed: PackageSeed;
   close: () => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<boolean>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [running, setRunning] = useState(false);
