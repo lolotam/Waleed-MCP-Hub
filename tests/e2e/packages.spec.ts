@@ -304,8 +304,13 @@ test('a refused lookup shows its sanitized sentence and keeps the form', async (
     .getByRole('button', { name: 'Add Manual MCP', exact: true })
     .click();
   await page.getByLabel('Connection type', { exact: true }).selectOption('npm');
-  await page.getByLabel('Connector name', { exact: true }).fill('Demo MCP');
   await page.getByLabel('Package name', { exact: true }).fill('demo-mcp');
+  // The connector name is asked before the lookup, not after the preview.
+  await page.getByRole('button', { name: 'Look up', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText(
+    'Enter a connector name.',
+  );
+  await page.getByLabel('Connector name', { exact: true }).fill('Demo MCP');
   await page.getByLabel('Version (optional)', { exact: true }).fill('9.9.9');
   await page.getByRole('button', { name: 'Look up', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText(

@@ -10,8 +10,8 @@ import {
 } from '@waleed/contracts';
 import {
   api,
-  ApiError,
   packageErrorText,
+  packageFailureText,
   packageWarningText,
   pollPackageJob,
 } from './api.js';
@@ -51,14 +51,6 @@ function parseJsonField(
   }
 }
 
-function failureText(failure: unknown): string {
-  if (failure instanceof ApiError && failure.status === 429)
-    return packageErrorText('busy');
-  return failure instanceof Error
-    ? failure.message
-    : 'The local hub is unavailable. Check the terminal and retry.';
-}
-
 export function PackageInstall({
   seed,
   close,
@@ -76,7 +68,7 @@ export function PackageInstall({
   const mounted = useRef(true);
   const [step, setStep] = useState<Step>('lookup');
   const [connectorName, setConnectorName] = useState(
-    seed.mode === 'install' ? '' : seed.connector.name,
+    seed.mode === 'install' ? (seed.name ?? '') : seed.connector.name,
   );
   const [packageName, setPackageName] = useState(
     seed.mode === 'install'
@@ -148,6 +140,13 @@ export function PackageInstall({
       setError(request.error.issues[0]?.message ?? 'Enter a package name.');
       return;
     }
+    // The name is asked here: the preview step has no field for it.
+    if (seed.mode === 'install' && !connectorName.trim()) {
+      setError('Enter a connector name.');
+      return;
+    }
+    // Cancel never targets the job of an earlier step.
+    setJob(null);
     setStep('resolving');
     const controller = new AbortController();
     abort.current = controller;
@@ -166,7 +165,11 @@ export function PackageInstall({
       );
       if (!mounted.current || controller.signal.aborted) return;
       if (final.state === 'succeeded' && final.preview) {
-        setPreview(final.preview);
+        // A warning is ticked once, even if the hub listed it twice.
+        setPreview({
+          ...final.preview,
+          warnings: [...new Set(final.preview.warnings)],
+        });
         setAcknowledged([]);
         setEntry(
           final.preview.entries.length === 1
@@ -184,7 +187,7 @@ export function PackageInstall({
       setStep('lookup');
     } catch (failure) {
       if (!mounted.current) return;
-      setError(failureText(failure));
+      setError(packageFailureText(failure));
       setStep('lookup');
     } finally {
       abort.current = null;
@@ -194,6 +197,10 @@ export function PackageInstall({
   async function install() {
     setError('');
     setFailureCode(null);
+    // The protected values leave the form at once: every refusal below and
+    // the request itself use this copy, so the field is never left filled.
+    const envText = env.current?.value ?? '';
+    clearEnv();
     if (!preview) return;
     const selected = preview.entries.find((item) => item.entry === entry);
     if (!selected) {
@@ -217,7 +224,7 @@ export function PackageInstall({
       }
       const argumentsResult =
         PackageInstallRequestSchema.shape.arguments.safeParse(
-          argumentsField.value ?? [],
+          argumentsField.value === undefined ? [] : argumentsField.value,
         );
       if (!argumentsResult.success) {
         setError(
@@ -226,17 +233,15 @@ export function PackageInstall({
         );
         return;
       }
-      const envField = parseJsonField(env.current?.value ?? '');
+      const envField = parseJsonField(envText);
       if (!envField.ok) {
-        clearEnv();
         setError('Use a JSON object of environment values.');
         return;
       }
       const envResult = PackageInstallRequestSchema.shape.env.safeParse(
-        envField.value ?? {},
+        envField.value === undefined ? {} : envField.value,
       );
       if (!envResult.success) {
-        clearEnv();
         setError(
           envResult.error.issues[0]?.message ??
             'Use a JSON object of environment values.',
@@ -260,9 +265,8 @@ export function PackageInstall({
         acknowledgedWarnings: acknowledged,
       };
     }
-    // The protected values leave the form before the request is sent and the
-    // request object is blanked again when it settles.
-    clearEnv();
+    // The request object is blanked again when it settles.
+    setJob(null);
     setStep('installing');
     const controller = new AbortController();
     abort.current = controller;
@@ -287,12 +291,15 @@ export function PackageInstall({
       if (!mounted.current || controller.signal.aborted) return;
       if (final.state === 'succeeded' && final.result) {
         const label = `${preview.name}@${preview.version}`;
+        const saved = final.result.outcome === 'saved';
         setNotice(
           seed.mode === 'install'
-            ? final.result.outcome === 'saved'
+            ? saved
               ? `Installed ${label} as connector ${final.result.connectorId}. Saving is not approval: approve its exact definition in the connector list before it can run.`
               : `Installed ${label} as connector ${final.result.connectorId}, but not every step was saved. Review the connector before use.`
-            : `Replaced with ${label}. The new definition needs approval again.`,
+            : saved
+              ? `Replaced with ${label}. The new definition needs approval again.`
+              : `Replaced with ${label}, but not every step was saved. Review the connector before use.`,
         );
         setFailureCode(null);
         setStep('result');
@@ -301,10 +308,17 @@ export function PackageInstall({
       }
       setFailureCode(final.error);
       setError(packageErrorText(final.error ?? 'install_failed'));
+      if (final.error === 'save_uncertain') {
+        // The save may have landed: the list is reloaded and this view
+        // offers no retry against the old state.
+        setStep('result');
+        await refresh();
+        return;
+      }
       setStep('lookup');
     } catch (failure) {
       if (!mounted.current) return;
-      setError(failureText(failure));
+      setError(packageFailureText(failure));
       setStep('lookup');
     } finally {
       const values = body.env as Record<string, string> | undefined;
@@ -422,15 +436,15 @@ export function PackageInstall({
         </section>
       )}
 
-      {(step === 'resolving' || step === 'installing') && job && (
+      {(step === 'resolving' || step === 'installing') && (
         <section className="package-progress">
           <h3>{step === 'resolving' ? 'Resolving' : 'Installing'}</h3>
           <p role="status">
-            {job.phase.replaceAll('_', ' ')} · {job.progress.packages} packages
-            · {(job.progress.downloadedBytes / 1048576).toFixed(1)} MB
-            downloaded
+            {job
+              ? `${job.phase.replaceAll('_', ' ')} · ${job.progress.packages} packages · ${(job.progress.downloadedBytes / 1048576).toFixed(1)} MB downloaded`
+              : 'Starting…'}
           </p>
-          {(step === 'resolving' || job.phase !== 'saving') && (
+          {job && (step === 'resolving' || job.phase !== 'saving') && (
             <button type="button" onClick={() => void cancelJob()}>
               Cancel
             </button>

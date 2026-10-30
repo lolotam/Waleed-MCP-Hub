@@ -34,6 +34,7 @@ export function ImportDialog({
   refresh,
   savePreview,
   installProposal,
+  installBlocked,
 }: {
   revision: number;
   close: () => void;
@@ -43,6 +44,7 @@ export function ImportDialog({
     definitions: ImportDefinition[],
   ) => void;
   installProposal: (proposal: PackageProposal) => void;
+  installBlocked: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
@@ -591,6 +593,12 @@ export function ImportDialog({
                     )}
                     <button
                       type="button"
+                      disabled={installBlocked}
+                      title={
+                        installBlocked
+                          ? 'An unfinished operation needs recovery review first.'
+                          : undefined
+                      }
                       onClick={() => {
                         installProposal(proposal);
                       }}

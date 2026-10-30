@@ -868,6 +868,7 @@ export function App() {
               initialPreview: preview,
             });
           }}
+          installBlocked={recoveryBlocked}
           installProposal={(proposal: PackageProposal) => {
             // The import stays open: the package is installed in its own,
             // separate review step.

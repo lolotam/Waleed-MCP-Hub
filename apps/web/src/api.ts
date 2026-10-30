@@ -1,4 +1,5 @@
 import {
+  PackageErrorCodeSchema,
   PackageJobSchema,
   SessionResponseSchema,
   type PackageErrorCode,
@@ -11,6 +12,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
   ) {
     super(message);
   }
@@ -41,12 +43,14 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
   });
   if (!response.ok) {
     const error = (await response.json().catch(() => null)) as {
+      error?: unknown;
       message?: string;
     } | null;
     throw new ApiError(
       error?.message ??
         'The local hub is unavailable. Check the terminal and retry.',
       response.status,
+      typeof error?.error === 'string' ? error.error : undefined,
     );
   }
   return response.json() as Promise<T>;
@@ -83,6 +87,22 @@ const packageErrorTexts: Record<PackageErrorCode, string> = {
 
 export function packageErrorText(code: PackageErrorCode): string {
   return packageErrorTexts[code];
+}
+
+// The text of a failed package request. A package view never shows the
+// message of a response: only the fixed sentence of its code or status.
+export function packageFailureText(failure: unknown): string {
+  if (!(failure instanceof ApiError))
+    return 'The local hub is unavailable. Check the terminal and retry.';
+  const code = PackageErrorCodeSchema.safeParse(failure.code);
+  if (code.success) return packageErrorText(code.data);
+  if (failure.status === 429) return packageErrorText('busy');
+  if (failure.status === 503) return 'Managed packages are not available.';
+  if (failure.status === 409)
+    return 'The hub state changed or needs recovery review. Reload and retry.';
+  if (failure.status >= 400 && failure.status < 500)
+    return 'The hub refused this request. Check the fields and retry.';
+  return 'The package request failed. Check the terminal and retry.';
 }
 
 // One sentence per warning of a preview. Every warning must be ticked before

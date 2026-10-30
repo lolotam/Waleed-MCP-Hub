@@ -11,7 +11,13 @@ import {
 } from '@waleed/contracts';
 import type { OperationDialogInput } from './OperationDialog.js';
 import type { PackageSeed } from './PackageInstall.js';
-import { api, packageErrorText, pollPackageJob } from './api.js';
+import {
+  api,
+  packageErrorText,
+  packageFailureText,
+  pollPackageJob,
+} from './api.js';
+import { compareVersions } from './versions.js';
 
 export type ManagedConnector = Connector & { executionHash: string };
 // A managed package is a native connector with a package record.
@@ -171,11 +177,7 @@ export function ConnectorList({
         [sessionKey(connector)]: result.result,
       }));
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : 'The file verification could not be confirmed.',
-      );
+      setError(packageFailureText(failure));
     }
   }
   // The update lookup resolves the tree only; it installs nothing.
@@ -211,7 +213,12 @@ export function ConnectorList({
         setUpdates((current) => ({
           ...current,
           [sessionKey(connector)]: {
-            state: version === record.version ? 'up_to_date' : 'found',
+            // Only a newer release is an update: a lower latest is never
+            // offered as a downgrade.
+            state:
+              compareVersions(version, record.version) > 0
+                ? 'found'
+                : 'up_to_date',
             version,
           },
         }));
@@ -227,11 +234,7 @@ export function ConnectorList({
         ...current,
         [sessionKey(connector)]: { state: 'failed' },
       }));
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : 'The update lookup failed.',
-      );
+      setError(packageFailureText(failure));
     } finally {
       aborts.current.delete(controller);
     }
@@ -577,7 +580,9 @@ function ConnectorActions({
             Update to {update.version}
           </button>
         ) : update?.state === 'up_to_date' ? (
-          <button disabled>Up to date</button>
+          <button disabled={disabled} onClick={() => checkUpdate(connector)}>
+            Up to date · check again
+          </button>
         ) : (
           <button
             disabled={disabled || update?.state === 'checking'}
