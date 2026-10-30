@@ -20,7 +20,7 @@ describe('P5 registry lifecycle', () => {
     const initial = definition({
       id: 'native',
       name: 'Native',
-      command: 'npx',
+      command: 'tool',
       args: ['-y', 'synthetic@1.2.3'],
     });
     const preview = await hub.preview(

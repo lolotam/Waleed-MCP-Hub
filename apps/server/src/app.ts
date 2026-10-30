@@ -513,7 +513,9 @@ export async function createHubServer(options: ServerOptions) {
           kind: 'create_connectors',
           expectedRevision,
           definitions: preview.entries.flatMap((entry) =>
-            entry.selected && entry.definition ? [entry.definition] : [],
+            entry.selected && entry.definition && !entry.packageProposal
+              ? [entry.definition]
+              : [],
           ),
         },
         owner,

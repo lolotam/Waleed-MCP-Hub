@@ -259,7 +259,7 @@ describe('authenticated no-effects import API', () => {
         payload: {
           source: JSON.stringify({
             servers: {
-              Same: { id: 'same', command: 'npx', args: ['synthetic'] },
+              Same: { id: 'same', command: 'tool', args: ['synthetic'] },
               Unsupported: {
                 command: 'uvx',
                 args: ['synthetic'],
