@@ -1448,8 +1448,9 @@ describe('package-resolve', { timeout: 60_000 }, () => {
     });
 
     // A packument with latest 1.4.0, next 2.0.0-rc.1, a deprecated 1.9.2, a
-    // 1.9.3 for no Node at all, and tags npm accepts but a narrow grammar would
-    // not; the lookup of one selector: the picked release, or the fault.
+    // 1.9.3 for no Node at all, a 1.9.4 for no npm at all, and tags npm accepts
+    // but a narrow grammar would not; the lookup of one selector: the picked
+    // release, or the fault.
     const longTag = 'a'.repeat(80);
     const resolveSelector = async (
       version: string,
@@ -1465,6 +1466,7 @@ describe('package-resolve', { timeout: 60_000 }, () => {
         '1.9.1',
         '1.9.2',
         '1.9.3',
+        '1.9.4',
         '2.0.0-rc.1',
       ];
       registry.set('/srv', {
@@ -1483,6 +1485,7 @@ describe('package-resolve', { timeout: 60_000 }, () => {
               version: release,
               ...(release === '1.9.2' ? { deprecated: 'broken' } : {}),
               ...(release === '1.9.3' ? { engines: { node: '<1' } } : {}),
+              ...(release === '1.9.4' ? { engines: { npm: '<1' } } : {}),
             },
           ]),
         ),
@@ -1530,7 +1533,8 @@ describe('package-resolve', { timeout: 60_000 }, () => {
     });
 
     it('resolves a range the latest tag misses to its highest usable release', async () => {
-      // 1.9.3 runs on no Node and 1.9.2 is deprecated: npm skips both.
+      // 1.9.4 runs with no npm, 1.9.3 on no Node and 1.9.2 is deprecated: npm
+      // skips all three.
       expect((await resolveSelector('~1.9.0', '1.9.1')).version).toBe('1.9.1');
     });
 

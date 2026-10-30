@@ -40,6 +40,7 @@ interface SemverModule {
 type PickManifest = (
   packument: unknown,
   wanted: string,
+  options: { npmVersion: string },
 ) => { version?: unknown };
 interface NpaModule {
   resolve(name: string, spec: string): { type: string };
@@ -47,6 +48,12 @@ interface NpaModule {
 const semver = bundledRequire('semver') as SemverModule;
 const npa = bundledRequire('npm-package-arg') as NpaModule;
 const pickManifest = bundledRequire('npm-pick-manifest') as PickManifest;
+// The version of the bundled npm, which the picker matches against
+// engines.npm as npx does with its own. Node is matched against the hub's own
+// runtime, as the engine warning is.
+const bundledNpmVersion = (
+  npmRequire('npm/package.json') as { version: string }
+).version;
 const REGISTRY_SPEC_TYPES = new Set(['range', 'version', 'tag']);
 
 const MAX_ABBREVIATED_BYTES = 8 * 1024 * 1024;
@@ -388,7 +395,9 @@ export const resolvePackage = async (
     if (!packument) throw new PackageFault('package_not_found');
     let picked: unknown;
     try {
-      picked = pickManifest(packument, version).version;
+      picked = pickManifest(packument, version, {
+        npmVersion: bundledNpmVersion,
+      }).version;
     } catch {
       throw new PackageFault('version_not_found');
     }
