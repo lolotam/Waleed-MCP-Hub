@@ -13,6 +13,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { RuntimeFault } from '../packages/hub-core/src/runtime/capabilities.js';
 import { definitionHash } from '@waleed/hub-core';
+import { sessionMcpHttpTransport } from '../packages/hub-core/src/adapters/mcp/http.js';
 import type { Connector, HubState } from '@waleed/contracts';
 import {
   createAgentBridge,
@@ -22,6 +23,7 @@ import {
   type BridgeSnapshot,
 } from '../packages/hub-core/src/integrations/bridge.js';
 import { profileState } from './helpers/runtime.js';
+import { mcpSessionFixture } from './helpers/mcp-session-http.js';
 
 const connectorUnavailable =
   'The connector is unavailable, changed, disabled, or requires authentication. Inspect the hub and refresh tools.';
@@ -205,6 +207,9 @@ interface HarnessConfig {
   notAfter?: (now: number) => number;
   // The connector whose peer disposal never settles on its own.
   hangDispose?: string;
+  // The remote session of a remote connector: the peer is a real HTTP
+  // session against the local fixture.
+  remote?: { origin: string };
 }
 
 interface Harness {
@@ -228,8 +233,46 @@ async function createHarness(config: HarnessConfig = {}): Promise<Harness> {
   });
   const connects: string[] = [];
   const peers: PeerHandle[] = [];
-  const connect: BridgeConnect = async (connector) => {
+  const connect: BridgeConnect = async (connector, signal, died) => {
     connects.push(connector.id);
+    // A remote peer is a real HTTP session against the local fixture.
+    if (config.remote) {
+      const remote = connector as Extract<
+        Connector,
+        { executionMode: 'remote' }
+      >;
+      const http = sessionMcpHttpTransport(
+        remote.endpoint,
+        remote.transport,
+        signal,
+        died ?? (() => undefined),
+        undefined,
+        config.remote.origin,
+      );
+      const client = new Client(
+        { name: 'synthetic-remote-client', version: '1' },
+        { capabilities: {} },
+      );
+      client.onerror = () => undefined;
+      await client.connect(http.transport, { timeout: 10_000 });
+      return {
+        client,
+        async dispose() {
+          try {
+            await http.dispose();
+          } finally {
+            await client.close();
+          }
+        },
+        assertPublic() {},
+        beginOperation() {
+          http.beginOperation();
+        },
+        endOperation() {
+          http.endOperation();
+        },
+      };
+    }
     const hang = config.hangDispose === connector.id;
     const handle = await createPeer(config.peer);
     peers.push(handle);
@@ -320,6 +363,21 @@ const disable = (state: HubState, id = 'connector-0') => {
 };
 const wait = (ms = 20) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// Polls an observable condition until it holds or the timeout passes. The
+// tests wait for what they observe, never for a guessed duration.
+async function until(
+  condition: () => boolean,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (condition()) return;
+    if (Date.now() >= deadline)
+      throw new Error('The condition did not hold in time.');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 describe('agent bridge session mode', () => {
   it('serves three calls over one native peer', async () => {
@@ -1112,8 +1170,128 @@ describe('agent bridge session mode', () => {
     }
   });
 
-  it('connects a remote connector once per request in session mode', async () => {
+  it('pools a remote connector across requests', async () => {
     const harness = await createHarness({ state: profileState(['remote']) });
+    try {
+      const tools = await harness.agent.listTools();
+      expect(tools.tools).toHaveLength(1);
+      const name = tools.tools[0]!.name;
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({ content: [{ text: 'synthetic success' }] });
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({ content: [{ text: 'synthetic success' }] });
+      // The listing and the two calls share one pooled peer.
+      expect(harness.connects).toHaveLength(1);
+      expect(harness.peers).toHaveLength(1);
+      expect(harness.peers[0]?.disposed).toBe(0);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+    }
+  });
+
+  it('serves a fresh peer after the remote session was refused', async () => {
+    const fixture = await mcpSessionFixture();
+    const state = profileState(['remote']);
+    const connector = state.connectors[0] as Extract<
+      Connector,
+      { executionMode: 'remote' }
+    >;
+    connector.endpoint = `${fixture.origin}/mcp`;
+    reapprove(connector);
+    const harness = await createHarness({
+      state,
+      remote: { origin: fixture.origin },
+    });
+    try {
+      const tools = await harness.agent.listTools();
+      expect(tools.tools).toHaveLength(1);
+      const name = tools.tools[0]!.name;
+      const initializes = () =>
+        fixture.seen.filter(
+          (event) => event.messages[0]?.method === 'initialize',
+        ).length;
+      expect(initializes()).toBe(1);
+      // The session is refused: the peer is dead and the request fails.
+      fixture.options.notFound = true;
+      fixture.refusals = 1;
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({
+        isError: true,
+        content: [{ text: connectorUnavailable }],
+      });
+      // The next request starts a fresh peer: a new initialize.
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({ content: [{ text: 'synthetic success' }] });
+      expect(initializes()).toBe(2);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+      await fixture.close();
+    }
+  });
+
+  it('retires a remote peer whose call was cancelled', async () => {
+    const fixture = await mcpSessionFixture();
+    const state = profileState(['remote']);
+    const connector = state.connectors[0] as Extract<
+      Connector,
+      { executionMode: 'remote' }
+    >;
+    connector.endpoint = `${fixture.origin}/mcp`;
+    reapprove(connector);
+    const harness = await createHarness({
+      state,
+      remote: { origin: fixture.origin },
+    });
+    try {
+      const tools = await harness.agent.listTools();
+      expect(tools.tools).toHaveLength(1);
+      const name = tools.tools[0]!.name;
+      const initializes = () =>
+        fixture.seen.filter(
+          (event) => event.messages[0]?.method === 'initialize',
+        ).length;
+      expect(initializes()).toBe(1);
+      // The call of the agent reaches the peer and is never answered.
+      const answer = fixture.handler;
+      fixture.handler = (event) => {
+        if (event.messages[0]?.method === 'tools/call') return;
+        answer(event);
+      };
+      const controller = new AbortController();
+      const pending = harness.agent.callTool(
+        { name, arguments: {} },
+        CallToolResultSchema,
+        { signal: controller.signal },
+      );
+      await until(() =>
+        fixture.seen.some(
+          (event) => event.messages[0]?.method === 'tools/call',
+        ),
+      );
+      // The agent cancels the call: the peer that served it is retired.
+      controller.abort();
+      await expect(pending).rejects.toBeDefined();
+      // The next call is served by a fresh peer: a new initialize.
+      fixture.handler = answer;
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({ content: [{ text: 'synthetic success' }] });
+      expect(initializes()).toBe(2);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+      await fixture.close();
+    }
+  });
+
+  it('connects a docker connector once per request in session mode', async () => {
+    const harness = await createHarness({ state: profileState(['docker']) });
     try {
       const tools = await harness.agent.listTools();
       expect(tools.tools).toHaveLength(1);

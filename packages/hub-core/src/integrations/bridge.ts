@@ -28,7 +28,10 @@ import {
 import { assertNoLinks } from '../adapters/managed-files.js';
 import { windowsSecretStore } from '../adapters/secrets/windows.js';
 import { createBindingResolver, type SecretLease } from '../auth/bindings.js';
-import { safeMcpHttpTransport } from '../adapters/mcp/http.js';
+import {
+  safeMcpHttpTransport,
+  sessionMcpHttpTransport,
+} from '../adapters/mcp/http.js';
 import { ContainedStdioTransport } from '../adapters/mcp/stdio.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
 import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
@@ -99,6 +102,89 @@ export type BridgeConnect = (
   signal: AbortSignal,
   died?: () => void,
 ) => Promise<BridgePeer>;
+
+// The remote connector of the session mode.
+type RemoteConnector = Extract<Connector, { executionMode: 'remote' }>;
+
+// The pooled remote peer of the session mode: one HTTP session for the whole
+// life of the pool entry. The cleanup is idempotent and terminates the remote
+// session before the signals of the peer are aborted, so a failed handshake
+// never strands the session the peer issued.
+export async function remoteSessionPeer(
+  client: Client,
+  connector: RemoteConnector,
+  signal: AbortSignal,
+  died: () => void,
+  lease: SecretLease | undefined,
+  // A local fixture origin is a construction-time testing exception.
+  fixtureOrigin?: string,
+): Promise<BridgePeer> {
+  // The death of the peer is observed once, from the handshake on.
+  let dead = false;
+  const signalDeath = () => {
+    if (dead) return;
+    dead = true;
+    died();
+  };
+  const remote = sessionMcpHttpTransport(
+    connector.endpoint,
+    connector.transport,
+    signal,
+    signalDeath,
+    lease?.headers,
+    fixtureOrigin,
+  );
+  // The window opens before the handshake, so `initialize` counts against
+  // the first operation. It stays open until the first operation ends.
+  let windowOpen = false;
+  const beginOperation = () => {
+    if (windowOpen) return;
+    remote.beginOperation();
+    windowOpen = true;
+  };
+  const endOperation = () => {
+    if (!windowOpen) return;
+    remote.endOperation();
+    windowOpen = false;
+  };
+  client.onerror = signalDeath;
+  beginOperation();
+  try {
+    await client.connect(remote.transport, { timeout: 20000 });
+  } catch (error) {
+    // The remote session is terminated before the local cleanup: the DELETE
+    // needs a signal of its own.
+    try {
+      await remote.dispose();
+    } finally {
+      await client.close();
+    }
+    throw error;
+  }
+  return {
+    client,
+    ...(lease?.notAfter === undefined ? {} : { notAfter: lease.notAfter }),
+    beginOperation,
+    endOperation,
+    async dispose() {
+      try {
+        await remote.dispose();
+      } finally {
+        try {
+          await client.close();
+        } finally {
+          lease?.dispose();
+        }
+      }
+    },
+    assertPublic(value) {
+      assertNoCredentialEcho(value, [
+        ...Object.values(lease?.environment ?? {}),
+        ...Object.values(lease?.headers ?? {}),
+      ]);
+    },
+  };
+}
 
 // The bridge the agent talks to. It is the SDK server plus the reconciliation
 // the watcher triggers.
@@ -212,18 +298,19 @@ export function bridgeToolName(
   return `${name.slice(0, toolNameLimit - suffix.length).replace(/[_-]+$/, '')}${suffix}`;
 }
 
-// The session mode of the bridge: one pool of native peers, the validation
-// before every dispatch and the reconciliation the watcher triggers.
+// The session mode of the bridge: one pool of native and remote peers, the
+// validation before every dispatch and the reconciliation the watcher
+// triggers.
 interface SessionBridge {
   // The numbered registry snapshot; it fails closed.
   snapshot(): Promise<BridgeSnapshot>;
-  // The pooled listing of one native connector.
+  // The pooled listing of one native or remote connector.
   list(
     connector: Connector,
     signal: AbortSignal,
     budget: number,
   ): Promise<Tool[]>;
-  // The pooled call of one native connector.
+  // The pooled call of one native or remote connector.
   call(
     connector: Connector,
     expectedHash: string,
@@ -275,7 +362,8 @@ function createSessionBridge(
       );
       if (
         !connector ||
-        connector.executionMode !== 'native' ||
+        (connector.executionMode !== 'native' &&
+          connector.executionMode !== 'remote') ||
         !connector.enabled ||
         !approved(connector)
       )
@@ -614,8 +702,13 @@ export function createAgentBridge(
         (item) => item.enabled && approved(item),
       )) {
         if (signal.aborted) break;
-        if (bridge && snapshot && connector.executionMode === 'native') {
-          // A pooled native peer: one process for the whole listing.
+        if (
+          bridge &&
+          snapshot &&
+          (connector.executionMode === 'native' ||
+            connector.executionMode === 'remote')
+        ) {
+          // A pooled peer: one peer for the whole listing.
           let listed: Tool[];
           try {
             listed = await bridge.list(connector, signal, 256 - tools.length);
@@ -707,7 +800,11 @@ export function createAgentBridge(
               },
             ],
           };
-        if (session && connector.executionMode === 'native') {
+        if (
+          session &&
+          (connector.executionMode === 'native' ||
+            connector.executionMode === 'remote')
+        ) {
           // The call's deadline runs on the session clock and ends with the
           // call: a finished request leaves no deadline that could fire later.
           const deadline = new AbortController();
@@ -947,18 +1044,30 @@ export async function runAgentBridge(registry: string, agentId: string) {
       if (connector.executionMode === 'docker') {
         docker = await dockerAgentTransport(connector, directory, signal);
         await client.connect(docker.transport, { timeout: 20000 });
-      } else if (connector.executionMode === 'remote')
-        await client.connect(
-          safeMcpHttpTransport(
-            connector.endpoint,
-            connector.transport,
+      } else if (connector.executionMode === 'remote') {
+        if (!diedCallback) {
+          // Not pooled: one peer per request, as before.
+          await client.connect(
+            safeMcpHttpTransport(
+              connector.endpoint,
+              connector.transport,
+              signal,
+              undefined,
+              lease?.headers,
+            ),
+            { timeout: 20000 },
+          );
+        } else {
+          // A pooled peer: one HTTP session for the whole life of the entry.
+          return await remoteSessionPeer(
+            client,
+            connector,
             signal,
-            undefined,
-            lease?.headers,
-          ),
-          { timeout: 20000 },
-        );
-      else {
+            diedCallback,
+            lease,
+          );
+        }
+      } else {
         const runner = await createWindowsProcessRunner({
           allowedExecutables: [connector.executable],
           workingDirectory: directory,
