@@ -270,6 +270,9 @@ export function PackageInstall({
     setStep('installing');
     const controller = new AbortController();
     abort.current = controller;
+    // Once the hub accepted the job, its outcome is unknown until a terminal
+    // state is read: a lost poll never offers a retry against the old state.
+    let accepted = false;
     try {
       const started = PackageJobSchema.parse(
         await api<PackageJob>(
@@ -279,6 +282,7 @@ export function PackageInstall({
           body,
         ),
       );
+      accepted = true;
       if (!mounted.current) return;
       setJob(started);
       const final = await pollPackageJob(
@@ -318,6 +322,14 @@ export function PackageInstall({
       setStep('lookup');
     } catch (failure) {
       if (!mounted.current) return;
+      if (accepted) {
+        setError(
+          'The job was started but its progress could not be read, so its outcome is unknown. The connector list was reloaded: check it before installing again.',
+        );
+        setStep('result');
+        await refresh().catch(() => undefined);
+        return;
+      }
       setError(packageFailureText(failure));
       setStep('lookup');
     } finally {

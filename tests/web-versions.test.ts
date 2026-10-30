@@ -34,6 +34,16 @@ describe('compareVersions', () => {
     expect(compareVersions('1.0.0-x-y.1', '1.0.0-x-y.0')).toBeGreaterThan(0);
   });
 
+  it('keeps the order of numbers above the safe-integer range', () => {
+    expect(
+      compareVersions('9007199254740993.0.0', '9007199254740992.0.0'),
+    ).toBeGreaterThan(0);
+    expect(
+      compareVersions('1.0.0-9007199254740993', '1.0.0-9007199254740992'),
+    ).toBeGreaterThan(0);
+    expect(compareVersions('1.0.0-10', '1.0.0-9')).toBeGreaterThan(0);
+  });
+
   it('ignores build metadata', () => {
     expect(compareVersions('1.0.0+build.2', '1.0.0+build.1')).toBe(0);
   });

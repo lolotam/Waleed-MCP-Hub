@@ -84,7 +84,7 @@ function job(overrides: Record<string, unknown>) {
 }
 async function fakePackageApi(
   page: Page,
-  options: { failResolve?: boolean } = {},
+  options: { failResolve?: boolean; losePoll?: boolean } = {},
 ) {
   const state: {
     resolvePolls: number;
@@ -162,6 +162,10 @@ async function fakePackageApi(
     }
     if (path === `/api/packages/jobs/${INSTALL_JOB}`) {
       state.installPolls += 1;
+      if (options.losePoll) {
+        await route.abort('connectionreset');
+        return;
+      }
       if (state.installPolls === 1) {
         await answer(
           route,
@@ -430,4 +434,29 @@ test('an import proposal is listed separately and opens the package flow', async
     path: 'test-results/package-proposal-install.png',
     fullPage: true,
   });
+});
+
+test('a lost poll after the install started never offers a retry', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await fakePackageApi(page, { losePoll: true });
+  await page
+    .getByRole('button', { name: 'Add Manual MCP', exact: true })
+    .click();
+  await page.getByLabel('Connection type', { exact: true }).selectOption('npm');
+  await page.getByLabel('Connector name', { exact: true }).fill('Demo MCP');
+  await page.getByLabel('Package name', { exact: true }).fill('demo-mcp');
+  await page.getByRole('button', { name: 'Look up', exact: true }).click();
+  await page.getByRole('radio', { name: /bin\/demo-mcp-alt\.js/ }).check();
+  await page.getByLabel(/This package has install scripts/).check();
+  await page.getByLabel(/This release is younger than 7 days/).check();
+  await page.getByRole('button', { name: 'Install', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('its outcome is unknown');
+  await expect(
+    page.getByRole('button', { name: 'Look up', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: 'Install', exact: true }),
+  ).toHaveCount(0);
 });
