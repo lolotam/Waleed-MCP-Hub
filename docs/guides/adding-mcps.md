@@ -89,8 +89,66 @@ accepts a personal access token or API key in a header. If it does, use
 ## npm package (npx)
 
 The hub never runs `npx`, `npm`, `.cmd` or `.bat` files, because they can download
-and run different code each time. Install the package once into a folder you
-control, then point the hub at `node.exe` and the package's entry script.
+and run different code each time. Instead it installs the package itself, from a
+frozen dependency tree you review first, and runs the result with its own
+`node.exe`.
+
+1. **Connectors → Add Manual MCP** → **Connection type**
+   `npm package — managed install`.
+2. **Connector name**: a short name, for example `filesystem`.
+3. **Package name**: the name from the README, for example
+   `@modelcontextprotocol/server-filesystem`.
+4. **Version (optional)**: an exact version (`1.2.3`), a range (`^1.2.0`) or a tag
+   (`next`). Leave it blank for `latest`.
+5. **Look up**. Nothing is installed yet. The preview shows the exact version, its
+   release date, the number of packages, the unpacked size, the lock hash, and the
+   **Command that will run**.
+6. If the package has more than one command, pick one.
+7. Tick every warning. Common ones:
+   - _Install scripts will NOT run_: the hub never runs `preinstall`,
+     `postinstall` or native builds. Most MCP servers don't need them.
+   - _Younger than 7 days_, _deprecated_, _engines do not match_, _more than 300
+     packages_, _larger than 200 MiB_.
+8. **Arguments (JSON array, no shell expansion)**: the server's own options, for
+   example `["E:\\Dev\\Projects"]` for the filesystem server. The hub adds the
+   entry script itself; don't repeat it.
+9. **Protected environment values (write-only JSON)**: any keys the server reads,
+   for example `{ "API_TOKEN": "…" }`. Names must be upper case. Names starting
+   with `NODE_` and the OpenSSL certificate variables are refused.
+10. **Install**. Progress is shown and you can cancel. On success the connector is
+    saved but not approved: approve it, then **Test capabilities**.
+
+Only `registry.npmjs.org` is contacted. Private registries, `.npmrc` settings,
+and git, URL or file dependencies are not supported: a package that needs one fails
+with "A dependency is not a registry package". The install lives in
+`%LOCALAPPDATA%\WaleedMcpHub\packages\`, readable only by you and SYSTEM.
+
+### After install
+
+The connector row shows **npm package** with the package and version, plus:
+
+- **Verify files**: re-checks every installed file against what you approved. No
+  package code runs.
+- **Check for update**: asks the registry for a newer release. If one exists, the
+  button becomes **Update to x.y.z**, which opens the same review screen. An
+  update goes into a new install folder and needs approval again; your arguments,
+  environment values and profiles are kept.
+- **Reinstall**: shown when verification fails. It installs the same version
+  again into a fresh folder.
+
+Every launch checks the files first, so an edited, added or removed file stops the
+connector with "The installed files have changed since install" before anything
+runs. Removing the connector deletes its install folder.
+
+If the dialog loses contact with the hub during an install, it says the outcome is
+unknown and offers **Check the job again**. Use it, or look at the connector list,
+before installing a second time. If the hub restarted in between, it no longer
+knows the job: check the connector list instead.
+
+### Manual install (advanced)
+
+For a package the managed install refuses, install it yourself into a folder you
+control and point a native connector at `node.exe` and the entry script:
 
 1. Install a pinned version into its own folder:
 
@@ -125,7 +183,8 @@ control, then point the hub at `node.exe` and the package's entry script.
 5. Save, approve, test.
 
 Your SSH connectors are set up this way: `node.exe` plus
-`ssh-mcp\node_modules\ssh-mcp\build\index.js`.
+`ssh-mcp\node_modules\ssh-mcp\build\index.js`. Unlike a managed install, a manual
+install is not checked for changed files before each launch.
 
 Backslashes must be doubled inside JSON strings.
 
@@ -184,10 +243,13 @@ If you already have the server in another app's config:
    save** → **Apply reviewed change**.
 
 Env and header values in the paste become write-only references; re-enter them
-in **Authentication** after saving. Entries that use `npx`, `uvx` or `.cmd` launchers
-are saved as data only. Convert them as described in
-[npm package](#npm-package-npx) or [Python package](#python-package-uvx) before
-they can run. JSONC (comments) and TOML are not accepted; remove comments first.
+in **Authentication** after saving. An `npx some-package` entry is listed
+separately as a package proposal with an **Install** button, which opens the
+[managed install](#npm-package-npx) with the name, version and arguments filled
+in. Its secret values are dropped from the paste; enter them again in the install
+form. Applying the import never installs anything. Entries that use `uvx` or `.cmd`
+launchers are saved as data only; convert them as described in
+[Python package](#python-package-uvx). JSONC (comments) and TOML are not accepted; remove comments first.
 
 ## Current limits worth knowing
 

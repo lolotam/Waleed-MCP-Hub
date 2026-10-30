@@ -542,6 +542,97 @@ pass. Startup failures clean owned locks and disconnect IPC; the port-conflict
 regression proves the unrelated listener survives. Tool result/cleanup/parser
 diagnostics remain non-reflecting, including JSON-escaped credential echoes.
 
+## D024 — Managed npm packages: frozen lock, bundled npm, verify every launch (2026-10-30)
+
+F01 (spec `docs/specs/F01-managed-packages.md`, plan
+`docs/plans/F01-managed-packages-plan.md`) lets a user install an npm MCP server
+without `npx`. The hub resolves the full tree once (**Look up**), stores the frozen
+`package-lock.json` server-side behind a single-use, owner-scoped, 10-minute
+`previewId`, and **Install** runs `npm ci --ignore-scripts --omit=dev
+--omit=optional` from that lock. The saved connector is an ordinary native
+connector plus a server-generated `package` record (`lockHash`, `manifestHash`,
+entry, install ID). Clients can never create, alter or strip that record. The
+record is part of the approved definition, so approval binds a digest of every
+installed file. Every launch, **Test capabilities** and **Verify files** rebuild
+the manifest from disk before secrets are resolved, and fail closed with
+`package_modified`.
+
+Isolation rules:
+
+- npm reaches only `registry.npmjs.org:443`, through a loopback CONNECT allow-list
+  proxy with a 300 MiB cap. It gets no `PATH`, the four `--allow-*=none` flags
+  (no git, URL, file or directory dependencies), empty `--userconfig` and
+  `--globalconfig` files, a redirected profile and `--logs-max=0`. npm output is
+  used for exit status only.
+- The working folder always holds a `package.json` and npm gets `--prefix`, so
+  npm never searches parent folders for a project root. An ancestor `.npmrc`
+  (including the one `npm login` writes to the home folder) is therefore never
+  read, and is not refused. Refusing it would break every lookup for users who
+  have ever logged in to npm.
+- Node does search parent folders for modules. Any `node_modules` above the
+  install folder therefore fails the check. Launches pass
+  `--no-global-search-paths`, and `NODE_*` and OpenSSL environment names are refused
+  on package connectors.
+- No lifecycle script, native build or package code runs during Look up, Install
+  or Verify files.
+
+**Bundled npm, repacked.** The hub runs its own pinned npm
+(`node.exe <npm>\bin\npm-cli.js`), never the user's. npm 12.2.1 bundles `undici`
+and `ip-address` versions with open advisories (GHSA-4qv8-2p9j-2685,
+GHSA-xjj6-f33q-929c, GHSA-2m5v-pch6-74hx, GHSA-qrxm-fqhp-jwvm,
+GHSA-9fm3-97px-rjf6, GHSA-rxp7-6hxx-x8q5). Bundled dependencies cannot be
+overridden or audit-fixed, and no npm release bundled the fixed versions yet, so
+`scripts/npm-bundle.mjs build` writes `vendor/npm-12.2.1-patched.tgz`. It contains
+the official npm 12.2.1 files with only those two packages replaced by
+`undici@6.29.1` and `ip-address@10.7.4`, every input is pinned by sha512, and file
+times are npm's fixed publish time. CI runs `npm run check:npm-bundle`
+(`verify`), which proves the vendored file contains exactly those files and
+nothing else, before `npm audit --audit-level=moderate`. There is no audit
+exception. Drop the repack when an npm release bundles fixed versions.
+
+**Recovery.** An install is built in place under `<data>\packages\<installId>\`
+with a sibling `.installing` marker. Publishing and saving happen under one
+in-process package lock. Reconciliation runs at startup and after removal, and
+deletes folders that no connector references and markers whose job is gone. An
+outcome the job cannot confirm is `save_uncertain`, and the job never deletes in
+that state. Update and Reinstall install into a new folder and swap it in with a
+connector-revision check; the new definition needs approval again.
+
+**Web UI (T9).** The page reports the outcome of a lost job honestly. A lost start
+or poll says the outcome is unknown and offers **Check the job again**. A job the
+hub no longer knows (HTTP 404, for example after a restart) is not offered for
+re-checking. A 503 counts as "nothing started" only for the codes known to refuse
+before a job exists (`unavailable`, `audit_unavailable`). Hub refreshes time out
+after 20 seconds and follow a newest-call-wins rule (`apps/web/src/latest.ts`), so
+a slow older refresh never overwrites a newer one, and every caller gets the
+outcome of the newest call.
+
+**Residual risks (accepted, stated rather than claimed away):**
+
+1. **Check-to-launch race (TOCTOU).** As in D017, a malicious process of the same
+   user can swap files between verification and process start. The check catches
+   accidental and after-the-fact changes and swaps between approval and launch,
+   not a live same-user attacker.
+2. **Junction race.** `assertNoLinks` checks every path component, but a
+   same-user process could create a junction after the check and before use. Same
+   threat model as 1.
+3. **Alternate data streams.** The manifest hashes each file's main data stream.
+   An NTFS alternate data stream added to an installed file is not detected. Code
+   would have to name the stream to load it, and changing that code is detected;
+   a stream can still hide data inside the install folder.
+4. **Best-effort watchdog.** Size and file caps are enforced by a scan every
+   250 ms or less, plus a 4-second kill grace, not by a filesystem quota. npm can
+   overshoot by one interval plus the grace. The 2 GiB free-space reserve, checked
+   before start and on every scan, keeps that overshoot from filling the drive. A
+   real per-folder quota (NTFS quota or FSRM) is possible future work.
+5. **Package code runs with the user's rights.** After approval, a package server
+   runs as the signed-in user inside a Job Object that bounds its lifetime and
+   process tree, not its file or network access. Approval of the exact package and
+   version is the trust decision; the hub is not a sandbox.
+
+Python packages (`uvx`) stay out of scope until F01b decides interpreter
+provenance, wheel targeting and credential isolation.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint

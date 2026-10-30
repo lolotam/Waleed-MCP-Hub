@@ -1,6 +1,6 @@
 # F01 — Managed npm packages
 
-Status: debated (rounds 1–2 applied) · Roadmap item 1 (P0) · Decision record: D024
+Status: implemented (PR #3 back end, PR #4 web UI) · debated (rounds 1–2 applied) · Roadmap item 1 (P0) · Decision record: D024
 
 Python packages (`uvx`) are split into **F01b** (see the end of this document),
 because they need separate decisions on interpreter provenance, wheel targeting,
