@@ -559,7 +559,10 @@ test('a 503 with an unknown code leaves the outcome unknown', async ({
   ).toHaveCount(0);
 });
 
-test('a stalled list reload never locks the dialog', async ({ page }) => {
+test('a stalled list reload never locks the dialog or the page', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
   await page.goto(await launch());
   await fakePackageApi(page, { loseStart: true, stallReload: true });
   await installDemo(page);
@@ -568,4 +571,9 @@ test('a stalled list reload never locks the dialog', async ({ page }) => {
   await expect(
     page.getByRole('button', { name: 'Close', exact: true }),
   ).toHaveCount(0);
+  // The bounded refresh gives the page back: it ends with its error instead
+  // of loading for good.
+  await expect(
+    page.getByText('The hub did not answer in time. Refresh to retry.'),
+  ).toBeVisible({ timeout: 30_000 });
 });

@@ -61,6 +61,9 @@ const agentNames: Record<string, string> = {
   cursor: 'Cursor Agent',
 };
 
+// The longest wait on one full refresh of the hub state.
+const REFRESH_LIMIT_MS = 20_000;
+
 export function App() {
   const [page, setPage] = useState<Page>('Connectors');
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -93,6 +96,8 @@ export function App() {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError('');
+    // Every read is bounded, so a stalled hub never leaves the page loading.
+    const signal = AbortSignal.timeout(REFRESH_LIMIT_MS);
     try {
       await sessionReady;
       const [
@@ -104,22 +109,32 @@ export function App() {
         recovery,
         connectorResult,
       ] = await Promise.all([
-        api('/api/bootstrap'),
+        api('/api/bootstrap', undefined, signal),
         api<{
           profiles: Profile[];
           revision: number;
           materializations: Array<Materialization & { stale: boolean }>;
-        }>('/api/profiles'),
+        }>('/api/profiles', undefined, signal),
         api<{ agents: Array<AgentObservation & Partial<DiscoveredAgent>> }>(
           '/api/agents',
+          undefined,
+          signal,
         ),
-        api<{ events: HubState['activity'] }>('/api/activity'),
-        api<{ events: SecurityEvent[] }>('/api/security-activity'),
-        api<{ blocked: boolean }>('/api/recovery'),
+        api<{ events: HubState['activity'] }>(
+          '/api/activity',
+          undefined,
+          signal,
+        ),
+        api<{ events: SecurityEvent[] }>(
+          '/api/security-activity',
+          undefined,
+          signal,
+        ),
+        api<{ blocked: boolean }>('/api/recovery', undefined, signal),
         api<{
           connectors: ManagedConnector[];
           observations: CapabilityObservation[];
-        }>('/api/connectors'),
+        }>('/api/connectors', undefined, signal),
       ]);
       setBootstrap({
         ...BootstrapSchema.parse(info),
@@ -135,15 +150,19 @@ export function App() {
       setRecoveryBlocked(recovery.blocked);
       if (BootstrapSchema.parse(info).capabilities.discovery) {
         const [snapshot, preview] = await Promise.all([
-          api<DiscoverySnapshot>('/api/discovery'),
-          api<AdoptionPreview>('/api/adoption/preview'),
+          api<DiscoverySnapshot>('/api/discovery', undefined, signal),
+          api<AdoptionPreview>('/api/adoption/preview', undefined, signal),
         ]);
         setDiscovery(snapshot);
         setAdoption(preview);
       }
     } catch (error) {
       setError(
-        error instanceof Error ? error.message : 'The hub is unavailable.',
+        error instanceof DOMException && error.name === 'TimeoutError'
+          ? 'The hub did not answer in time. Refresh to retry.'
+          : error instanceof Error
+            ? error.message
+            : 'The hub is unavailable.',
       );
     } finally {
       setLoading(false);

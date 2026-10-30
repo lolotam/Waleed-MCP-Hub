@@ -56,6 +56,8 @@ function parseJsonField(
 // packages are off, or the refusal could not be audited. Any other 503 may
 // follow a job, so it leaves the outcome unknown.
 const PRE_START_REFUSALS = new Set(['unavailable', 'audit_unavailable']);
+// The longest wait on the connector list reload after a package outcome.
+const RELOAD_LIMIT_MS = 15_000;
 
 export function PackageInstall({
   seed,
@@ -103,9 +105,9 @@ export function PackageInstall({
     job: PackageJob;
     label: string;
   } | null>(null);
-  // True while the connector list reloads after an unknown outcome: the job
-  // cannot be checked again until the call that ended still settles.
-  const [reloading, setReloading] = useState(false);
+  // The attempt that owns the view. A reload of an older attempt that settles
+  // late never overwrites a newer attempt's outcome.
+  const attempt = useRef(0);
   const running = step === 'resolving' || step === 'installing';
   const reportRunning = useRef(onRunning);
   reportRunning.current = onRunning;
@@ -327,14 +329,25 @@ export function PackageInstall({
     }
   }
 
-  // The connector list is reloaded after every outcome. A failed reload never
-  // decides that outcome: it only adds that the list is stale.
+  // The connector list is reloaded after every outcome. A failed or stalled
+  // reload never decides that outcome: it only adds that the list is stale,
+  // and it ends within a bounded time so the call always reaches its cleanup.
   async function reload(): Promise<string> {
+    const stale =
+      ' The connector list could not be reloaded; reload the page to see it.';
+    let timer = 0;
     try {
-      await refresh();
-      return '';
+      const settled = await Promise.race([
+        refresh().then(() => true),
+        new Promise<false>((resolve) => {
+          timer = window.setTimeout(() => resolve(false), RELOAD_LIMIT_MS);
+        }),
+      ]);
+      return settled ? '' : stale;
     } catch {
-      return ' The connector list could not be reloaded; reload the page to see it.';
+      return stale;
+    } finally {
+      window.clearTimeout(timer);
     }
   }
 
@@ -387,9 +400,8 @@ export function PackageInstall({
 
   // The outcome of a job whose answer or progress was lost. The view keeps
   // the job, if one was read and the hub still knows it, so it can be checked
-  // again. The result shows at once, so Close never waits on the reload, but
-  // the retry stays disabled until the reload settles, so it never runs
-  // beside the call that is still unwinding.
+  // again. The result shows at once and nothing waits on the reload: a later
+  // attempt owns the view, so this reload's late sentence is then dropped.
   async function unknownOutcome(
     started: PackageJob | null,
     label: string,
@@ -401,18 +413,18 @@ export function PackageInstall({
       : forgotten
         ? 'The hub no longer knows this job (it may have restarted), so its outcome is unknown. Check the connector list before installing again.'
         : 'The job was started but its progress could not be read, so its outcome is unknown. It may still be running: check the job again, or check the connector list before installing again.';
+    const owner = attempt.current;
     setUnknownJob(started && !forgotten ? { job: started, label } : null);
-    setReloading(true);
     setStep('result');
     setError(text);
     const stale = await reload();
-    if (!mounted.current) return;
-    setReloading(false);
+    if (!mounted.current || attempt.current !== owner) return;
     if (stale) setError(text + stale);
   }
 
   async function checkAgain() {
-    if (!unknownJob || reloading) return;
+    if (!unknownJob) return;
+    attempt.current += 1;
     const { job: started, label } = unknownJob;
     setError('');
     setStep('installing');
@@ -692,7 +704,6 @@ export function PackageInstall({
               <button
                 className="primary"
                 type="button"
-                disabled={reloading}
                 onClick={() => void checkAgain()}
               >
                 Check the job again

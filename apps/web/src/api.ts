@@ -28,7 +28,11 @@ if (window.location.hash)
     window.location.pathname + window.location.search,
   );
 
-export async function api<T>(path: string, body?: unknown): Promise<T> {
+export async function api<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -39,6 +43,7 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     headers,
     credentials: 'same-origin',
     cache: 'no-store',
+    ...(signal ? { signal } : {}),
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!response.ok) {
