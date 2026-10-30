@@ -153,11 +153,17 @@ export function App() {
         observations: CapabilityObservation[];
       }>('/api/connectors', undefined, signal),
     ]);
+    const parsed = BootstrapSchema.parse(info);
+    // Every read finishes before anything is committed, so a failed or late
+    // discovery read never leaves a mixed snapshot on the page.
+    const discovered = parsed.capabilities.discovery
+      ? await Promise.all([
+          api<DiscoverySnapshot>('/api/discovery', undefined, signal),
+          api<AdoptionPreview>('/api/adoption/preview', undefined, signal),
+        ])
+      : null;
     if (!current()) return;
-    setBootstrap({
-      ...BootstrapSchema.parse(info),
-      revision: profileResult.revision,
-    });
+    setBootstrap({ ...parsed, revision: profileResult.revision });
     setProfiles(profileResult.profiles);
     setConnectors(connectorResult.connectors);
     setObservations(connectorResult.observations);
@@ -166,14 +172,9 @@ export function App() {
     setActivity(events.events);
     setSecurityEvents(security.events);
     setRecoveryBlocked(recovery.blocked);
-    if (BootstrapSchema.parse(info).capabilities.discovery) {
-      const [snapshot, preview] = await Promise.all([
-        api<DiscoverySnapshot>('/api/discovery', undefined, signal),
-        api<AdoptionPreview>('/api/adoption/preview', undefined, signal),
-      ]);
-      if (!current()) return;
-      setDiscovery(snapshot);
-      setAdoption(preview);
+    if (discovered) {
+      setDiscovery(discovered[0]);
+      setAdoption(discovered[1]);
     }
   }
   useEffect(() => {
