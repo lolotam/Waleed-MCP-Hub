@@ -40,6 +40,12 @@ Updated: 2026-10-30
   The post-fix `npm run check` passes 1,039 tests across 86 files, typecheck/lint,
   browser/data-only boundaries, credential scan, production build and compiled
   Windows process/DPAPI smokes. `npm run format:check` and `git diff --check` pass.
+  The final full `npm run test:e2e` rerun passes all 66 Playwright tests, including
+  desktop reopen/shutdown and writer-lock release with unchanged assertions.
+  `npm run test:windows-integrations` passes all seventeen disposable scopes,
+  private backup/integrate/disconnect and the DPAPI-backed independent bridge:
+  discovery invokes no tools, one explicit synthetic call succeeds, and disabled
+  routing is rejected. The complete final gate sequence exits successfully.
   Vite retains its non-blocking advisory for the 503.82 kB main browser chunk;
   the bundle gate passes.
   These checks are not code signing, live Edge/shortcut verification, real-account
