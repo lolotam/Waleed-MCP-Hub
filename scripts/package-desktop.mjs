@@ -5,6 +5,8 @@ import { createRequire } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { buildLauncher } from './build-launcher.mjs';
+import { writeDesktopIntegrity } from './desktop-integrity.mjs';
 
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Package using Node 24 on Windows.');
@@ -101,11 +103,6 @@ await cp(
   join(output, 'runtime/NODE-LICENSE.txt'),
 );
 await mkdir(join(output, 'scripts'), { recursive: true });
-try {
-  await cp(join(root, 'WaleedMcpHub.exe'), join(output, 'WaleedMcpHub.exe'));
-} catch {
-  /* WaleedMcpHub.exe will be compiled if csc is present. */
-}
 for (const file of [
   'desktop.mjs',
   'desktop-runtime.mjs',
@@ -114,12 +111,9 @@ for (const file of [
   'install-desktop-shortcut.ps1',
   'WaleedMcpHub.cs',
 ]) {
-  try {
-    await cp(join(root, 'scripts', file), join(output, 'scripts', file));
-  } catch {
-    /* Optional launcher source. */
-  }
+  await cp(join(root, 'scripts', file), join(output, 'scripts', file));
 }
+await buildLauncher(output);
 await writeFile(
   join(output, 'package.json'),
   JSON.stringify({
@@ -131,6 +125,7 @@ await writeFile(
 );
 await writeFile(
   join(output, 'README.txt'),
-  'Run scripts\\start-desktop.bat. Edge is required. Install a shortcut by running scripts\\install-desktop-shortcut.ps1. This portable folder does not install a service, startup task, agent integration, or copy credentials. Keep production package licenses with this folder. Closing the window leaves the same-user manager running; use Settings > Stop desktop manager.\r\n',
+  'Run WaleedMcpHub.exe for the Windows tray, or scripts\\start-desktop.bat. Edge is required. Startup registration is opt-in in Settings and uses only this launcher under HKCU Run. No service or agent configuration is installed by packaging. Tray Exit or Settings > Stop desktop manager shuts down gracefully.\r\n',
 );
+await writeDesktopIntegrity(output);
 console.info(`Portable desktop folder created: ${relative(root, output)}`);
