@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import type { Socket } from 'node:net';
 import cookie from '@fastify/cookie';
 import staticFiles from '@fastify/static';
 import {
@@ -63,6 +64,32 @@ export async function createHubServer(options: ServerOptions) {
     connectionTimeout: 10_000,
     trustProxy: false,
     routerOptions: { maxParamLength: 100 },
+  });
+  // Node's HTTP close drains accepted requests but can wait for a browser's
+  // speculative TCP connection that has never produced a request. Retire only
+  // those sockets; do not interrupt in-flight mutations to release writer locks.
+  const unstarted = new Set<Socket>();
+  let draining = false;
+  app.server.on('connection', (socket) => {
+    if (draining) {
+      socket.destroy();
+      return;
+    }
+    unstarted.add(socket);
+    socket.once('close', () => unstarted.delete(socket));
+  });
+  app.server.on('request', (request, response) => {
+    unstarted.delete(request.socket);
+    response.once('finish', () => {
+      // A request already active when close began can become keep-alive idle
+      // after Node's initial idle sweep. Reap it only after response completion.
+      if (draining) app.server.closeIdleConnections();
+    });
+  });
+  app.addHook('preClose', async () => {
+    draining = true;
+    for (const socket of unstarted) socket.destroy();
+    unstarted.clear();
   });
   await app.register(cookie);
   app.addContentTypeParser(

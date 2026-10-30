@@ -1,4 +1,6 @@
 import { fileURLToPath } from 'node:url';
+import { createConnection } from 'node:net';
+import { get } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createLifecycle } from '@waleed/hub-core';
 import { createHubServer } from '../../apps/server/src/app.js';
@@ -38,6 +40,63 @@ afterEach(async () => {
 });
 
 describe('local management security', () => {
+  it('drains an accepted request while closing a speculative TCP connection without waiting for its idle timeout', async () => {
+    // Task 20 regression: Chromium preconnect held desktop writer.lock beyond
+    // the unchanged five-second shutdown assertion after all API calls finished.
+    const hub = await setup();
+    let release!: () => void, started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    hub.app.addHook('onSend', async (request) => {
+      if (request.url === '/health') {
+        started();
+        await gate;
+      }
+    });
+    await hub.app.listen({ host: '127.0.0.1', port: 0 });
+    const address = hub.app.server.address();
+    if (!address || typeof address === 'string')
+      throw new Error('Missing test listener.');
+    const speculative = createConnection(address.port, '127.0.0.1');
+    speculative.on('error', () => undefined);
+    await new Promise<void>((resolve) => speculative.once('connect', resolve));
+    const response = new Promise<number | undefined>((resolve, reject) => {
+      get(
+        {
+          hostname: '127.0.0.1',
+          port: address.port,
+          path: '/health',
+          headers: { host },
+        },
+        (reply) => {
+          reply.resume();
+          reply.once('end', () => resolve(reply.statusCode));
+        },
+      ).once('error', reject);
+    });
+    let closing: Promise<void> | undefined;
+    try {
+      await waiting;
+      let closed = false;
+      closing = hub.app.close().then(() => {
+        closed = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(closed).toBe(false);
+      release();
+      expect(await response).toBe(200);
+      await expect.poll(() => closed, { timeout: 1000 }).toBe(true);
+    } finally {
+      release();
+      speculative.destroy();
+      await response;
+      await closing;
+    }
+  });
   it('serves only minimal unauthenticated health and public assets', async () => {
     const { app } = await setup(true);
     expect(
