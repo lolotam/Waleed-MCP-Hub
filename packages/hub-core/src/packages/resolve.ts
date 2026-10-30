@@ -487,8 +487,8 @@ export const resolvePackage = async (
       registry.origin,
     );
     // A tree that is too wide is refused before a single version document of
-    // a dependency is fetched.
-    if (validated.installed.length > MAX_PACKAGE_COUNT)
+    // a dependency is fetched. Bundled copies are packages on disk too.
+    if (validated.installed.length + validated.bundledCount > MAX_PACKAGE_COUNT)
       throw new PackageFault('install_limit');
     options.onProgress?.({
       downloadedBytes: run.downloadedBytes,
@@ -538,6 +538,17 @@ export const resolvePackage = async (
         lockEntry !== null && typeof lockEntry.hasInstallScript === 'boolean';
       if (!lockKnows && !summary) flags.add('install_scripts_unknown');
       if (summary?.optional) flags.add('optional_omitted');
+    }
+    // A bundled copy has no version document of its own, so nothing tells
+    // whether it runs a script unless the lock says it does.
+    for (const value of Object.values(lockPackages)) {
+      const lockEntry = asRecord(value);
+      if (lockEntry?.inBundle !== true) continue;
+      flags.add(
+        lockEntry.hasInstallScript === true
+          ? 'install_scripts'
+          : 'install_scripts_unknown',
+      );
     }
     if (releasedAt === null) flags.add('release_date_unknown');
     else if (

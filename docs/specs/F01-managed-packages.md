@@ -74,9 +74,10 @@ package?: {
   by the install job. Every definition schema that carries native fields
   (`ConnectorSchema`, `ImportDefinitionSchema`) gains the field. Client requests can
   never supply it: `ManualMcpSchema` and the registry HTTP routes reject a `package`
-  field, and `create_connector`/`edit_connector` reject a `package` value that the
-  server did not produce for that `installId` (the install job passes it through an
-  internal call, not through the public registry operation).
+  field, `create_connector` rejects a `package` value that the server did not
+  produce for that `installId` (the install job passes it through an internal call,
+  not through the public registry operation), and `create_connectors` and
+  `edit_connector` reject any supplied `package` value for every definition.
 - `executable` is the hub's own `node.exe` (absolute path of the running runtime).
   `arguments` = `['--no-global-search-paths',
 <data>\packages\<installId>\node_modules\<name>\<entryPath>, ...userArgs]`. The
@@ -89,8 +90,11 @@ package?: {
   `--no-global-search-paths` and derives the expected second argument from
   `installId`, `name` and `entryPath`, rejecting any mismatch, so a record cannot
   claim one package and run another file.
-- Moving the portable app changes the `node.exe` path and requires re-approval; the
-  UI explains why.
+- Moving the portable app changes the `node.exe` path. The stored `executable` then
+  names a file that no longer exists, so the connector fails to launch and editing
+  keeps the stored path. The repair is **Replace** (same or newer version), which
+  re-pins `executable` to the running `node.exe`, followed by re-approval; the UI
+  explains why. The data folder, and so the install, does not move with the app.
 - Editing a managed connector. Client definitions never contain `package`;
   omitting it is the normal case. `edit_connector` loads the stored connector
   **before** validating, then:
@@ -226,7 +230,13 @@ no redirects to other hosts, and size limits.
   after the previous one finished; on breach the hub cancels, waits for the process
   tree to exit, then deletes the job and install folders. The disk reserve exists
   because of this: refusing below 2 GiB free keeps an overshoot from filling the
-  drive. Tests use a real slow scan and a delayed process host, not only fake
+  drive. Each watchdog also checks the reserve on every scan, so concurrent jobs (one
+  install and at most two lookups) stop as soon as the drive falls under 2 GiB free;
+  the reserve, not a per-job budget, bounds them together. A scan stops walking as
+  soon as a cap is passed, counts folders as entries and counts an entry it may not
+  read as one file; past 256 such entries the scan fails, which is a breach.
+  Disk exhaustion inside one scan interval plus the kill grace is an accepted
+  residual risk. Tests use a real slow scan and a delayed process host, not only fake
   timers, and assert cleanup ordering (process gone before deletion).
 - Layout: the install is built in place at `<data>\packages\<installId>\` (private
   ACL). The transaction marker is a sibling file `<data>\packages\<installId>.installing`,
@@ -295,8 +305,11 @@ the same steps and never starts a process:
    `node_modules` (expects `package_modified`) and one beside the bundled runtime in
    `<node.exe dir>\lib\node` (expects the server not to load it).
 
-Any failure fails closed with `package_modified` before discovery or secret
-resolution; the row says "Reinstall". The full manifest is checked every time; the
+Any content check that fails (steps 1–3 and the parent-folder and argument checks
+of step 4) fails closed with `package_modified` before discovery or secret
+resolution; the row says "Reinstall". A refused environment name fails closed with
+`invalid_configuration` instead; the row says which binding to remove, because a
+reinstall would not help. The full manifest is checked every time; the
 spec accepts the cost (measured in tests; typical servers are a few thousand small
 files). F03 (persistent sessions) will reduce how often launches happen. As in D017,
 a malicious same-user process racing the check between verification and process

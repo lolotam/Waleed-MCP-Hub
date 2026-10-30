@@ -846,7 +846,7 @@ $stream = [System.IO.File]::Open('${unrefFile.replace(/'/g, "''")}', [System.IO.
     const seeded110 = seedPackage(registry, { name: 'srv', version: '1.1.0' });
     fakeRunner.addPackage(seeded110);
 
-    // Install srv@1.0.0 with arguments ['--flag'], env { API_TOKEN: 'token-val' }
+    // Install srv@1.0.0 with arguments ['--flag'], env { API_TOKEN: 'placeholder-a3' }
     const res1 = service.resolve({ name: 'srv', version: '1.0.0' }, 'owner-a');
     const resolved1 = await waitFor(service, res1, 'owner-a');
     const instJob = await service.install(
@@ -856,7 +856,7 @@ $stream = [System.IO.File]::Open('${unrefFile.replace(/'/g, "''")}', [System.IO.
         acknowledgedWarnings: resolved1.preview!.warnings,
         connectorName: 'Srv Connector',
         arguments: ['--flag'],
-        env: { API_TOKEN: 'token-val' },
+        env: { API_TOKEN: 'placeholder-a3' },
       },
       'owner-a',
     );

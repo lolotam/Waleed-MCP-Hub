@@ -819,11 +819,11 @@ describe('package-install', { timeout: 60_000 }, () => {
 
       // 3. Ancestor .npmrc with a sentinel: accepted, and the sentinel never
       // reaches an argument or an environment value of the npm run.
-      const sentinelToken = 'SECRET_SENTINEL_TOKEN_XYZ_98765';
+      const sentinel = 'placeholder-sentinel';
       const npmrcPath = join(tempDir, '.npmrc');
       await writeFile(
         npmrcPath,
-        `//foreign.invalid/:_authToken=${sentinelToken}\nregistry=https://foreign.invalid/\n`,
+        `//foreign.invalid/:_authToken=${sentinel}\nregistry=https://foreign.invalid/\n`,
         'utf8',
       );
 
@@ -843,10 +843,10 @@ describe('package-install', { timeout: 60_000 }, () => {
       // Sentinel must never appear in any argument or environment value
       for (const call of calls) {
         for (const arg of call.request.arguments) {
-          expect(arg).not.toContain(sentinelToken);
+          expect(arg).not.toContain(sentinel);
         }
         for (const val of Object.values(call.request.environment ?? {})) {
-          expect(val).not.toContain(sentinelToken);
+          expect(val).not.toContain(sentinel);
         }
       }
       await rm(npmrcPath);

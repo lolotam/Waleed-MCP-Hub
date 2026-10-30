@@ -6,12 +6,13 @@ const PackageNameSchema = z
   .string()
   .max(214)
   .regex(/^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/);
-// Exact semver only: no ranges, no tags, no leading "v".
+// Exact semver only: no ranges, no tags, no leading "v". A numeric prerelease
+// identifier has no leading zero, as SemVer 2.0.0 requires.
 const ExactVersionSchema = z
   .string()
   .max(256)
   .regex(
-    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
   );
 // The bin name the user picks from the entry candidates.
 const PackageEntrySchema = z

@@ -14,12 +14,22 @@ export interface WatchdogScan {
   files: number;
 }
 
+// The caps a scan stops at: once one is passed the rest of the tree is not
+// walked, because the run is over anyway.
+export interface WatchdogLimits {
+  maxBytes: number;
+  maxFiles: number;
+}
+
 export interface WatchdogOptions {
   roots: readonly string[];
   maxBytes: number;
   maxFiles: number;
   intervalMs?: number;
-  scan?: (roots: readonly string[]) => Promise<WatchdogScan>;
+  scan?: (
+    roots: readonly string[],
+    limits?: WatchdogLimits,
+  ) => Promise<WatchdogScan>;
   // The reserve of the drive the run writes to: below it the run is stopped.
   minFreeBytes?: number;
   freePath?: string;
@@ -29,24 +39,40 @@ export interface WatchdogOptions {
 
 const code = (error: unknown): string | undefined =>
   (error as NodeJS.ErrnoException).code;
-// An entry below a root that npm is deleting or renaming right now: on Windows
-// a file pending deletion answers EPERM. It is skipped, not a breach; an error
-// on a root itself still fails the scan.
+// An entry below a root that npm deleted or renamed while the scan ran. It is
+// skipped, not a breach; an error on a root itself still fails the scan.
 const vanishing = (error: unknown): boolean =>
-  ['ENOENT', 'ENOTDIR', 'EPERM', 'EBUSY', 'EACCES'].includes(code(error) ?? '');
+  ['ENOENT', 'ENOTDIR'].includes(code(error) ?? '');
+// An entry the scan may not read. On Windows a file pending deletion answers
+// EPERM while npm renames a folder, so a few are expected: each counts as one
+// file. Past this many in one scan the tree cannot be measured and the scan
+// fails, which the watchdog treats as a breach.
+const unreadable = (error: unknown): boolean =>
+  ['EPERM', 'EBUSY', 'EACCES'].includes(code(error) ?? '');
+export const WATCHDOG_MAX_UNREADABLE = 256;
 
 // The measurement of the folders npm writes to. Every entry counts as one
 // file: a folder too, so a tree of empty folders cannot pass the cap unseen.
 // A file adds its size; a link counts and is never entered; a folder that is
-// gone counts as nothing.
+// gone counts as nothing. With limits the walk stops as soon as one is passed.
 export const scanRoots = async (
   roots: readonly string[],
+  limits?: WatchdogLimits,
 ): Promise<WatchdogScan> => {
   let bytes = 0;
   let files = 0;
+  let denied = 0;
+  const over = (): boolean =>
+    limits !== undefined &&
+    (bytes > limits.maxBytes || files > limits.maxFiles);
   const count = (info: Stats): void => {
     files += 1;
     bytes += info.size;
+  };
+  const deny = (error: unknown): void => {
+    if (!unreadable(error)) throw error;
+    denied += 1;
+    if (denied > WATCHDOG_MAX_UNREADABLE) throw error;
   };
   const walk = async (directory: string): Promise<void> => {
     let names: string[];
@@ -54,16 +80,20 @@ export const scanRoots = async (
       names = await readdir(directory);
     } catch (error) {
       if (vanishing(error)) return;
-      throw error;
+      deny(error);
+      return;
     }
     for (const name of names) {
+      if (over()) return;
       const path = join(directory, name);
       let info: Stats;
       try {
         info = await lstat(path);
       } catch (error) {
         if (vanishing(error)) continue;
-        throw error;
+        deny(error);
+        files += 1;
+        continue;
       }
       if (info.isDirectory()) {
         files += 1;
@@ -74,6 +104,7 @@ export const scanRoots = async (
     }
   };
   for (const root of roots) {
+    if (over()) break;
     let info: Stats;
     try {
       info = await lstat(root);
@@ -120,6 +151,10 @@ export async function withWatchdog<T>(
   const intervalMs = options.intervalMs ?? 250;
   const scan = options.scan ?? scanRoots;
   const free = options.free ?? freeBytes;
+  const limits: WatchdogLimits = {
+    maxBytes: options.maxBytes,
+    maxFiles: options.maxFiles,
+  };
   const controller = new AbortController();
   let breached = false;
   let stopped = false;
@@ -147,7 +182,7 @@ export async function withWatchdog<T>(
   // reading that fails counts as a breach: the hub fails closed.
   const passed = async (): Promise<boolean> => {
     try {
-      const result = await scan(options.roots);
+      const result = await scan(options.roots, limits);
       if (result.bytes > options.maxBytes || result.files > options.maxFiles)
         return true;
       if (options.minFreeBytes !== undefined && options.freePath !== undefined)
@@ -165,7 +200,7 @@ export async function withWatchdog<T>(
       if (stopped) return;
       let result: WatchdogScan;
       try {
-        result = await scan(options.roots);
+        result = await scan(options.roots, limits);
       } catch {
         // A scan that cannot measure counts as a breach: the hub fails closed.
         if (!stopped) {

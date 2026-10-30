@@ -406,7 +406,7 @@ describe('package-service', { timeout: 60_000 }, () => {
       acknowledgedWarnings: preview.warnings,
       connectorName: 'Srv',
       arguments: ['--flag'],
-      env: { API_TOKEN: 'sentinel-value-123' },
+      env: { API_TOKEN: 'placeholder-a4' },
     };
 
     const installJob = await service.install(installPayload, 'owner-a');
@@ -442,9 +442,9 @@ describe('package-service', { timeout: 60_000 }, () => {
     expect(await pathExists(installDir)).toBe(true);
     expect(await pathExists(marker)).toBe(false);
 
-    expect(JSON.stringify(installJob)).not.toContain('sentinel-value-123');
-    expect(JSON.stringify(completed)).not.toContain('sentinel-value-123');
-    expect(JSON.stringify(state)).not.toContain('sentinel-value-123');
+    expect(JSON.stringify(installJob)).not.toContain('placeholder-a4');
+    expect(JSON.stringify(completed)).not.toContain('placeholder-a4');
+    expect(JSON.stringify(state)).not.toContain('placeholder-a4');
 
     const verifyResult = await service.verify(connector!.id);
     expect(verifyResult).toEqual({
@@ -470,7 +470,7 @@ describe('package-service', { timeout: 60_000 }, () => {
         acknowledgedWarnings: preview.warnings,
         connectorName: 'SrvTamper',
         arguments: ['--flag'],
-        env: { API_TOKEN: 'sentinel-value-123' },
+        env: { API_TOKEN: 'placeholder-a4' },
       },
       'owner-a',
     );
@@ -819,7 +819,7 @@ describe('package-service', { timeout: 60_000 }, () => {
     const prev4 = (await waitFor(service, resolve4, 'owner-a')).preview!;
 
     const env17 = Object.fromEntries(
-      Array.from({ length: 17 }, (_, i) => [`VAR_${i}`, `secret-token-${i}`]),
+      Array.from({ length: 17 }, (_, i) => [`VAR_${i}`, `placeholder-${i}`]),
     );
 
     await expect(
@@ -844,7 +844,7 @@ describe('package-service', { timeout: 60_000 }, () => {
         acknowledgedWarnings: prev4.warnings,
         connectorName: 'Running-4',
         arguments: [],
-        env: { VALID_VAR: 'clean-secret-token-4' },
+        env: { VALID_VAR: 'placeholder-clean-4' },
       },
       'owner-a',
     );
@@ -1691,5 +1691,65 @@ describe('package-service', { timeout: 60_000 }, () => {
     expect(completed2.state).toBe('failed');
     expect(completed2.error).toBe('warning_not_acknowledged');
     expect(await pathExists(jobFolder2)).toBe(false);
+  });
+
+  // The request schema refuses these names while the request is parsed, so
+  // the refusal comes before the job exists and before any download.
+  it('19. A refused environment name is refused before anything is downloaded', async () => {
+    const { service, fakeRunner } = await setupService();
+    const resolveJob = service.resolve(
+      { name: 'srv', version: '1.0.0' },
+      'owner-a',
+    );
+    const preview = (await waitFor(service, resolveJob, 'owner-a')).preview!;
+
+    for (const name of [
+      'NODE_EXTRA_CA_CERTS',
+      'SSL_CERT_FILE',
+      'SSL_CERT_DIR',
+      'OPENSSL_CONF',
+      'OPENSSL_MODULES',
+      'OPENSSL_ENGINES',
+    ]) {
+      const env = { [name]: 'placeholder-path' };
+      await expect(
+        service.install(
+          {
+            previewId: preview.previewId,
+            entry: preview.entries[0]!.entry,
+            acknowledgedWarnings: preview.warnings,
+            connectorName: 'SrvRefusedName',
+            arguments: [],
+            env,
+          },
+          'owner-a',
+        ),
+      ).rejects.toThrow(/refused on package connectors/);
+      expect(env[name]).toBe('');
+    }
+    // No install run started.
+    expect(
+      fakeRunner.calls.filter((call) => call.request.arguments[1] === 'ci'),
+    ).toHaveLength(0);
+  });
+
+  it('20. A closed service blanks the values of the refused install', async () => {
+    const { service } = await setupService();
+    await service.close();
+    const env = { API_KEY: 'placeholder-closed' };
+    await expect(
+      service.install(
+        {
+          previewId: '00000000-0000-4000-8000-000000000099',
+          entry: 'srv',
+          acknowledgedWarnings: [],
+          connectorName: 'SrvClosed',
+          arguments: [],
+          env,
+        },
+        'owner-a',
+      ),
+    ).rejects.toMatchObject({ code: 'unavailable' });
+    expect(env.API_KEY).toBe('');
   });
 });

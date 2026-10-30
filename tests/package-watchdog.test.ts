@@ -67,6 +67,46 @@ describe('package-watchdog', { timeout: 60_000 }, () => {
       expect(watched.breached).toBe(true);
     });
 
+    it('stops walking as soon as a cap is passed', async () => {
+      const root = join(await createTempDir(), 'root');
+      await mkdir(root, { recursive: true });
+      for (let index = 0; index < 40; index++)
+        await writeFile(join(root, `f${index}.txt`), Buffer.alloc(10));
+
+      const full = await scanRoots([root]);
+      expect(full.files).toBe(40);
+
+      // Past five entries the rest of the tree is not walked.
+      const capped = await scanRoots([root], { maxBytes: 10_000, maxFiles: 5 });
+      expect(capped.files).toBe(6);
+
+      // The bytes cap stops the walk too.
+      const bytes = await scanRoots([root], { maxBytes: 25, maxFiles: 1000 });
+      expect(bytes.bytes).toBe(30);
+      expect(bytes.files).toBe(3);
+    });
+
+    it('hands its caps to the scan', async () => {
+      const seen: unknown[] = [];
+      await withWatchdog(
+        {
+          roots: ['unused'],
+          maxBytes: 123,
+          maxFiles: 45,
+          intervalMs: 10,
+          scan: async (_roots, limits) => {
+            seen.push(limits);
+            return { bytes: 0, files: 0 };
+          },
+        },
+        new AbortController().signal,
+        async () => 'done',
+      );
+      expect(seen.length).toBeGreaterThan(0);
+      for (const limits of seen)
+        expect(limits).toEqual({ maxBytes: 123, maxFiles: 45 });
+    });
+
     it('counts a missing root as 0', async () => {
       const tempDir = await createTempDir();
       const missing1 = join(tempDir, 'nonexistent1');

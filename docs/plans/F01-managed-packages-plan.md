@@ -152,8 +152,8 @@ Files: `packages/hub-core/src/lifecycle.ts`, new
 `packages/hub-core/src/packages/service.ts`, `apps/server/src` routes,
 `packages/hub-core/src/integrations/manual.ts` (shared credential-write helper only).
 
-- `resolve_package`/`install_package` jobs outside the mutation slot; one install at
-  a time; cancel per commit state (precommit / committing / committed /
+- `resolve_package`/`install_package` jobs outside the mutation slot; one install and at
+  most two lookups at a time, each watchdog keeping the 2 GiB reserve; cancel per commit state (precommit / committing / committed /
   indeterminate, spec "Jobs"); 10-minute deadline.
 - `savePackageConnector()` with `saved`/`partially_saved`/`save_uncertain` and the
   spec's folder deletion rules.

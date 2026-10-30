@@ -2297,6 +2297,7 @@ describe('package-resolve', { timeout: 60_000 }, () => {
         const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
 
         // runner is omitted: real Windows runner and process.execPath are used!
+        const relayed: number[] = [];
         const preview = await resolvePackage({
           request: { name: 'srv', version: '1.0.0' },
           owner: 'test-owner-e2e',
@@ -2304,15 +2305,19 @@ describe('package-resolve', { timeout: 60_000 }, () => {
           signal: new AbortController().signal,
           previews,
           registry: registry.registry,
+          onProgress: (progress) => relayed.push(progress.downloadedBytes),
         });
 
         expect(preview.name).toBe('srv');
         expect(preview.version).toBe('1.0.0');
         expect(preview.packageCount).toBe(1);
 
-        // Every request the fixture saw went through the proxy
+        // The fixture saw the requests, and the allow-list proxy relayed the
+        // bytes of the npm run: a run that reached the registry directly
+        // would leave the proxy's count at zero.
         const reqs = registry.requests();
         expect(reqs.length).toBeGreaterThan(0);
+        expect(Math.max(0, ...relayed)).toBeGreaterThan(0);
       },
       120_000,
     );
@@ -2481,6 +2486,136 @@ describe('package-resolve', { timeout: 60_000 }, () => {
         .requests()
         .filter((url) => /^\/wide\d+\/1\.0\.0$/.test(url));
       expect(documents).toHaveLength(0);
+    }, 60_000);
+
+    it('counts bundled copies toward the package cap', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const registry = await createRegistry();
+      const srvIntegrity = sha512Integrity('srv-bundled-wide');
+      registry.setVersion('srv', '1.0.0', {
+        name: 'srv',
+        version: '1.0.0',
+        bin: { srv: 'bin/srv.js' },
+        dist: { integrity: srvIntegrity, unpackedSize: 1000, fileCount: 1 },
+      });
+
+      // The root, 1000 dependencies and 1000 bundled copies: 2001 packages.
+      const lockPackages: Record<string, unknown> = {
+        '': { name: 'staging', version: '1.0.0' },
+        'node_modules/srv': {
+          version: '1.0.0',
+          integrity: srvIntegrity,
+          resolved: `${registry.origin}/srv/-/srv-1.0.0.tgz`,
+        },
+      };
+      for (let index = 0; index < 1000; index++) {
+        lockPackages[`node_modules/wide${index}`] = {
+          version: '1.0.0',
+          integrity: sha512Integrity(`bundled-wide-${index}`),
+          resolved: `${registry.origin}/wide${index}/-/wide${index}-1.0.0.tgz`,
+        };
+        lockPackages[`node_modules/wide${index}/node_modules/inner`] = {
+          version: '1.0.0',
+          inBundle: true,
+        };
+      }
+
+      const { runner } = createFakeRunner({
+        lock: { lockfileVersion: 3, packages: lockPackages },
+      });
+      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+
+      await expect(
+        resolvePackage({
+          request: { name: 'srv', version: '1.0.0' },
+          owner: 'test-owner',
+          packagesDir,
+          signal: new AbortController().signal,
+          previews,
+          registry: registry.registry,
+          runner,
+        }),
+      ).rejects.toMatchObject({ code: 'install_limit' });
+      const documents = registry
+        .requests()
+        .filter((url) => /^\/wide\d+\/1\.0\.0$/.test(url));
+      expect(documents).toHaveLength(0);
+    }, 60_000);
+
+    it('warns about the scripts of a bundled copy', async () => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+
+      const registry = await createRegistry();
+      const srvIntegrity = sha512Integrity('srv-bundled');
+      const depIntegrity = sha512Integrity('dep-bundled');
+      registry.setVersion('srv', '1.0.0', {
+        name: 'srv',
+        version: '1.0.0',
+        bin: { srv: 'bin/srv.js' },
+        dependencies: { dep: '^2.0.0' },
+        dist: { integrity: srvIntegrity, unpackedSize: 1000, fileCount: 5 },
+      });
+      registry.setVersion('dep', '2.1.0', {
+        name: 'dep',
+        version: '2.1.0',
+        bundleDependencies: ['inner'],
+        dist: { integrity: depIntegrity, unpackedSize: 2000, fileCount: 10 },
+      });
+      const lockFor = (inner: Record<string, unknown>) => ({
+        name: 'staging',
+        version: '1.0.0',
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'staging', version: '1.0.0' },
+          'node_modules/srv': {
+            version: '1.0.0',
+            integrity: srvIntegrity,
+            resolved: `${registry.origin}/srv/-/srv-1.0.0.tgz`,
+            hasInstallScript: false,
+          },
+          'node_modules/dep': {
+            version: '2.1.0',
+            integrity: depIntegrity,
+            resolved: `${registry.origin}/dep/-/dep-2.1.0.tgz`,
+            hasInstallScript: false,
+          },
+          'node_modules/dep/node_modules/inner': {
+            version: '0.1.0',
+            inBundle: true,
+            ...inner,
+          },
+        },
+      });
+      const lookUp = async (inner: Record<string, unknown>) => {
+        const { runner } = createFakeRunner({ lock: lockFor(inner) });
+        const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+        return resolvePackage({
+          request: { name: 'srv', version: '1.0.0' },
+          owner: 'test-owner',
+          packagesDir,
+          signal: new AbortController().signal,
+          previews,
+          registry: registry.registry,
+          runner,
+          now: () => new Date('2026-01-01T00:00:00.000Z'),
+        });
+      };
+
+      // Nothing tells whether the bundled copy runs a script.
+      const unknown = await lookUp({});
+      expect(unknown.bundledCount).toBe(1);
+      expect(unknown.warnings).toContain('install_scripts_unknown');
+      expect(unknown.warnings).not.toContain('install_scripts');
+
+      // The lock says it does.
+      const known = await lookUp({ hasInstallScript: true });
+      expect(known.warnings).toContain('install_scripts');
+      expect(known.warnings).not.toContain('install_scripts_unknown');
     }, 60_000);
 
     it('stops fetching version documents when the running unpacked size passes the cap', async () => {

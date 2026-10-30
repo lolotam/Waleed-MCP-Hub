@@ -1156,12 +1156,12 @@ describe('F01 T2: registry and approval of managed npm packages', () => {
           'user-value',
         ]),
         environmentLiterals: { CUSTOM_LITERAL: 'constant' },
-        secretBindings: { SECRET_TOKEN: 'ref-secret-1' },
+        secretBindings: { SECRET_TOKEN: 'ref-sample-1' },
         trustApproval: originalApproval,
       });
       state.connectors.push(managed);
       state.secretReferences.push({
-        id: 'ref-secret-1',
+        id: 'ref-sample-1',
         adapter: 'windows',
         present: true,
         ownerIds: [managed.id],
@@ -1205,7 +1205,7 @@ describe('F01 T2: registry and approval of managed npm packages', () => {
       expect(replaced.environmentLiterals).toEqual({
         CUSTOM_LITERAL: 'constant',
       });
-      expect(replaced.secretBindings).toEqual({ SECRET_TOKEN: 'ref-secret-1' });
+      expect(replaced.secretBindings).toEqual({ SECRET_TOKEN: 'ref-sample-1' });
       expect(replaced.revision).toBe(2);
       expect(replaced.trustApproval).toBeNull();
       expect(plan.next.revision).toBe(initialRevision + 1);

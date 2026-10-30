@@ -472,9 +472,11 @@ export function createPackageService(
   };
 
   const install = async (raw: unknown, owner: string): Promise<PackageJob> => {
-    if (closed)
-      throw new HubError('unavailable', 'Managed packages are not available.');
     const rawEnv = environmentMap(raw);
+    if (closed) {
+      blank(rawEnv);
+      throw new HubError('unavailable', 'Managed packages are not available.');
+    }
     let request: ReturnType<typeof PackageInstallRequestSchema.parse>;
     try {
       request = PackageInstallRequestSchema.parse(raw);

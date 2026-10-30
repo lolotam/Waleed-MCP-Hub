@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { crc32, gunzipSync, gzipSync } from 'node:zlib';
+import { crc32, gunzipSync, gzipSync, inflateRawSync } from 'node:zlib';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const output = join(root, 'vendor', 'npm-12.2.1-patched.tgz');
@@ -244,9 +244,29 @@ async function expectedEntries() {
   return entries;
 }
 
+// The length of the header of the gzip member at the start of a buffer, or
+// null when it is not a deflate member (RFC 1952, section 2.3).
+function gzipHeaderLength(bytes) {
+  if (bytes.length < 18 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) return null;
+  if (bytes[2] !== 8) return null;
+  const flags = bytes[3];
+  let offset = 10;
+  if (flags & 4) offset += 2 + bytes.readUInt16LE(offset);
+  for (const flag of [8, 16]) {
+    if (!(flags & flag)) continue;
+    const end = bytes.indexOf(0, offset);
+    if (end < 0) return null;
+    offset = end + 1;
+  }
+  if (flags & 2) offset += 2;
+  return offset < bytes.length ? offset : null;
+}
+
 // The vendored file must decompress to exactly the expected tar stream, as one
-// gzip member with nothing after it: the trailer's CRC32 and size cover the
-// whole stream, which rules out appended members and trailing bytes.
+// gzip member with nothing after it. The deflate stream of the first member
+// must end eight bytes before the file does, which rules out a second member
+// before or after it and any trailing bytes; the trailer's CRC32 and size
+// then cover the whole stream.
 function verifyBundle(vendored, expected) {
   let actual;
   try {
@@ -256,8 +276,18 @@ function verifyBundle(vendored, expected) {
   }
   if (!actual.equals(expected))
     return 'the vendored contents differ from the official composition';
+  const header = gzipHeaderLength(vendored);
+  if (header === null) return 'the vendored file is not a single gzip member';
+  let consumed;
+  try {
+    consumed = inflateRawSync(vendored.subarray(header), { info: true }).engine
+      .bytesWritten;
+  } catch {
+    return 'the vendored file is not a single gzip member';
+  }
   const trailer = vendored.length - 8;
   if (
+    header + consumed !== trailer ||
     vendored.readUInt32LE(trailer) !== crc32(expected) ||
     vendored.readUInt32LE(trailer + 4) !== expected.length % 2 ** 32
   )

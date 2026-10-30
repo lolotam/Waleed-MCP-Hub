@@ -389,7 +389,7 @@ describe('F01 package contracts', () => {
       expect(
         PackageInstallRequestSchema.safeParse({
           ...baseInstallRequest,
-          env: { API_TOKEN: 'secret-token' },
+          env: { API_TOKEN: 'placeholder-a1' },
         }).success,
       ).toBe(true);
     });
@@ -428,7 +428,18 @@ describe('F01 package contracts', () => {
       ).toBe(true);
     });
 
-    it.each(['^1.2.3', 'next'])(
+    it.each([
+      '1.0.0-0',
+      '1.0.0-alpha.1',
+      '1.0.0-0a.01b',
+      '1.0.0-rc.10+build.007',
+    ])('accepts the exact prerelease version %s', (version) => {
+      expect(
+        PackageResolveRequestSchema.safeParse({ name: 'srv', version }).success,
+      ).toBe(true);
+    });
+
+    it.each(['^1.2.3', 'next', '1.0.0-01', '1.0.0-alpha.007', '1.0.0-'])(
       'rejects invalid resolve version: %s',
       (version) => {
         expect(
@@ -591,7 +602,7 @@ describe('F01 package contracts', () => {
       expect(
         PackageProposalSchema.safeParse({
           ...validProposal,
-          env: { API_KEY: 'secret-credential-value' },
+          env: { API_KEY: 'placeholder-a2' },
         }).success,
       ).toBe(false);
     });
