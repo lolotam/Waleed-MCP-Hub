@@ -220,7 +220,21 @@ describe('deterministic data-only import normalization', () => {
     expect(result.warnings).toContain('shell_syntax_inert');
   });
   it('projects only references while retaining bounded private header/environment buffers in memory', () => {
-    const draft = normalize(mixedImport);
+    const draft = normalize({
+      ...mixedImport,
+      mcpServers: {
+        ...mixedImport.mcpServers,
+        'Native service': {
+          command: [
+            'tool',
+            '--CaseSensitive',
+            'A B',
+            '$(never-run); & not-a-shell',
+          ],
+          env: { API_KEY: importSecret },
+        },
+      },
+    });
     expect(
       draft.entries.every((entry) => !entry.issues.length && entry.definition),
     ).toBe(true);
@@ -482,7 +496,16 @@ describe('deterministic data-only import normalization', () => {
   });
   it('emits strict definitions and does not import supplied trust approvals', () => {
     const result = entry({ command: ['npx', '-y', 'synthetic@1.2.3'] });
-    expect(ImportDefinitionSchema.safeParse(result.definition).success).toBe(
+    expect(result.definition).toBeNull();
+    expect(result.packageProposal).toEqual({
+      name: 'synthetic',
+      version: '1.2.3',
+      requestedVersion: null,
+      arguments: [],
+      envNames: [],
+    });
+    const strict = entry({ command: ['uvx', 'synthetic==1.2.3'] });
+    expect(ImportDefinitionSchema.safeParse(strict.definition).success).toBe(
       true,
     );
     expect(

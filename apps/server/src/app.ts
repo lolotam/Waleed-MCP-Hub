@@ -1,5 +1,6 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
+import rateLimit from '@fastify/rate-limit';
 import staticFiles from '@fastify/static';
 import {
   MAX_REQUEST_BYTES,
@@ -23,6 +24,7 @@ import {
   type HubLifecycle,
   type DiscoveryService,
   addManualMcp,
+  PackageFault,
 } from '@waleed/hub-core';
 import { createSessions } from './security.js';
 
@@ -49,6 +51,44 @@ export async function createHubServer(options: ServerOptions) {
     routerOptions: { maxParamLength: 100 },
   });
   await app.register(cookie);
+  // The rate limit is not global: only the package routes below carry one.
+  // A limited request never answers with a body of the plugin; the error
+  // handler of the server renders it like every other failure.
+  await app.register(rateLimit, {
+    global: false,
+    errorResponseBuilder: () => {
+      const error = new Error('Rate limit exceeded.') as Error & {
+        statusCode: number;
+      };
+      error.statusCode = 429;
+      return error;
+    },
+  });
+
+  // A request counts against its session only when the session is live: a
+  // made-up cookie counts against the address, so rotating cookie values
+  // cannot win a fresh budget.
+  const rateLimitKey = (request: FastifyRequest): string => {
+    const id = request.cookies.waleed_hub_session;
+    return id !== undefined && sessions.get(id) ? `session:${id}` : request.ip;
+  };
+
+  // The rate limit of the package routes: sixty requests a minute per
+  // session, and sixty a minute per address when there is no session.
+  const packageRateLimit = {
+    max: 60,
+    timeWindow: '1 minute',
+    keyGenerator: rateLimitKey,
+  };
+
+  // The rate limit of the read-only package routes: the web UI polls the job
+  // of a running lookup or install, and an install takes minutes, so the poll
+  // needs a budget of its own.
+  const packageReadRateLimit = {
+    max: 600,
+    timeWindow: '1 minute',
+    keyGenerator: rateLimitKey,
+  };
 
   const routes: Record<string, RefusalInput['route']> = {
     '/health': 'health',
@@ -92,6 +132,13 @@ export async function createHubServer(options: ServerOptions) {
     '/api/agents/:agentId/status': 'agent_status',
     '/api/agents/sync': 'agent_sync',
     '/api/connectors/manual': 'manual_mcp',
+    '/api/packages/resolve': 'package_resolve',
+    '/api/packages/install': 'package_install',
+    '/api/packages/replace': 'package_replace',
+    '/api/packages/cleanup': 'package_cleanup',
+    '/api/packages/jobs/:id': 'package_job',
+    '/api/packages/jobs/:id/cancel': 'package_cancel',
+    '/api/packages/verify/:connectorId': 'package_verify',
     '/api/desktop/shutdown': 'desktop_shutdown',
   };
   app.addHook('onSend', async (request, reply, payload) => {
@@ -214,6 +261,26 @@ export async function createHubServer(options: ServerOptions) {
       return reply
         .code(status)
         .send({ error: safe.code, message: safe.message });
+    }
+    // A package failure carries its sanitized code and nothing else: no
+    // message, no path, no registry text and no installer output.
+    if (error instanceof PackageFault)
+      return reply
+        .code(error.code === 'busy' ? 409 : 400)
+        .send({ error: error.code, message: 'Package operation failed.' });
+    // A limited request answers with the body of the server: a code and a
+    // message, never a body of the rate limit plugin.
+    if (
+      error &&
+      typeof error === 'object' &&
+      'statusCode' in error &&
+      typeof error.statusCode === 'number' &&
+      error.statusCode === 429
+    ) {
+      return reply.code(429).send({
+        error: 'busy',
+        message: 'Too many package requests. Wait a minute and try again.',
+      });
     }
     // Never reflect validation errors (which may contain pasted values), paths,
     // request bodies, exception messages, or provider output back into diagnostics.
@@ -499,7 +566,9 @@ export async function createHubServer(options: ServerOptions) {
           kind: 'create_connectors',
           expectedRevision,
           definitions: preview.entries.flatMap((entry) =>
-            entry.selected && entry.definition ? [entry.definition] : [],
+            entry.selected && entry.definition && !entry.packageProposal
+              ? [entry.definition]
+              : [],
           ),
         },
         owner,
@@ -591,6 +660,81 @@ export async function createHubServer(options: ServerOptions) {
       request.cookies.waleed_hub_session!,
     );
   });
+  // The managed package routes. The session, CSRF and Origin hooks above
+  // already cover every one of them.
+  const packages = () => {
+    const service = options.lifecycle.packages;
+    if (!service)
+      throw new HubError('unavailable', 'Managed packages are not available.');
+    return service;
+  };
+  app.post(
+    '/api/packages/resolve',
+    { config: { rateLimit: packageRateLimit } },
+    async (request, reply) => {
+      const service = packages();
+      return reply
+        .code(202)
+        .send(
+          service.resolve(request.body, request.cookies.waleed_hub_session!),
+        );
+    },
+  );
+  app.post(
+    '/api/packages/install',
+    { config: { rateLimit: packageRateLimit } },
+    async (request, reply) => {
+      const service = packages();
+      const body = request.body;
+      request.body = undefined;
+      return reply
+        .code(202)
+        .send(await service.install(body, request.cookies.waleed_hub_session!));
+    },
+  );
+  app.post(
+    '/api/packages/replace',
+    { config: { rateLimit: packageRateLimit } },
+    async (request, reply) => {
+      const service = packages();
+      const body = request.body;
+      request.body = undefined;
+      return reply
+        .code(202)
+        .send(await service.replace(body, request.cookies.waleed_hub_session!));
+    },
+  );
+  // The cleanup of the package folders: the counts of the deleted and the
+  // retained folders. Never a folder id and never a path.
+  app.post(
+    '/api/packages/cleanup',
+    { config: { rateLimit: packageRateLimit } },
+    async () => await packages().reconcile(),
+  );
+  app.get<{ Params: { id: string } }>(
+    '/api/packages/jobs/:id',
+    { config: { rateLimit: packageReadRateLimit } },
+    async (request) =>
+      packages().job(
+        IdSchema.parse(request.params.id),
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/packages/jobs/:id/cancel',
+    { config: { rateLimit: packageRateLimit } },
+    async (request) =>
+      packages().cancel(
+        IdSchema.parse(request.params.id),
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { connectorId: string } }>(
+    '/api/packages/verify/:connectorId',
+    { config: { rateLimit: packageRateLimit } },
+    async (request) =>
+      await packages().verify(IdSchema.parse(request.params.connectorId)),
+  );
   app.get<{ Params: { id: string } }>(
     '/api/connectors/:id/auth',
     async (request) =>

@@ -12,6 +12,7 @@ import { HubError } from '../errors.js';
 import {
   approved,
   definitionHash,
+  isPackageEnvName,
   requireConnector,
 } from '../runtime/registry.js';
 import { assertBinding } from './bindings.js';
@@ -107,6 +108,19 @@ export function createCredentials(
             throw new HubError(
               'invalid',
               'Credential backend/binding does not match the connector runtime.',
+            );
+          // A managed package may never receive a NODE_ environment variable
+          // or an OpenSSL certificate variable: nothing outside the install
+          // can preload code or change TLS trust.
+          if (
+            current.executionMode === 'native' &&
+            current.package &&
+            input.location === 'environment' &&
+            isPackageEnvName(input.name)
+          )
+            throw new HubError(
+              'invalid',
+              'Environment names starting with NODE_ and the OpenSSL certificate variables are refused on package connectors.',
             );
           if (
             oauth &&

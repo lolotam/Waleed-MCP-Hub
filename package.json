@@ -31,6 +31,7 @@
     "discovery:read-only": "node scripts/discover-readonly.mjs",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
+    "check:npm-bundle": "node scripts/npm-bundle.mjs verify",
     "check": "npm run typecheck && npm run lint && npm run check:boundaries && npm run check:secrets && npm test && npm run build && npm run test:windows-runtime && npm run test:windows-secrets"
   },
   "devDependencies": {

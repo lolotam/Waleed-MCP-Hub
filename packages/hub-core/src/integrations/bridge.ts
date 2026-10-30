@@ -26,6 +26,8 @@ import { createWindowsProcessRunner } from '../adapters/native/process-runner.js
 import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
 import { approved, definitionHash, hashData } from '../runtime/registry.js';
 import { dockerAgentTransport } from './docker-transport.js';
+import { packagesRoot } from '../packages/store.js';
+import { verifyPackage } from '../packages/verify.js';
 
 export interface BridgePeer {
   client: Client;
@@ -280,6 +282,10 @@ export async function runAgentBridge(registry: string, agentId: string) {
     );
     let docker: Awaited<ReturnType<typeof dockerAgentTransport>> | undefined;
     try {
+      // A managed install is verified before the secret is resolved and before
+      // any process starts.
+      if (connector.executionMode === 'native' && connector.package)
+        await verifyPackage(connector, packagesRoot(directory));
       const bound =
         Object.keys(connector.secretBindings).length ||
         Object.keys(connector.headerBindings).length;

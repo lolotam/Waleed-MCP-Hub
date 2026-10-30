@@ -13,7 +13,16 @@ export interface WindowsRunnerOptions {
   allowedExecutables: readonly string[];
   workingDirectory: string;
   concurrency?: number;
+  // The ceiling of this runner: a package install needs ten minutes, an MCP
+  // target keeps the two minutes it always had.
+  maxTimeoutMs?: number;
 }
+
+// The default ceiling of every runner that does not ask for a longer one.
+const DEFAULT_MAX_TIMEOUT_MS = 120_000;
+// No run may be shorter than this and none may be longer than ten minutes.
+const MIN_TIMEOUT_MS = 50;
+const MAX_TIMEOUT_MS = 600_000;
 
 const invalid = () =>
   new HubError(
@@ -34,7 +43,7 @@ const emptyResult = (outcome: ProcessResult['outcome']): ProcessResult => ({
   stderr: '',
 });
 
-function validate(request: ProcessRequest) {
+function validate(request: ProcessRequest, maxTimeoutMs: number) {
   if (
     request.stream &&
     (typeof request.stream.started !== 'function' ||
@@ -66,8 +75,8 @@ function validate(request: ProcessRequest) {
     throw invalid();
   if (
     !Number.isInteger(request.timeoutMs) ||
-    request.timeoutMs < 50 ||
-    request.timeoutMs > 120_000 ||
+    request.timeoutMs < MIN_TIMEOUT_MS ||
+    request.timeoutMs > maxTimeoutMs ||
     !Number.isInteger(request.outputLimitBytes) ||
     request.outputLimitBytes < 1 ||
     request.outputLimitBytes > 1024 * 1024
@@ -94,10 +103,14 @@ export async function createWindowsProcessRunner(
 ): Promise<ProcessRunner> {
   if (process.platform !== 'win32') throw unavailable();
   const concurrency = options.concurrency ?? 2;
+  const maxTimeoutMs = options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
   if (
     !Number.isInteger(concurrency) ||
     concurrency < 1 ||
     concurrency > 8 ||
+    !Number.isInteger(maxTimeoutMs) ||
+    maxTimeoutMs < MIN_TIMEOUT_MS ||
+    maxTimeoutMs > MAX_TIMEOUT_MS ||
     options.allowedExecutables.length < 1 ||
     options.allowedExecutables.length > 16 ||
     !localPath(options.workingDirectory)
@@ -164,7 +177,7 @@ export async function createWindowsProcessRunner(
 
   return {
     async run(request) {
-      validate(request);
+      validate(request, maxTimeoutMs);
       // Snapshot before the first await: edits to a caller-owned definition must
       // not change a command/environment after it has passed validation.
       request = {

@@ -14,6 +14,8 @@ import { safeMcpHttpTransport } from './http.js';
 import { ContainedStdioTransport } from './stdio.js';
 import { cleanupOwnedContainers } from './container-cleanup.js';
 import type { SecretLease } from '../../auth/bindings.js';
+import { packagesRoot } from '../../packages/store.js';
+import { verifyPackage } from '../../packages/verify.js';
 
 export function isolatedNativeArguments(
   connector: Extract<Connector, { executionMode: 'native' }>,
@@ -44,6 +46,10 @@ export function createCapabilityRuntime(options: {
 }): CapabilityRuntime {
   return {
     async discover(connector, signal) {
+      // A managed install is verified first: when the folder is not the
+      // approved one, no secret is resolved and no process is started.
+      if (connector.executionMode === 'native' && connector.package)
+        await verifyPackage(connector, packagesRoot(options.workingDirectory));
       const bound =
         Object.keys(connector.secretBindings).length ||
         Object.keys(connector.headerBindings).length;

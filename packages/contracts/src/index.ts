@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { IntegrationRecordSchema, PortBindingsSchema } from './integrations.js';
+import { PackageProvenanceSchema } from './packages.js';
 import {
   LifecycleKindSchema,
   MaterializationSchema,
@@ -10,6 +11,7 @@ export * from './imports.js';
 export * from './runtime.js';
 export * from './auth.js';
 export * from './integrations.js';
+export * from './packages.js';
 
 export const MAX_REQUEST_BYTES = 64 * 1024;
 export const IdSchema = z
@@ -119,6 +121,7 @@ export const ConnectorSchema = z.discriminatedUnion('executionMode', [
       .max(1024)
       .refine((s) => !/[\r\n\0]/.test(s)),
     arguments: Arguments,
+    package: PackageProvenanceSchema.optional(),
   }),
   z.strictObject({
     ...connectorFields,

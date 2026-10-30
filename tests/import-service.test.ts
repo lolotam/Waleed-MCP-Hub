@@ -46,14 +46,11 @@ describe('owner-scoped, memory-only import preview lifecycle', () => {
         secretStoreWrites: false,
         processes: 0,
         networkRequests: 0,
-        proposedConnectorCount: 3,
+        proposedConnectorCount: 2,
       },
     });
-    expect(preview.effects.downloads).toEqual([
-      'package_download_on_execution',
-      'image_pull_on_execution',
-    ]);
-    expect(preview.secretReferences).toHaveLength(3);
+    expect(preview.effects.downloads).toEqual(['image_pull_on_execution']);
+    expect(preview.secretReferences).toHaveLength(2);
     expect(JSON.stringify(preview)).not.toContain(importSecret);
     expect(state).toEqual(before);
     expect('apply' in imports).toBe(false);

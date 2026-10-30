@@ -39,8 +39,8 @@ export async function restrictPrivatePath(path: string) {
     ],
     environment: {},
     stdin: JSON.stringify({ path }),
-    signal: AbortSignal.timeout(12000),
-    timeoutMs: 10000,
+    signal: AbortSignal.timeout(32000),
+    timeoutMs: 30000,
     outputLimitBytes: 1024,
   });
   if (

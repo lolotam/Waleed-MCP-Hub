@@ -8,6 +8,8 @@ import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
 import { dirname, join } from 'node:path';
 import { windowsSecretStore } from '../adapters/secrets/windows.js';
 import { createBindingResolver, type SecretLease } from '../auth/bindings.js';
+import { packagesRoot } from '../packages/store.js';
+import { verifyPackage } from '../packages/verify.js';
 
 // Each agent connection invokes a fresh Node launcher and a fresh contained target
 // tree with independent stdin/stdout. It never attaches to a dashboard process.
@@ -30,6 +32,9 @@ export async function runNativeLauncher(manifestUrl: URL, expectedHash: string) 
     const current = state.connectors.find((connector) => connector.id === saved.id);
     const profile = state.profiles.find((profile) => profile.id === manifest.profileId);
     if (!current || current.executionMode !== 'native' || !current.enabled || !profile || profile.enabled === false || !profile.connectorIds.includes(current.id) || !approved(current) || current.revision !== saved.revision || definitionHash(current) !== definitionHash(saved) || Object.keys(current.headerBindings).length) throw new Error();
+    // A managed install is verified before the secret is resolved and before
+    // the target process is started.
+    if (current.package) await verifyPackage(current, packagesRoot(dirname(manifest.registryPath)));
     if (Object.keys(current.secretBindings).length) lease = await createBindingResolver({ windows: await windowsSecretStore(join(dirname(manifest.registryPath), 'credentials'), true) }, async () => state)(current, stop.signal);
     await assertNoLinks(current.executable);
     const runner = await createWindowsProcessRunner({ allowedExecutables: [current.executable], workingDirectory: dirname(path), concurrency: 1 });

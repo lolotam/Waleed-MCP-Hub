@@ -8,11 +8,14 @@ import {
 import {
   EndpointSchema,
   ImportDefinitionSchema,
+  PackageProposalSchema,
+  isPackageEnvName,
   type ImportDefinition,
   type ImportEntry,
   type ImportIssue,
   type ImportPreview,
   type ImportWarning,
+  type PackageProposal,
 } from '@waleed/contracts';
 import { HubError } from '../errors.js';
 
@@ -60,6 +63,58 @@ const literalValues: Record<string, readonly string[]> = {
   CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: ['1'],
   CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: ['1'],
 };
+
+// The proposal contract owns the package name, the version shapes and the env
+// name rule; the import layer never re-implements them. The selector (a range
+// or dist-tag) refuses git, URL, file and alias specs, so none can reach the
+// proposal.
+const proposalName = PackageProposalSchema.shape.name;
+const proposalVersion = PackageProposalSchema.shape.version;
+const proposalSelector = PackageProposalSchema.shape.requestedVersion;
+const proposalEnvName = PackageProposalSchema.shape.envNames.element;
+// A path spec (a leading ".", "/", "\" or "~") or a drive letter.
+const pathSpec = /^[.\\/~]/;
+const driveSpec = /^[a-zA-Z]:/;
+
+// One npx entry becomes at most one proposal: the first argument after an
+// optional "-y"/"--yes" must name exactly one registry package. Options before
+// the spec, a second package and git, URL, file or path specs stay refused.
+function packageProposal(
+  packageArgs: string[],
+  secretBindings: Record<string, string>,
+  environmentLiterals: Record<string, string>,
+): PackageProposal | null {
+  const spec = packageArgs[0];
+  if (!spec || spec.startsWith('-')) return null;
+  if (pathSpec.test(spec) || driveSpec.test(spec)) return null;
+  const at = spec.startsWith('@') ? spec.indexOf('@', 1) : spec.indexOf('@');
+  const name = at < 0 ? spec : spec.slice(0, at);
+  const raw = at < 0 ? null : spec.slice(at + 1);
+  if (!proposalName.safeParse(name).success) return null;
+  if (raw !== null && !proposalSelector.safeParse(raw).success) return null;
+  const exact = raw !== null && proposalVersion.safeParse(raw).success;
+  const parsed = PackageProposalSchema.safeParse({
+    name,
+    version: exact ? raw : null,
+    requestedVersion: exact ? null : raw,
+    arguments: packageArgs.slice(1),
+    // A name Install rejects is left out: one that is not upper case, and one
+    // a package connector refuses (NODE_* and the OpenSSL variables).
+    envNames: [
+      ...new Set([
+        ...Object.keys(secretBindings),
+        ...Object.keys(environmentLiterals),
+      ]),
+    ]
+      .filter(
+        (envName) =>
+          proposalEnvName.safeParse(envName).success &&
+          !isPackageEnvName(envName),
+      )
+      .sort(),
+  });
+  return parsed.success ? parsed.data : null;
+}
 
 export interface PrivateImport {
   format: ImportPreview['format'];
@@ -394,6 +449,9 @@ export function normalizeImport(source: string): PrivateImport {
         trustApproval: null,
       };
       let definition: ImportDefinition | null = null;
+      // The npx argument list of this entry, once the optional "-y"/"--yes" is
+      // dropped. It is the only source of a package proposal.
+      let npxArguments: string[] | null = null;
       const endpoint = value.url ?? remote?.url;
       const modes = [
         has('url') || has('remote'),
@@ -540,6 +598,7 @@ export function normalizeImport(source: string): PrivateImport {
             ['-y', '--yes'].includes(packageArgs[0] ?? '')
           )
             packageArgs.shift();
+          if (binary === 'npx') npxArguments = packageArgs;
           const pinned =
             binary === 'npx'
               ? /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+@\d+\.\d+\.\d+(?:[-+][a-z0-9.-]+)?$/i.test(
@@ -629,6 +688,35 @@ export function normalizeImport(source: string): PrivateImport {
         const parsed = ImportDefinitionSchema.safeParse(definition);
         if (!parsed.success) issue('invalid_entry', 'definition');
         else if (!issues.length) result.definition = parsed.data;
+      }
+      if (npxArguments) {
+        // An npx entry is never an ordinary native definition: it is a package
+        // proposal that the user installs explicitly, or it stays refused.
+        result.definition = null;
+        const inline = issues.some(
+          (item) =>
+            item.code === 'invalid_command' && item.field === 'inline_program',
+        );
+        const proposal = issues.length
+          ? null
+          : packageProposal(npxArguments, secretBindings, environmentLiterals);
+        // The extracted values are discarded whether or not a proposal comes
+        // out: the install form asks for them again, and a refused entry can
+        // never use them, so nothing of a value stays in the draft.
+        const prefix = `draft-${key}-`;
+        for (const [id, value] of [...draft.secrets])
+          if (id.startsWith(prefix)) {
+            value.fill(0);
+            draft.secrets.delete(id);
+          }
+        draft.references = draft.references.filter(
+          (reference) => !reference.id.startsWith(prefix),
+        );
+        warnings.delete('secrets_memory_only');
+        if (proposal) {
+          result.packageProposal = proposal;
+          result.selected = false;
+        } else if (!inline) issue('invalid_command', 'package_spec');
       }
       // Field labels are metadata only. Mask any known extracted value repeated
       // in a property name as well; unknown values never enter the DTO at all.

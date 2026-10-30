@@ -1,4 +1,8 @@
-export { HubError } from './errors.js';
+export {
+  HubError,
+  RevisionConflictError,
+  isRevisionConflict,
+} from './errors.js';
 export { publicError, redactDiagnostic } from './diagnostics.js';
 export {
   createSafetyLedger,
@@ -45,7 +49,15 @@ export { localRuntimeAdapters } from './adapters/local-runtime.js';
 export { windowsAgentTargets } from './integrations/targets.js';
 export { agentFiles } from './integrations/files.js';
 export { createAgentBridge } from './integrations/bridge.js';
-export { addManualMcp } from './integrations/manual.js';
+export { addManualMcp, writeCredentialValues } from './integrations/manual.js';
+export {
+  createPackageService,
+  type PackageHost,
+  type PackageService,
+  type PackageServiceAdapter,
+  type PackageVerifyResult,
+} from './packages/service.js';
+export { PackageFault } from './packages/fault.js';
 export type { IntegrationAdapters } from './integrations/engine.js';
 export { windowsSecretStore } from './adapters/secrets/windows.js';
 export { dockerSecretStore } from './adapters/secrets/docker.js';

@@ -65,7 +65,11 @@ export function createImportService(now: () => number = Date.now) {
     recoveryBlocked: boolean,
   ): ImportPreview => {
     const entries = structuredClone(draft.normalized.entries);
-    const selected = entries.filter((entry) => entry.selected);
+    // A package proposal is never imported: it is installed on its own, so it
+    // takes part in no conflict, blocker or effect.
+    const selected = entries.filter(
+      (entry) => entry.selected && !entry.packageProposal,
+    );
     for (const entry of selected) {
       if (
         selected.some(
@@ -232,6 +236,18 @@ export function createImportService(now: () => number = Date.now) {
         )
       )
         throw new HubError('invalid', 'Select each known entry exactly once.');
+      if (
+        input.entries.some((change) => {
+          const entry = draft.normalized.entries.find(
+            (candidate) => candidate.key === change.key,
+          );
+          return change.selected && !!entry?.packageProposal;
+        })
+      )
+        throw new HubError(
+          'invalid',
+          'Package proposals are installed with Install, not imported.',
+        );
       for (const entry of input.entries) {
         if (
           hasControlCharacters(entry.name) ||
