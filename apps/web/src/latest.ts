@@ -40,15 +40,18 @@ export interface LatestSteps {
 // was superseded commits nothing (no failure and no end) and resolves only
 // after the newest call settles, so its caller never sees stale data as fresh.
 // Every call resolves to whether the newest call's work succeeded: each call
-// is linked to the call that replaced it, and takes that call's outcome.
+// is linked to the call that replaced it, and follows those links to the end,
+// so it takes the outcome of the newest call when it settles.
 export function latestRunner(limitMs: number) {
   interface Run {
     controller: AbortController;
-    // Settles with the final outcome, after the replacing call settled.
+    // Settles with the final outcome, after the replacing calls settled.
     done: Promise<boolean>;
     // The call that replaced this one, if any.
     next: Run | null;
   }
+  // The newest call, kept after it settles, so a later call still links to
+  // it and a superseded call still finds every later call.
   let latest: Run | null = null;
   return async function run(steps: LatestSteps): Promise<boolean> {
     let finish: (ok: boolean) => void = () => {};
@@ -81,15 +84,12 @@ export function latestRunner(limitMs: number) {
       if (current()) steps.fail(error);
     } finally {
       clearTimeout(timer);
-      if (current()) {
-        latest = null;
-        steps.end();
-      }
+      if (current()) steps.end();
     }
-    // A superseded call takes the final outcome of the call that replaced
-    // it, which in turn waits for its own replacement, so a chain of calls
-    // always carries the outcome of the newest one.
-    if (own.next) ok = await own.next.done;
+    // A superseded call follows the links to the newest call and takes its
+    // final outcome, including calls that started after an earlier link
+    // already settled.
+    for (let next = own.next; next; next = next.next) ok = await next.done;
     finish(ok);
     return ok;
   };

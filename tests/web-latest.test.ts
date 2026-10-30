@@ -169,6 +169,46 @@ describe('latestRunner chains', () => {
   });
 });
 
+describe('latestRunner later calls', () => {
+  it('makes a late superseded call wait for a call that started after the newest one settled', async () => {
+    const log: string[] = [];
+    const run = latestRunner(1000);
+    const slow = gate();
+    const fourth = gate();
+    const a = run(recorder('a', log, gate().opened));
+    const b = run({
+      ...recorder('b', log, slow.opened),
+      work: () => slow.opened,
+    });
+    const c = run(recorder('c', log, Promise.resolve()));
+    await expect(c).resolves.toBe(true);
+    // D starts after C settled, while B still runs.
+    let dSettled = false;
+    const d = run({
+      ...recorder('d', log, fourth.opened),
+      work: async (signal) => {
+        await untilAborted(fourth.opened, signal);
+        throw new DOMException('down', 'NetworkError');
+      },
+    }).finally(() => {
+      dSettled = true;
+    });
+    slow.open();
+    let bSettled = false;
+    const bDone = b.finally(() => {
+      bSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // B does not settle on C's outcome while D still runs.
+    expect(bSettled).toBe(false);
+    expect(dSettled).toBe(false);
+    fourth.open();
+    await expect(d).resolves.toBe(false);
+    await expect(bDone).resolves.toBe(false);
+    await expect(a).resolves.toBe(false);
+  });
+});
+
 describe('untilAborted', () => {
   it('rejects with the abort reason while the promise keeps running', async () => {
     const controller = new AbortController();
