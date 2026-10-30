@@ -101,12 +101,16 @@ export function PackageInstall({
   const [notice, setNotice] = useState('');
   const [failureCode, setFailureCode] = useState<PackageErrorCode | null>(null);
   const running = step === 'resolving' || step === 'installing';
+  const reportRunning = useRef(onRunning);
+  reportRunning.current = onRunning;
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       abort.current?.abort();
+      // The parent never stays locked by a flow that is gone.
+      reportRunning.current?.(false);
       // A protected value never outlives the view that asked for it.
       clearEnv();
     };
