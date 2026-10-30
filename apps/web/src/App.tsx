@@ -11,8 +11,10 @@ import {
   type AdoptionPreview,
   type CapabilityObservation,
   type Materialization,
+  type PackageProposal,
 } from '@waleed/contracts';
 import { api, sessionReady } from './api.js';
+import { latestRunner, untilAborted } from './latest.js';
 import { Icon } from './Icon.js';
 import { ProfileDialog } from './ProfileDialog.js';
 import { DiscoveryPanel } from './DiscoveryPanel.js';
@@ -25,6 +27,7 @@ import { ConnectorList, type ManagedConnector } from './ConnectorList.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
+import { PackageDialog, type PackageSeed } from './PackageInstall.js';
 
 const pages = [
   'Connectors',
@@ -59,6 +62,9 @@ const agentNames: Record<string, string> = {
   cursor: 'Cursor Agent',
 };
 
+// The longest wait on one full refresh of the hub state.
+const REFRESH_LIMIT_MS = 20_000;
+
 export function App() {
   const [page, setPage] = useState<Page>('Connectors');
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -85,67 +91,91 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [manual, setManual] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
   const [search, setSearch] = useState('');
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      await sessionReady;
-      const [
-        info,
-        profileResult,
-        agentResult,
-        events,
-        security,
-        recovery,
-        connectorResult,
-      ] = await Promise.all([
-        api('/api/bootstrap'),
-        api<{
-          profiles: Profile[];
-          revision: number;
-          materializations: Array<Materialization & { stale: boolean }>;
-        }>('/api/profiles'),
-        api<{ agents: Array<AgentObservation & Partial<DiscoveredAgent>> }>(
-          '/api/agents',
-        ),
-        api<{ events: HubState['activity'] }>('/api/activity'),
-        api<{ events: SecurityEvent[] }>('/api/security-activity'),
-        api<{ blocked: boolean }>('/api/recovery'),
-        api<{
-          connectors: ManagedConnector[];
-          observations: CapabilityObservation[];
-        }>('/api/connectors'),
-      ]);
-      setBootstrap({
-        ...BootstrapSchema.parse(info),
-        revision: profileResult.revision,
-      });
-      setProfiles(profileResult.profiles);
-      setConnectors(connectorResult.connectors);
-      setObservations(connectorResult.observations);
-      setMaterializations(profileResult.materializations);
-      setAgents(agentResult.agents);
-      setActivity(events.events);
-      setSecurityEvents(security.events);
-      setRecoveryBlocked(recovery.blocked);
-      if (BootstrapSchema.parse(info).capabilities.discovery) {
-        const [snapshot, preview] = await Promise.all([
-          api<DiscoverySnapshot>('/api/discovery'),
-          api<AdoptionPreview>('/api/adoption/preview'),
-        ]);
-        setDiscovery(snapshot);
-        setAdoption(preview);
-      }
-    } catch (error) {
-      setError(
-        error instanceof Error ? error.message : 'The hub is unavailable.',
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // The newest refresh owns the page, and every refresh is bounded, so a
+  // stalled hub never leaves the page loading. See latestRunner.
+  const [runRefresh] = useState(() => latestRunner(REFRESH_LIMIT_MS));
+  const refresh = useCallback(
+    () =>
+      runRefresh({
+        begin: () => {
+          setLoading(true);
+          setError('');
+        },
+        work: (signal, current) => loadHub(signal, current),
+        fail: (error) =>
+          setError(
+            error instanceof DOMException && error.name === 'TimeoutError'
+              ? 'The hub did not answer in time. Refresh to retry.'
+              : error instanceof Error
+                ? error.message
+                : 'The hub is unavailable.',
+          ),
+        end: () => setLoading(false),
+      }),
+    [runRefresh],
+  );
+  async function loadHub(signal: AbortSignal, current: () => boolean) {
+    // The session request is shared and keeps running for a later refresh;
+    // only this wait on it is bounded.
+    await untilAborted(sessionReady, signal);
+    const [
+      info,
+      profileResult,
+      agentResult,
+      events,
+      security,
+      recovery,
+      connectorResult,
+    ] = await Promise.all([
+      api('/api/bootstrap', undefined, signal),
+      api<{
+        profiles: Profile[];
+        revision: number;
+        materializations: Array<Materialization & { stale: boolean }>;
+      }>('/api/profiles', undefined, signal),
+      api<{ agents: Array<AgentObservation & Partial<DiscoveredAgent>> }>(
+        '/api/agents',
+        undefined,
+        signal,
+      ),
+      api<{ events: HubState['activity'] }>('/api/activity', undefined, signal),
+      api<{ events: SecurityEvent[] }>(
+        '/api/security-activity',
+        undefined,
+        signal,
+      ),
+      api<{ blocked: boolean }>('/api/recovery', undefined, signal),
+      api<{
+        connectors: ManagedConnector[];
+        observations: CapabilityObservation[];
+      }>('/api/connectors', undefined, signal),
+    ]);
+    const parsed = BootstrapSchema.parse(info);
+    // Every read finishes before anything is committed, so a failed or late
+    // discovery read never leaves a mixed snapshot on the page.
+    const discovered = parsed.capabilities.discovery
+      ? await Promise.all([
+          api<DiscoverySnapshot>('/api/discovery', undefined, signal),
+          api<AdoptionPreview>('/api/adoption/preview', undefined, signal),
+        ])
+      : null;
+    if (!current()) return;
+    setBootstrap({ ...parsed, revision: profileResult.revision });
+    setProfiles(profileResult.profiles);
+    setConnectors(connectorResult.connectors);
+    setObservations(connectorResult.observations);
+    setMaterializations(profileResult.materializations);
+    setAgents(agentResult.agents);
+    setActivity(events.events);
+    setSecurityEvents(security.events);
+    setRecoveryBlocked(recovery.blocked);
+    // Always assigned, so a capability that went away clears its old data.
+    setDiscovery(discovered?.[0] ?? null);
+    setAdoption(discovered?.[1] ?? null);
+  }
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -347,6 +377,7 @@ export function App() {
                       authenticate={setAuthentication}
                       operate={setOperation}
                       refresh={refresh}
+                      openPackage={setPackageSeed}
                     />
                   ) : (
                     <div className="empty-state">
@@ -864,6 +895,26 @@ export function App() {
               initialPreview: preview,
             });
           }}
+          installBlocked={recoveryBlocked}
+          installProposal={(proposal: PackageProposal) => {
+            // The import stays open: the package is installed in its own,
+            // separate review step.
+            const version = proposal.version ?? proposal.requestedVersion;
+            setPackageSeed({
+              mode: 'install',
+              name: proposal.name,
+              ...(version ? { version } : {}),
+              arguments: proposal.arguments,
+              envNames: proposal.envNames,
+            });
+          }}
+        />
+      )}
+      {packageSeed && (
+        <PackageDialog
+          seed={packageSeed}
+          close={() => setPackageSeed(null)}
+          refresh={refresh}
         />
       )}
       {operation && bootstrap && (

@@ -10,7 +10,7 @@ export function AgentIntegrations({
 }: {
   revision: number;
   blocked: boolean;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
 }) {
   const [agents, setAgents] = useState<AgentIntegration[]>([]),
     [busy, setBusy] = useState(false),

@@ -1,15 +1,47 @@
-import { useState } from 'react';
-import type {
-  CapabilityObservation,
-  Connector,
-  ImportDefinition,
-  Profile,
-  RuntimeJob,
+import { useEffect, useRef, useState } from 'react';
+import {
+  PackageJobSchema,
+  type CapabilityObservation,
+  type Connector,
+  type ImportDefinition,
+  type PackageJob,
+  type PackageProvenance,
+  type Profile,
+  type RuntimeJob,
 } from '@waleed/contracts';
 import type { OperationDialogInput } from './OperationDialog.js';
-import { api } from './api.js';
+import type { PackageSeed } from './PackageInstall.js';
+import {
+  api,
+  packageErrorText,
+  packageFailureText,
+  pollPackageJob,
+} from './api.js';
+import { compareVersions } from './versions.js';
 
 export type ManagedConnector = Connector & { executionHash: string };
+// A managed package is a native connector with a package record.
+export type ManagedPackageConnector = Extract<
+  ManagedConnector,
+  { executionMode: 'native' }
+> & { package: PackageProvenance };
+export function isManagedPackage(
+  connector: ManagedConnector,
+): connector is ManagedPackageConnector {
+  return connector.executionMode === 'native' && !!connector.package;
+}
+
+// The results of the file verification of the hub.
+type VerifyResult = 'verified' | 'package_modified' | 'invalid_configuration';
+// Session results belong to one revision: a replace bumps the revision, so
+// the results of the old package never stick to the new one.
+const sessionKey = (connector: ManagedConnector) =>
+  `${connector.id}:${connector.revision}`;
+// What the managed panel of a package connector always says.
+const MANAGED_PANEL =
+  "Managed package: the hub's node.exe, the --no-global-search-paths flag and the entry file are fixed by the install; editing can change the name, description, enabled state, the arguments after the entry and the environment.";
+const REINSTALL_PANEL =
+  'If you moved the Waleed MCP Hub folder, the stored node.exe path no longer exists. Reinstall pins the connector to the current node.exe; approve it again afterwards.';
 export function editableDefinition(
   connector: ManagedConnector,
 ): ImportDefinition {
@@ -63,6 +95,7 @@ export function ConnectorList({
   authenticate,
   operate,
   refresh,
+  openPackage,
 }: {
   connectors: ManagedConnector[];
   observations: CapabilityObservation[];
@@ -72,13 +105,40 @@ export function ConnectorList({
   secrets: boolean;
   authenticate: (connector: ManagedConnector) => void;
   operate: (input: OperationDialogInput) => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
+  openPackage: (seed: PackageSeed) => void;
 }) {
   const [job, setJob] = useState<RuntimeJob | null>(null);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
+  // The last file verification of this session, per connector.
+  const [verifications, setVerifications] = useState<
+    Record<string, VerifyResult>
+  >({});
+  // The last update lookup of this session, per connector.
+  const [updates, setUpdates] = useState<
+    Record<
+      string,
+      {
+        state: 'checking' | 'up_to_date' | 'found' | 'failed';
+        version?: string;
+      }
+    >
+  >({});
+  const [packageJobs, setPackageJobs] = useState<Record<string, PackageJob>>(
+    {},
+  );
+  // Every running package poll of this view; all of them stop on unmount.
+  const aborts = useRef(new Set<AbortController>());
   // Rows stay compact; details open in place and several may be open at once.
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  useEffect(
+    () => () => {
+      for (const controller of aborts.current) controller.abort();
+      aborts.current.clear();
+    },
+    [],
+  );
   const toggle = (id: string) =>
     setOpen((current) => {
       const next = new Set(current);
@@ -104,6 +164,81 @@ export function ConnectorList({
       setChecking(false);
     }
   }
+  // The file verification never starts a process and never runs package code.
+  async function verifyFiles(connector: ManagedConnector) {
+    setError('');
+    try {
+      const result = await api<{ connectorId: string; result: VerifyResult }>(
+        `/api/packages/verify/${connector.id}`,
+        {},
+      );
+      setVerifications((current) => ({
+        ...current,
+        [sessionKey(connector)]: result.result,
+      }));
+    } catch (failure) {
+      setError(packageFailureText(failure));
+    }
+  }
+  // The update lookup resolves the tree only; it installs nothing.
+  async function checkForUpdate(connector: ManagedConnector) {
+    const record = isManagedPackage(connector) ? connector.package : null;
+    if (!record) return;
+    setError('');
+    setUpdates((current) => ({
+      ...current,
+      [sessionKey(connector)]: { state: 'checking' },
+    }));
+    const controller = new AbortController();
+    aborts.current.add(controller);
+    try {
+      const started = PackageJobSchema.parse(
+        await api<PackageJob>('/api/packages/resolve', {
+          name: record.name,
+        }),
+      );
+      const final = await pollPackageJob(
+        started,
+        (next) => {
+          setPackageJobs((current) => ({
+            ...current,
+            [sessionKey(connector)]: next,
+          }));
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      if (final.state === 'succeeded' && final.preview) {
+        const version = final.preview.version;
+        setUpdates((current) => ({
+          ...current,
+          [sessionKey(connector)]: {
+            // Only a newer release is an update: a lower latest is never
+            // offered as a downgrade.
+            state:
+              compareVersions(version, record.version) > 0
+                ? 'found'
+                : 'up_to_date',
+            version,
+          },
+        }));
+        return;
+      }
+      setUpdates((current) => ({
+        ...current,
+        [sessionKey(connector)]: { state: 'failed' },
+      }));
+      setError(packageErrorText(final.error ?? 'install_failed'));
+    } catch (failure) {
+      setUpdates((current) => ({
+        ...current,
+        [sessionKey(connector)]: { state: 'failed' },
+      }));
+      setError(packageFailureText(failure));
+    } finally {
+      aborts.current.delete(controller);
+    }
+  }
   return (
     <>
       <ul className="connector-list">
@@ -126,12 +261,24 @@ export function ConnectorList({
                 : 'warn';
           const toolCount =
             state === 'connected' ? (observation?.tools.length ?? 0) : null;
-          const target =
-            connector.executionMode === 'native'
+          // A managed package is a native connector with a package record.
+          const record = isManagedPackage(connector) ? connector.package : null;
+          const managed = record !== null;
+          const target = managed
+            ? `npm ${record.name}@${record.version} · ${record.entry}`
+            : connector.executionMode === 'native'
               ? [connector.executable, ...connector.arguments].join(' ')
               : connector.executionMode === 'docker'
                 ? connector.image
                 : connector.endpoint;
+          const verification = verifications[sessionKey(connector)];
+          const update = updates[sessionKey(connector)];
+          const reinstall =
+            managed &&
+            (verification === 'package_modified' ||
+              verification === 'invalid_configuration' ||
+              observation?.reason === 'package_modified' ||
+              observation?.reason === 'invalid_configuration');
           const expanded = open.has(connector.id);
           const panelId = `connector-panel-${connector.id}`;
           return (
@@ -157,7 +304,7 @@ export function ConnectorList({
                   <small title={target}>{target}</small>
                 </span>
                 <span className="cell cell-runtime">
-                  {connector.executionMode}
+                  {managed ? 'npm package' : connector.executionMode}
                 </span>
                 <span className="pills">
                   <span className={`pill ${connector.enabled ? tone : 'off'}`}>
@@ -189,9 +336,15 @@ export function ConnectorList({
                       runtime={runtime}
                       secrets={secrets}
                       checking={checking}
+                      managed={managed}
+                      reinstall={reinstall}
+                      update={update}
                       authenticate={authenticate}
                       operate={operate}
+                      openPackage={openPackage}
                       check={(id) => void check(id)}
+                      verify={(target) => void verifyFiles(target)}
+                      checkUpdate={(target) => void checkForUpdate(target)}
                     />
                   </div>
                   <dl className="connector-facts">
@@ -245,7 +398,49 @@ export function ConnectorList({
                         <code>{target}</code>
                       </dd>
                     </div>
+                    {managed && record && (
+                      <div>
+                        <dt>Package</dt>
+                        <dd>
+                          {record.name}@{record.version} · {record.entry} ·{' '}
+                          {record.integrity.slice(0, 16)}…
+                        </dd>
+                      </div>
+                    )}
+                    {managed && (
+                      <div>
+                        <dt>Files</dt>
+                        <dd>
+                          {verification === 'verified'
+                            ? 'verified'
+                            : verification === 'package_modified'
+                              ? 'modified since install'
+                              : verification === 'invalid_configuration'
+                                ? 'definition does not match the package record'
+                                : 'not verified yet'}
+                        </dd>
+                      </div>
+                    )}
                   </dl>
+                  {managed && (
+                    <p className="notice">
+                      {MANAGED_PANEL}
+                      {reinstall ? ` ${REINSTALL_PANEL}` : ''}
+                    </p>
+                  )}
+                  {update?.state === 'checking' &&
+                    packageJobs[sessionKey(connector)] && (
+                      <p role="status" className="notice">
+                        Update lookup:{' '}
+                        {packageJobs[sessionKey(connector)]!.phase.replaceAll(
+                          '_',
+                          ' ',
+                        )}{' '}
+                        ·{' '}
+                        {packageJobs[sessionKey(connector)]!.progress.packages}{' '}
+                        packages
+                      </p>
+                    )}
                   {observation?.reason && observation.reason !== 'none' && (
                     <p className="notice">
                       {observation.reason.replaceAll('_', ' ')}
@@ -323,9 +518,15 @@ function ConnectorActions({
   runtime,
   secrets,
   checking,
+  managed,
+  reinstall,
+  update,
   authenticate,
   operate,
+  openPackage,
   check,
+  verify,
+  checkUpdate,
 }: {
   connector: ManagedConnector;
   approval: boolean;
@@ -334,12 +535,79 @@ function ConnectorActions({
   runtime: boolean;
   secrets: boolean;
   checking: boolean;
+  managed: boolean;
+  reinstall: boolean;
+  update:
+    | {
+        state: 'checking' | 'up_to_date' | 'found' | 'failed';
+        version?: string;
+      }
+    | undefined;
   authenticate: (connector: ManagedConnector) => void;
   operate: (input: OperationDialogInput) => void;
+  openPackage: (seed: PackageSeed) => void;
   check: (id: string) => void;
+  verify: (connector: ManagedConnector) => void;
+  checkUpdate: (connector: ManagedConnector) => void;
 }) {
+  const managedConnector = isManagedPackage(connector) ? connector : null;
+  const record = managedConnector?.package ?? null;
   return (
     <>
+      {managed && (
+        <button
+          disabled={disabled}
+          title="Re-checks the installed files. No package code runs."
+          onClick={() => verify(connector)}
+        >
+          Verify files
+        </button>
+      )}
+      {managed &&
+        (update?.state === 'found' ? (
+          <button
+            disabled={disabled || !managedConnector}
+            onClick={() => {
+              if (!managedConnector) return;
+              openPackage({
+                mode: 'replace',
+                purpose: 'update',
+                connector: managedConnector,
+                ...(update.version ? { version: update.version } : {}),
+              });
+            }}
+          >
+            Update to {update.version}
+          </button>
+        ) : update?.state === 'up_to_date' ? (
+          <button disabled={disabled} onClick={() => checkUpdate(connector)}>
+            Up to date · check again
+          </button>
+        ) : (
+          <button
+            disabled={disabled || update?.state === 'checking'}
+            onClick={() => checkUpdate(connector)}
+          >
+            {update?.state === 'checking'
+              ? 'Checking for update…'
+              : 'Check for update'}
+          </button>
+        ))}
+      {managed && reinstall && record && managedConnector && (
+        <button
+          disabled={disabled}
+          onClick={() =>
+            openPackage({
+              mode: 'replace',
+              purpose: 'reinstall',
+              connector: managedConnector,
+              version: record.version,
+            })
+          }
+        >
+          Reinstall
+        </button>
+      )}
       <button
         disabled={disabled || !secrets}
         title={
@@ -362,7 +630,9 @@ function ConnectorActions({
               definition: editableDefinition(connector),
             },
             editor: 'definition',
-            context: editableDefinition(connector),
+            context: managed
+              ? { ...editableDefinition(connector), effect: MANAGED_PANEL }
+              : editableDefinition(connector),
           })
         }
       >
@@ -428,8 +698,9 @@ function ConnectorActions({
               connectorId: connector.id,
             },
             context: {
-              effect:
-                'Remove definition and desired memberships, not credentials or provider authorization. Reapply affected profiles.',
+              effect: managed
+                ? 'Remove definition and desired memberships, not credentials or provider authorization. Reapply affected profiles. Its install folder is deleted.'
+                : 'Remove definition and desired memberships, not credentials or provider authorization. Reapply affected profiles.',
             },
           })
         }

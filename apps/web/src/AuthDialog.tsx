@@ -28,7 +28,7 @@ export function AuthDialog({
   connector: ManagedConnector;
   revision: number;
   close: () => void;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null),
     form = useRef<HTMLFormElement>(null),
