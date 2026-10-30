@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ManualMcpSchema } from '@waleed/contracts';
 import { api } from './api.js';
 import { Icon } from './Icon.js';
+import { PackageInstall } from './PackageInstall.js';
 
 const map = (text: string): Record<string, string> => {
   const value: unknown = JSON.parse(text || '{}');
@@ -28,12 +29,13 @@ export function ManualMcpDialog({
     env = useRef<HTMLTextAreaElement>(null),
     headers = useRef<HTMLTextAreaElement>(null);
   const [type, setType] = useState<
-      'stdio' | 'docker' | 'streamable_http' | 'sse'
+      'stdio' | 'docker' | 'streamable_http' | 'sse' | 'npm'
     >('stdio'),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
-    [validation, setValidation] = useState('');
+    [validation, setValidation] = useState(''),
+    [packageRunning, setPackageRunning] = useState(false);
   const clear = () => {
     if (env.current) env.current.value = '';
     if (headers.current) headers.current.value = '';
@@ -47,6 +49,11 @@ export function ManualMcpDialog({
     };
   }, []);
   function validate() {
+    // The managed package flow has its own fields and its own validation.
+    if (type === 'npm') {
+      setValidation('');
+      return;
+    }
     try {
       const fields = new FormData(form.current!);
       ManualMcpSchema.shape.args.parse(
@@ -78,6 +85,8 @@ export function ManualMcpDialog({
   }
   async function save(event: FormEvent) {
     event.preventDefault();
+    // The npm package flow has its own buttons and its own request.
+    if (type === 'npm') return;
     setBusy(true);
     setError('');
     let input: ReturnType<typeof ManualMcpSchema.parse> | undefined;
@@ -125,6 +134,28 @@ export function ManualMcpDialog({
       setBusy(false);
     }
   }
+  // The connection type stays available in every mode, so the user can leave
+  // the managed package flow again.
+  const typeSelect = (
+    <>
+      <label htmlFor="manual-type">Connection type</label>
+      <select
+        id="manual-type"
+        value={type}
+        onChange={(event) => {
+          clear();
+          setType(event.target.value as typeof type);
+          setValidation('');
+        }}
+      >
+        <option value="stdio">Stdio — local executable</option>
+        <option value="docker">Docker image</option>
+        <option value="streamable_http">Remote HTTP</option>
+        <option value="sse">Remote SSE</option>
+        <option value="npm">npm package — managed install</option>
+      </select>
+    </>
+  );
   return (
     <dialog
       ref={dialog}
@@ -132,7 +163,7 @@ export function ManualMcpDialog({
       aria-labelledby="manual-title"
       onCancel={(event) => {
         event.preventDefault();
-        if (!busy) {
+        if (!busy && !packageRunning) {
           clear();
           close();
         }
@@ -154,7 +185,7 @@ export function ManualMcpDialog({
             type="button"
             className="icon-button"
             aria-label="Close manual MCP dialog"
-            disabled={busy}
+            disabled={busy || packageRunning}
             onClick={() => {
               clear();
               close();
@@ -173,26 +204,23 @@ export function ManualMcpDialog({
           <p role="status" className="notice">
             {notice}
           </p>
+        ) : type === 'npm' ? (
+          <>
+            <div className="form-fields">{typeSelect}</div>
+            <PackageInstall
+              seed={{ mode: 'install' }}
+              close={close}
+              refresh={refresh}
+              onRunning={setPackageRunning}
+              showCancel={false}
+            />
+          </>
         ) : (
           <>
             <div className="form-fields">
               <label htmlFor="manual-name">MCP name</label>
               <input id="manual-name" name="name" required maxLength={100} />
-              <label htmlFor="manual-type">Connection type</label>
-              <select
-                id="manual-type"
-                value={type}
-                onChange={(event) => {
-                  clear();
-                  setType(event.target.value as typeof type);
-                  setValidation('');
-                }}
-              >
-                <option value="stdio">Stdio — local executable</option>
-                <option value="docker">Docker image</option>
-                <option value="streamable_http">Remote HTTP</option>
-                <option value="sse">Remote SSE</option>
-              </select>
+              {typeSelect}
               {type === 'stdio' && (
                 <>
                   <label htmlFor="manual-command">
@@ -306,7 +334,7 @@ export function ManualMcpDialog({
         <footer className="dialog-footer">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || packageRunning}
             onClick={() => {
               clear();
               close();
@@ -314,7 +342,7 @@ export function ManualMcpDialog({
           >
             {notice ? 'Close' : 'Cancel'}
           </button>
-          {!notice && (
+          {!notice && type !== 'npm' && (
             <button
               className="primary"
               disabled={busy || !!validation}

@@ -11,6 +11,7 @@ import {
   type AdoptionPreview,
   type CapabilityObservation,
   type Materialization,
+  type PackageProposal,
 } from '@waleed/contracts';
 import { api, sessionReady } from './api.js';
 import { Icon } from './Icon.js';
@@ -25,6 +26,7 @@ import { ConnectorList, type ManagedConnector } from './ConnectorList.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
+import { PackageDialog, type PackageSeed } from './PackageInstall.js';
 
 const pages = [
   'Connectors',
@@ -85,6 +87,7 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [manual, setManual] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
   const [search, setSearch] = useState('');
 
   const refresh = useCallback(async () => {
@@ -347,6 +350,7 @@ export function App() {
                       authenticate={setAuthentication}
                       operate={setOperation}
                       refresh={refresh}
+                      openPackage={setPackageSeed}
                     />
                   ) : (
                     <div className="empty-state">
@@ -864,6 +868,25 @@ export function App() {
               initialPreview: preview,
             });
           }}
+          installProposal={(proposal: PackageProposal) => {
+            // The import stays open: the package is installed in its own,
+            // separate review step.
+            const version = proposal.version ?? proposal.requestedVersion;
+            setPackageSeed({
+              mode: 'install',
+              name: proposal.name,
+              ...(version ? { version } : {}),
+              arguments: proposal.arguments,
+              envNames: proposal.envNames,
+            });
+          }}
+        />
+      )}
+      {packageSeed && (
+        <PackageDialog
+          seed={packageSeed}
+          close={() => setPackageSeed(null)}
+          refresh={refresh}
         />
       )}
       {operation && bootstrap && (

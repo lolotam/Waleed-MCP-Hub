@@ -4,6 +4,7 @@ import type {
   ImportSelection,
   ImportDefinition,
   OperationPreview,
+  PackageProposal,
 } from '@waleed/contracts';
 import { api, ApiError } from './api.js';
 import { Icon } from './Icon.js';
@@ -32,6 +33,7 @@ export function ImportDialog({
   close,
   refresh,
   savePreview,
+  installProposal,
 }: {
   revision: number;
   close: () => void;
@@ -40,6 +42,7 @@ export function ImportDialog({
     preview: OperationPreview,
     definitions: ImportDefinition[],
   ) => void;
+  installProposal: (proposal: PackageProposal) => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
@@ -103,11 +106,13 @@ export function ImportDialog({
     draftId.current = value.id;
     setPreview(value);
     setSelection(
-      value.entries.map(({ key, name, id, selected }) => ({
-        key,
-        name,
-        id,
-        selected,
+      value.entries.map((entry) => ({
+        key: entry.key,
+        name: entry.name,
+        id: entry.id,
+        // A package proposal is installed on its own and is never applied
+        // with the import.
+        selected: entry.packageProposal ? false : entry.selected,
       })),
     );
     setEdited(false);
@@ -240,6 +245,11 @@ export function ImportDialog({
       if (mounted.current) setBusy(false);
     }
   }
+  // The package proposals of the preview: they are never definitions, never
+  // selectable and never part of the applied selection.
+  const proposals = (preview?.entries ?? [])
+    .map((entry) => entry.packageProposal)
+    .filter((proposal): proposal is PackageProposal => !!proposal);
   return (
     <dialog
       ref={dialog}
@@ -434,116 +444,163 @@ export function ImportDialog({
               references. Source inputs have been cleared.
             </p>
             <div className="import-entries">
-              {preview.entries.map((entry, index) => (
-                <section
-                  className="import-entry"
-                  key={entry.key}
-                  aria-labelledby={`entry-title-${entry.key}`}
-                >
-                  <h3 id={`entry-title-${entry.key}`}>
-                    Entry {index + 1}: {entry.name}
-                  </h3>
-                  <label className="import-check">
-                    <input
-                      type="checkbox"
-                      checked={selection[index]?.selected ?? false}
-                      onChange={(event) => {
-                        setSelection((entries) =>
-                          entries.map((item) =>
-                            item.key === entry.key
-                              ? { ...item, selected: event.target.checked }
-                              : item,
-                          ),
-                        );
-                        setEdited(true);
-                      }}
-                    />
-                    Include entry {index + 1}
-                  </label>
-                  <div className="import-identity">
-                    <label>
-                      Name
+              {preview.entries.map((entry, index) =>
+                // A package proposal is never an importable definition: it is
+                // listed in its own section below.
+                entry.packageProposal ? null : (
+                  <section
+                    className="import-entry"
+                    key={entry.key}
+                    aria-labelledby={`entry-title-${entry.key}`}
+                  >
+                    <h3 id={`entry-title-${entry.key}`}>
+                      Entry {index + 1}: {entry.name}
+                    </h3>
+                    <label className="import-check">
                       <input
-                        aria-label={`Entry ${index + 1} name`}
-                        value={selection[index]?.name ?? ''}
-                        maxLength={100}
-                        required
+                        type="checkbox"
+                        checked={selection[index]?.selected ?? false}
                         onChange={(event) => {
                           setSelection((entries) =>
                             entries.map((item) =>
                               item.key === entry.key
-                                ? { ...item, name: event.target.value }
+                                ? { ...item, selected: event.target.checked }
                                 : item,
                             ),
                           );
                           setEdited(true);
                         }}
                       />
+                      Include entry {index + 1}
                     </label>
-                    <label>
-                      Identifier
-                      <input
-                        aria-label={`Entry ${index + 1} identifier`}
-                        value={selection[index]?.id ?? ''}
-                        pattern="[a-z0-9][a-z0-9_-]*"
-                        maxLength={80}
-                        required
-                        onChange={(event) => {
-                          setSelection((entries) =>
-                            entries.map((item) =>
-                              item.key === entry.key
-                                ? { ...item, id: event.target.value }
-                                : item,
-                            ),
-                          );
-                          setEdited(true);
-                        }}
-                      />
-                    </label>
-                  </div>
-                  {entry.issues.length > 0 && (
-                    <ul className="error-message">
-                      {entry.issues.map((issue, index) => (
-                        <li key={index}>
-                          {issue.code.replaceAll('_', ' ')}: {issue.field}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {entry.conflicts.length > 0 && (
-                    <p className="error-message" role="status">
-                      Conflict:{' '}
-                      {entry.conflicts
-                        .map((conflict) => conflict.replaceAll('_', ' '))
-                        .join(', ')}
-                      . Rename the entry/identifier or deselect it, then update
-                      the preview.
-                    </p>
-                  )}
-                  {entry.definition && (
-                    <>
-                      <p>
-                        {entry.definition.executionMode} ·{' '}
-                        {entry.definition.transport} · execution approval: not
-                        granted
+                    <div className="import-identity">
+                      <label>
+                        Name
+                        <input
+                          aria-label={`Entry ${index + 1} name`}
+                          value={selection[index]?.name ?? ''}
+                          maxLength={100}
+                          required
+                          onChange={(event) => {
+                            setSelection((entries) =>
+                              entries.map((item) =>
+                                item.key === entry.key
+                                  ? { ...item, name: event.target.value }
+                                  : item,
+                              ),
+                            );
+                            setEdited(true);
+                          }}
+                        />
+                      </label>
+                      <label>
+                        Identifier
+                        <input
+                          aria-label={`Entry ${index + 1} identifier`}
+                          value={selection[index]?.id ?? ''}
+                          pattern="[a-z0-9][a-z0-9_-]*"
+                          maxLength={80}
+                          required
+                          onChange={(event) => {
+                            setSelection((entries) =>
+                              entries.map((item) =>
+                                item.key === entry.key
+                                  ? { ...item, id: event.target.value }
+                                  : item,
+                              ),
+                            );
+                            setEdited(true);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    {entry.issues.length > 0 && (
+                      <ul className="error-message">
+                        {entry.issues.map((issue, index) => (
+                          <li key={index}>
+                            {issue.code.replaceAll('_', ' ')}: {issue.field}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {entry.conflicts.length > 0 && (
+                      <p className="error-message" role="status">
+                        Conflict:{' '}
+                        {entry.conflicts
+                          .map((conflict) => conflict.replaceAll('_', ' '))
+                          .join(', ')}
+                        . Rename the entry/identifier or deselect it, then
+                        update the preview.
                       </p>
-                      <details>
-                        <summary>Sanitized normalized definition</summary>
-                        <pre>{JSON.stringify(entry.definition, null, 2)}</pre>
-                      </details>
-                    </>
-                  )}
-                  {entry.warnings.length > 0 && (
-                    <p className="muted">
-                      Review:{' '}
-                      {entry.warnings
-                        .map((warning) => warning.replaceAll('_', ' '))
-                        .join(' · ')}
-                    </p>
-                  )}
-                </section>
-              ))}
+                    )}
+                    {entry.definition && (
+                      <>
+                        <p>
+                          {entry.definition.executionMode} ·{' '}
+                          {entry.definition.transport} · execution approval: not
+                          granted
+                        </p>
+                        <details>
+                          <summary>Sanitized normalized definition</summary>
+                          <pre>{JSON.stringify(entry.definition, null, 2)}</pre>
+                        </details>
+                      </>
+                    )}
+                    {entry.warnings.length > 0 && (
+                      <p className="muted">
+                        Review:{' '}
+                        {entry.warnings
+                          .map((warning) => warning.replaceAll('_', ' '))
+                          .join(' · ')}
+                      </p>
+                    )}
+                  </section>
+                ),
+              )}
             </div>
+            {proposals.length > 0 && (
+              <section
+                className="package-proposals"
+                aria-labelledby="package-proposals-title"
+              >
+                <h3 id="package-proposals-title">Package proposals</h3>
+                <p className="muted">
+                  A proposal is never applied with the import and never blocks
+                  it. Install it on its own: the package is looked up, reviewed
+                  and installed in a separate, explicit step.
+                </p>
+                {proposals.map((proposal, index) => (
+                  <div
+                    className="package-proposal"
+                    key={`${proposal.name}-${index}`}
+                  >
+                    <p>
+                      <strong>{proposal.name}</strong>
+                    </p>
+                    <p>
+                      Version:{' '}
+                      {proposal.version
+                        ? proposal.version
+                        : proposal.requestedVersion
+                          ? `${proposal.requestedVersion} (resolved at Look up)`
+                          : 'version chosen at Look up'}
+                    </p>
+                    <p>Arguments: {proposal.arguments.join(' ') || 'none'}</p>
+                    {proposal.envNames.length > 0 && (
+                      <p>Will ask for: {proposal.envNames.join(', ')}</p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        installProposal(proposal);
+                      }}
+                    >
+                      Install {proposal.name}
+                    </button>
+                  </div>
+                ))}
+              </section>
+            )}
             <section className="review">
               <h3>Proposed scope</h3>
               <p>

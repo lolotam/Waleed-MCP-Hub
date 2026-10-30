@@ -1259,3 +1259,104 @@ dialog h2 {
     animation: none !important;
   }
 }
+/* The managed package flow: the preview facts, the warnings, the progress. */
+.package-flow {
+  min-width: 0;
+}
+.package-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px 24px;
+  margin: 12px 0 0;
+}
+.package-facts dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.package-facts dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.package-facts code,
+.package-command code {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+.package-command {
+  margin-block: 16px;
+}
+.package-command code {
+  display: block;
+  padding: 10px 12px;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.package-entries,
+.package-warnings {
+  margin: 16px 0 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+.package-entries legend,
+.package-warnings legend {
+  padding-inline: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.package-entries label,
+.package-warnings label {
+  align-items: flex-start;
+}
+.package-warnings label {
+  color: var(--muted);
+  font-size: 12px;
+}
+.package-progress {
+  margin-block: 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.package-progress p {
+  margin-block: 6px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.package-proposals {
+  margin-block: 20px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+}
+.package-proposal {
+  border-block-start: 1px solid var(--border);
+  padding-block: 12px;
+}
+.package-proposal p {
+  margin-block: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.package-footer {
+  flex-wrap: wrap;
+}
+@media (max-width: 600px) {
+  .package-facts {
+    grid-template-columns: 1fr;
+  }
+}
