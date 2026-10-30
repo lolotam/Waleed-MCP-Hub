@@ -172,10 +172,9 @@ export function App() {
     setActivity(events.events);
     setSecurityEvents(security.events);
     setRecoveryBlocked(recovery.blocked);
-    if (discovered) {
-      setDiscovery(discovered[0]);
-      setAdoption(discovered[1]);
-    }
+    // Always assigned, so a capability that went away clears its old data.
+    setDiscovery(discovered?.[0] ?? null);
+    setAdoption(discovered?.[1] ?? null);
   }
   useEffect(() => {
     void refresh();
