@@ -106,7 +106,10 @@ Updated: 2026-10-30
   path is gone, but Verify files still passes and the UI offers no **Reinstall**
   (it appears only for `package_modified`/`invalid_configuration`). The repair is
   an update to a newer version, or remove and install again. A same-version
-  re-pin control is follow-up work.
+  re-pin control is follow-up work. Conversely, `invalid_configuration` (raised
+  only for a refused `NODE_*`/OpenSSL environment name) shows **Reinstall** and
+  the moved-folder hint, although only removing the binding fixes it; the UI
+  should tell the two causes apart.
 - No secret-backed import save or adoption apply. P4 normalization stays data-only;
   P5 no-secret saving is a distinct registry operation, not runtime approval.
 - P3 adoption preview remains metadata-only, not an approved executable definition

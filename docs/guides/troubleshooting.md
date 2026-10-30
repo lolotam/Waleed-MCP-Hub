@@ -99,15 +99,20 @@ or rename that `node_modules`; reinstalling won't help.
 
 ## A package connector says its definition does not match its package record
 
-An environment value starts with `NODE_` or is an OpenSSL variable. Remove that
-binding under **Edit**; reinstalling won't help.
+An environment value starts with `NODE_` or is an OpenSSL variable; that is the
+only cause of this message. Remove that binding under **Edit**. The row also
+offers **Reinstall** and mentions a moved hub folder, but neither applies here:
+reinstalling won't help. (A moved hub folder shows a different symptom, see the
+[next section](#a-package-connector-stopped-starting-after-i-moved-the-hub-folder).)
 
 ## A package connector stopped starting after I moved the hub folder
 
 A managed connector runs on the `node.exe` of the hub folder it was installed
 from, and that path is stored in its approved definition. After a move the path
-no longer exists, so **Test capabilities** fails while **Verify files** still
-passes (the installed files did not change), and **Reinstall** is not offered.
+no longer exists, so **Test capabilities** ends in **error** with the reason
+**protocol error**, and agents get "The connector is unavailable". **Verify
+files** still passes (the installed files did not change), and **Reinstall** is
+not offered.
 
 - If **Check for update** finds a newer version, **Update to x.y.z** installs it
   on the current `node.exe`. Approve it again.
