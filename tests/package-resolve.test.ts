@@ -1445,6 +1445,83 @@ describe('package-resolve', { timeout: 60_000 }, () => {
       );
       expect(abbreviatedReqHeader).toBeDefined();
     });
+
+    // A packument with four releases, latest 1.4.0 and next 2.0.0-rc.1, and
+    // the lookup of one selector: the picked release, or the fault.
+    const resolveSelector = async (
+      version: string,
+      picked: string,
+    ): Promise<{ version: string; calls: number }> => {
+      const tempDir = await createTempDir();
+      const packagesDir = join(tempDir, 'packages');
+      await mkdir(packagesDir, { recursive: true });
+      const registry = await createRegistry();
+      const releases = ['1.2.0', '1.4.0', '1.9.1', '2.0.0-rc.1'];
+      registry.set('/srv', {
+        name: 'srv',
+        'dist-tags': { latest: '1.4.0', next: '2.0.0-rc.1' },
+        versions: Object.fromEntries(
+          releases.map((release) => [release, { version: release }]),
+        ),
+      });
+      for (const release of releases)
+        registry.setVersion('srv', release, {
+          name: 'srv',
+          version: release,
+          bin: { srv: 'bin/srv.js' },
+          dist: {
+            integrity: sha512Integrity(`srv-${release}`),
+            unpackedSize: 500,
+          },
+        });
+      const { runner, calls } = createFakeRunner({
+        lock: {
+          name: 'staging',
+          version: '1.0.0',
+          lockfileVersion: 3,
+          packages: {
+            '': {},
+            'node_modules/srv': {
+              version: picked,
+              integrity: sha512Integrity(`srv-${picked}`),
+              resolved: `${registry.origin}/srv/-/srv-${picked}.tgz`,
+            },
+          },
+        },
+      });
+      const previews = trackPreviewStore(createPreviewStore({ packagesDir }));
+      const preview = await resolvePackage({
+        request: { name: 'srv', version },
+        owner: 'test-owner-9b',
+        packagesDir,
+        signal: new AbortController().signal,
+        previews,
+        registry: registry.registry,
+        runner,
+      });
+      return { version: preview.version, calls: calls.length };
+    };
+
+    it('resolves a range to the latest tag when it satisfies the range', async () => {
+      expect((await resolveSelector('^1.2.0', '1.4.0')).version).toBe('1.4.0');
+    });
+
+    it('resolves a range the latest tag misses to its highest release', async () => {
+      expect((await resolveSelector('~1.9.0', '1.9.1')).version).toBe('1.9.1');
+    });
+
+    it('resolves a dist-tag to the release it names', async () => {
+      expect((await resolveSelector('next', '2.0.0-rc.1')).version).toBe(
+        '2.0.0-rc.1',
+      );
+    });
+
+    it('refuses a range no release satisfies, an unknown tag and a file-shaped tag', async () => {
+      for (const selector of ['^3.0.0', 'beta', 'tool.tgz'])
+        await expect(resolveSelector(selector, '1.4.0')).rejects.toMatchObject({
+          code: 'version_not_found',
+        });
+    });
   });
 
   // 10. Refused before the runner is called

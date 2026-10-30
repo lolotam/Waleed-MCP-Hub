@@ -64,14 +64,14 @@ const literalValues: Record<string, readonly string[]> = {
   CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: ['1'],
 };
 
-// The proposal contract owns the package name, the exact-version shape and the
-// env name rule; the import layer never re-implements them.
+// The proposal contract owns the package name, the version shapes and the env
+// name rule; the import layer never re-implements them. The selector (a range
+// or dist-tag) refuses git, URL, file and alias specs, so none can reach the
+// proposal.
 const proposalName = PackageProposalSchema.shape.name;
 const proposalVersion = PackageProposalSchema.shape.version;
+const proposalSelector = PackageProposalSchema.shape.requestedVersion;
 const proposalEnvName = PackageProposalSchema.shape.envNames.element;
-// A dist-tag or a semver range: no scheme, path or separator characters, so a
-// git, URL, file or alias spec can never reach the proposal.
-const rangeOrTag = /^[0-9A-Za-z*^~<>=][0-9A-Za-z.*+~^<>=| -]*$/;
 // A path spec (a leading ".", "/", "\" or "~") or a drive letter.
 const pathSpec = /^[.\\/~]/;
 const driveSpec = /^[a-zA-Z]:/;
@@ -91,11 +91,7 @@ function packageProposal(
   const name = at < 0 ? spec : spec.slice(0, at);
   const raw = at < 0 ? null : spec.slice(at + 1);
   if (!proposalName.safeParse(name).success) return null;
-  if (
-    raw !== null &&
-    (!raw || raw.length > 256 || !rangeOrTag.test(raw) || /^\s|\s$/.test(raw))
-  )
-    return null;
+  if (raw !== null && !proposalSelector.safeParse(raw).success) return null;
   const exact = raw !== null && proposalVersion.safeParse(raw).success;
   const parsed = PackageProposalSchema.safeParse({
     name,

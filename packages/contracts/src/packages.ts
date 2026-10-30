@@ -14,6 +14,24 @@ const ExactVersionSchema = z
   .regex(
     /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
   );
+// A semver range or a dist-tag, as an npx entry or the user may name one: no
+// scheme, colon, slash, backslash or "@", so a git, URL, path or alias spec can
+// never pass, and no space at either end. Look up also asks npm's own spec
+// parser, so a tag-shaped file name such as "tool.tgz" is refused there, and
+// turns the selector into one exact version before anything is frozen. A
+// single version with a prerelease or build part must be a valid exact version:
+// "1.0.0-01" is a broken version, not a tag.
+const VersionSelectorSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[0-9A-Za-z*^~<>=](?:[0-9A-Za-z.*+~^<>=| -]*[0-9A-Za-z.*+~^<>=|-])?$/)
+  .refine(
+    (value) =>
+      /\s/.test(value) ||
+      !/^\d+\.\d+\.\d+[-+]/.test(value) ||
+      ExactVersionSchema.safeParse(value).success,
+  );
 // The bin name the user picks from the entry candidates.
 const PackageEntrySchema = z
   .string()
@@ -126,7 +144,7 @@ export const PackageWarningSchema = z.enum([
 ]);
 export const PackageResolveRequestSchema = z.strictObject({
   name: PackageNameSchema,
-  version: z.union([ExactVersionSchema, z.literal('latest')]).optional(),
+  version: z.union([ExactVersionSchema, VersionSelectorSchema]).optional(),
 });
 // The frozen lock itself stays server-side; only its hash travels here.
 export const PackagePreviewSchema = z.strictObject({
@@ -201,7 +219,7 @@ export const PackageJobSchema = z.strictObject({
 export const PackageProposalSchema = z.strictObject({
   name: PackageNameSchema,
   version: ExactVersionSchema.nullable(),
-  requestedVersion: z.string().min(1).max(256).nullable(),
+  requestedVersion: VersionSelectorSchema.nullable(),
   arguments: PackageArgumentsSchema,
   envNames: z.array(EnvNameSchema).max(64),
 });

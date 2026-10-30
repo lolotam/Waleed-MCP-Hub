@@ -439,15 +439,32 @@ describe('F01 package contracts', () => {
       ).toBe(true);
     });
 
-    it.each(['^1.2.3', 'next', '1.0.0-01', '1.0.0-alpha.007', '1.0.0-'])(
-      'rejects invalid resolve version: %s',
+    it.each(['^1.2.3', '~1.9.0', '>=1.0.0 <2.0.0', '1.x', 'next', 'beta-2'])(
+      'accepts the range or dist-tag %s',
       (version) => {
         expect(
           PackageResolveRequestSchema.safeParse({ name: 'srv', version })
             .success,
-        ).toBe(false);
+        ).toBe(true);
       },
     );
+
+    it.each([
+      '1.0.0-01',
+      '1.0.0-alpha.007',
+      '1.0.0-',
+      'github:user/repo',
+      'file:../x',
+      'npm:other@1.0.0',
+      'https://example.test/x.tgz',
+      '../x',
+      ' 1.0.0',
+      '',
+    ])('rejects invalid resolve version: %s', (version) => {
+      expect(
+        PackageResolveRequestSchema.safeParse({ name: 'srv', version }).success,
+      ).toBe(false);
+    });
   });
 
   describe('PackagePreviewSchema', () => {

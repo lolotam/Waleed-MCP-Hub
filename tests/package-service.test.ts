@@ -1357,6 +1357,37 @@ describe('package-service', { timeout: 60_000 }, () => {
     expect(calls).toBe(1);
   });
 
+  it('16b. Closing the service waits for a running self-test', async () => {
+    let started = false;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { service } = await setupService({
+      selfTest: async () => {
+        started = true;
+        await held;
+      },
+    });
+
+    service.resolve({ name: 'srv', version: '1.0.0' }, 'owner-a');
+    while (!started) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    let closedService = false;
+    const closing = service.close().then(() => {
+      closedService = true;
+    });
+    // The job is cancelled at once, but the self-test is still running.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closedService).toBe(false);
+
+    release();
+    await closing;
+    expect(closedService).toBe(true);
+  });
+
   // 17. A revision conflict during the save
   describe('17. A revision conflict during the save', () => {
     // The narrow host of the service: the lifecycle offers more than the

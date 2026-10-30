@@ -34,8 +34,8 @@ file, and every launch re-checks it.
 
 ## Users and flow
 
-1. In **Add MCP** the user picks **npm package**, types a name and optionally an
-   exact version (blank = `latest`).
+1. In **Add MCP** the user picks **npm package**, types a name and optionally a
+   version: an exact version, a semver range or a dist-tag (blank = `latest`).
 2. **Look up** resolves the full dependency tree without installing and shows a
    preview: name, exact version, release date, description, entry candidates, the
    command that will run, package count, unpacked size and warnings.
@@ -166,8 +166,13 @@ no redirects to other hosts, and size limits.
    for `bin`, `description`, `deprecated`, `dist.integrity`, `engines`, `scripts`,
    `gypfile`, `dependencies`, `optionalDependencies`, `peerDependencies`. (Full
    version documents do not carry `hasInstallScript`; that field belongs to
-   abbreviated metadata and is not used from there.) For `latest`, first read
-   `dist-tags` from the abbreviated packument (≤ 8 MiB). Release date comes from the
+   abbreviated metadata and is not used from there.) For anything but an exact
+   version, first read the abbreviated packument (≤ 8 MiB) and pick the release
+   the way npm does: a dist-tag names it (`latest` when none is given); for a
+   range, `latest` when it satisfies the range, else the highest release that
+   does. The selector must also be a registry spec to npm's own parser, so a
+   tag-shaped file name such as `tool.tgz` is refused. Only the picked exact
+   version goes on: the frozen lock never holds a range. Release date comes from the
    full packument's `time[version]` (≤ 32 MiB, streamed); if that is too large or
    missing, the preview shows "release date unknown" as a warning.
 2. Refuse when: the version does not exist or was unpublished (`version_not_found`),
@@ -400,8 +405,8 @@ entry, acknowledgedWarnings[]}`. Reinstall uses a preview of the same version. T
   variables) are left out. Proposals never install during import preview. The import preview
   lists proposals separately from ordinary definitions; applying the import saves
   only the ordinary definitions (proposals never block it), and each proposal has an
-  **Install** button that opens Look up → Install with name, version and arguments
-  filled in.
+  **Install** button that opens Look up → Install with name, version (or the
+  requested range or tag) and arguments filled in.
 - Credential values extracted from an imported `npx` entry are discarded, whether
   or not the entry becomes a proposal, and never put in the proposal DTO; the install form asks for them again and says why.
 - `npx -c`, `--call`, `-p/--package`, multiple packages, git/URL/path specs and any
@@ -409,7 +414,8 @@ entry, acknowledgedWarnings[]}`. Reinstall uses a preview of the same version. T
 
 ## API
 
-- `POST /api/packages/resolve` `{name, version?}` → job; result is the preview with
+- `POST /api/packages/resolve` `{name, version?}` (`version`: exact, range or
+  dist-tag) → job; result is the preview with
   `previewId`.
 - `POST /api/packages/install` `{previewId, entry, acknowledgedWarnings[],
 connectorName, arguments[], env{}}` → job. Refused if the preview is expired, used,

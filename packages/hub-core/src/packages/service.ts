@@ -180,6 +180,9 @@ export function createPackageService(
   // The folder of the running self-test. A fresh id per test: a folder left
   // by an earlier process is never active, so the reconciliation removes it.
   let selfTestJobId: string | null = null;
+  // Shutdown stops the self-test: a cancelled job never does, but the service
+  // never ends with an npm of its own still running.
+  const selfTestController = new AbortController();
 
   // The real self-test: the bundled npm in its own job folder, which is
   // removed again when the test is over, also when preparing it fails.
@@ -191,8 +194,12 @@ export function createPackageService(
       await npmSelfTest({
         paths,
         registry,
-        // The test has its own deadline: a cancelled job never stops it.
-        signal: AbortSignal.timeout(SELF_TEST_TIMEOUT_MS),
+        // The test has its own deadline: a cancelled job never stops it, the
+        // shutdown of the service does.
+        signal: AbortSignal.any([
+          selfTestController.signal,
+          AbortSignal.timeout(SELF_TEST_TIMEOUT_MS),
+        ]),
         nodeExecutable: adapter.nodeExecutable,
       });
     } finally {
@@ -932,6 +939,9 @@ export function createPackageService(
       entry.controller.abort();
     }
     await Promise.allSettled([...records.values()].map((entry) => entry.done));
+    // The self-test and its job folder are gone before the service ends.
+    selfTestController.abort();
+    await selfTestPromise?.catch(() => undefined);
     await previews.dispose();
     // The reconciliation of the startup and a running one finish before the
     // service ends.

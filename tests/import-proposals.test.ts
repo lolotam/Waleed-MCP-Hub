@@ -253,7 +253,7 @@ describe(
               test: {
                 command: 'npx',
                 args,
-                env: { API_TOKEN: 'placeholder-refused' },
+                env: { LOG_LEVEL: 'debug' },
               },
             },
           }),
@@ -278,6 +278,36 @@ describe(
             code: 'invalid_command',
             field: 'package_spec',
           });
+        } finally {
+          clearImport(draft);
+        }
+      }
+
+      // The values are erased from the draft, but a property name that repeats
+      // one is still masked: the mask reads the values gathered at the start,
+      // never the erased buffers.
+      {
+        const draft = normalizeImport(
+          JSON.stringify({
+            mcpServers: {
+              test: {
+                command: 'npx',
+                args: ['-p', 'x'],
+                env: { LOG_LEVEL: 'verbose-trace' },
+                'verbose-trace': true,
+              },
+            },
+          }),
+        );
+        try {
+          const entry = draft.entries[0]!;
+          expect(entry.packageProposal).toBeFalsy();
+          expect(draft.secrets.size).toBe(0);
+          expect(entry.issues).toContainEqual({
+            code: 'unsupported_fields',
+            field: '[redacted field]',
+          });
+          expect(JSON.stringify(entry)).not.toContain('verbose-trace');
         } finally {
           clearImport(draft);
         }

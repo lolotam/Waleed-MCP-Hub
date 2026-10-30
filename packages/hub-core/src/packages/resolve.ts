@@ -35,6 +35,8 @@ const npmRequire = createRequire(import.meta.url);
 const bundledRequire = createRequire(npmRequire.resolve('npm/package.json'));
 interface SemverModule {
   satisfies(version: string, range: string): boolean;
+  validRange(range: string): string | null;
+  maxSatisfying(versions: string[], range: string): string | null;
 }
 interface NpaModule {
   resolve(name: string, spec: string): { type: string };
@@ -83,6 +85,7 @@ const WARNING_ORDER: readonly PackageWarning[] = [
   'size_unknown',
 ];
 const DIST_TAG = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+const exactVersion = PackageProvenanceSchema.shape.version;
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -357,24 +360,40 @@ export const resolvePackage = async (
     ...(registry.ca === undefined ? {} : { ca: registry.ca }),
   });
 
-  // The release: the latest tag of the abbreviated packument, then the full
-  // version document of that release.
-  let version = request.version;
-  if (version === undefined || version === 'latest') {
-    const packument = await fetcher.getJson(registryPath(name), {
-      maxBytes: MAX_ABBREVIATED_BYTES,
-      accept: 'application/vnd.npm.install-v1+json',
-      signal: options.signal,
-    });
-    if (packument === null) throw new PackageFault('package_not_found');
-    const tags = asRecord(asRecord(packument)?.['dist-tags']);
-    const latest = tags?.latest;
-    if (
-      typeof latest !== 'string' ||
-      !PackageProvenanceSchema.shape.version.safeParse(latest).success
-    )
+  // The release: an exact version as given; otherwise the abbreviated
+  // packument picks it the way npm does. A dist-tag (latest when none is given)
+  // names its release; for a range, the latest tag when it satisfies the range,
+  // else the highest version that does. Then the full version document.
+  let version = request.version ?? 'latest';
+  if (!exactVersion.safeParse(version).success) {
+    if (!isRegistrySpec(version)) throw new PackageFault('version_not_found');
+    const packument = asRecord(
+      await fetcher.getJson(registryPath(name), {
+        maxBytes: MAX_ABBREVIATED_BYTES,
+        accept: 'application/vnd.npm.install-v1+json',
+        signal: options.signal,
+      }),
+    );
+    if (!packument) throw new PackageFault('package_not_found');
+    const tags = asRecord(packument['dist-tags']);
+    const range = semver.validRange(version);
+    let picked: unknown;
+    if (range === null) picked = tags?.[version];
+    else {
+      const latest = tags?.latest;
+      const versions = Object.keys(asRecord(packument.versions) ?? {}).filter(
+        (key) => exactVersion.safeParse(key).success,
+      );
+      picked =
+        typeof latest === 'string' &&
+        versions.includes(latest) &&
+        semver.satisfies(latest, range)
+          ? latest
+          : semver.maxSatisfying(versions, range);
+    }
+    if (typeof picked !== 'string' || !exactVersion.safeParse(picked).success)
       throw new PackageFault('version_not_found');
-    version = latest;
+    version = picked;
   }
 
   const document = asRecord(
