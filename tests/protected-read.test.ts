@@ -18,6 +18,8 @@ const hooks = vi.hoisted(() => ({
   buffers: new Set<Buffer>(),
   // Every path the reader opened.
   opened: [] as string[],
+  // Runs once, before the first lstat after the file was read.
+  afterRead: undefined as undefined | (() => Promise<void>),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -66,6 +68,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       },
     });
   const lstat = (async (...args: Parameters<typeof actual.lstat>) => {
+    const afterRead = hooks.readDone ? hooks.afterRead : undefined;
+    if (afterRead) {
+      hooks.afterRead = undefined;
+      await afterRead();
+    }
     const result = await actual.lstat(...args);
     if (!hooks.readDone || !hooks.replaced) return result;
     // Another file now has the path: a different file id.
@@ -97,6 +104,7 @@ beforeEach(async () => {
   hooks.shortReads = false;
   hooks.buffers.clear();
   hooks.opened = [];
+  hooks.afterRead = undefined;
   directory = await mkdtemp(join(tmpdir(), 'wmh-protected-'));
 });
 afterEach(async () => {
@@ -146,6 +154,18 @@ describe('protected file read', () => {
     hooks.replaced = true;
     await expect(readProtectedText(path)).rejects.toBeDefined();
     expect(hooks.readDone).toBe(true);
+  });
+
+  it('refuses a file that grows after the read reached its end', async () => {
+    const path = join(directory, 'state.json');
+    await writeFile(path, '{}');
+    // The file passes the limit once the reader saw its end.
+    hooks.afterRead = async () => {
+      await appendFile(path, Buffer.alloc(5 * 1024 * 1024, 0x20));
+    };
+    await expect(readProtectedText(path)).rejects.toBeDefined();
+    expect(hooks.readDone).toBe(true);
+    expect(hooks.bytesRead).toBe(2);
   });
 
   it('never opens a network, device or pipe path, or a relative one', async () => {

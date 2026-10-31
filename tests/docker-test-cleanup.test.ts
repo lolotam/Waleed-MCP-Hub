@@ -9,20 +9,30 @@ const nonce = '22222222-2222-4222-8222-222222222222';
 const own = 'a'.repeat(64);
 const foreign = 'b'.repeat(64);
 
-// A recording CLI whose listing and inspection are scripted.
+// A recording CLI whose listing and inspection are scripted. Each listing
+// after the first uses the next entry of `later`, or the first one again.
 function recording(
   labels: Record<string, Record<string, string>>,
   listing: string[],
   removalCode = 0,
+  { listCode = 0, inspectCode = 0, later = [] as string[][] } = {},
 ) {
   const calls: string[][] = [];
+  let listings = 0;
   const cli: DockerCli = async (args) => {
     calls.push(args);
     if (args[0] === 'rm') return { code: removalCode, stdout: '' };
-    if (args[0] === 'ps') return { code: 0, stdout: listing.join('\n') };
+    if (args[0] === 'ps') {
+      const ids = listings === 0 ? listing : (later[listings - 1] ?? listing);
+      listings += 1;
+      return { code: listCode, stdout: ids.join('\n') };
+    }
     if (args[0] === 'inspect') {
       const id = args[args.length - 1] ?? '';
-      return { code: 0, stdout: JSON.stringify(labels[id] ?? null) };
+      return {
+        code: inspectCode,
+        stdout: JSON.stringify(labels[id] ?? null),
+      };
     }
     return { code: 0, stdout: '' };
   };
@@ -102,5 +112,41 @@ describe('the teardown of the real-daemon test', () => {
       }),
     ).rejects.toThrow(own);
     expect(docker.removed()).toEqual([own]);
+  });
+
+  it('reports a listing that failed', async () => {
+    const docker = recording({}, [own], 0, { listCode: 1 });
+    await expect(
+      removeTestContainers(docker.cli, {
+        installId,
+        agentId: 'opencode',
+        nonce,
+      }),
+    ).rejects.toThrow('list');
+    expect(docker.removed()).toEqual([]);
+  });
+
+  it('reports a container it could not inspect while it still exists', async () => {
+    const docker = recording({}, [own], 0, { inspectCode: 1 });
+    await expect(
+      removeTestContainers(docker.cli, {
+        installId,
+        agentId: 'opencode',
+        nonce,
+      }),
+    ).rejects.toThrow(own);
+    expect(docker.removed()).toEqual([]);
+  });
+
+  it('passes when a container it could not inspect is already gone', async () => {
+    const docker = recording({}, [own], 0, { inspectCode: 1, later: [[]] });
+    await expect(
+      removeTestContainers(docker.cli, {
+        installId,
+        agentId: 'opencode',
+        nonce,
+      }),
+    ).resolves.toBeUndefined();
+    expect(docker.removed()).toEqual([]);
   });
 });

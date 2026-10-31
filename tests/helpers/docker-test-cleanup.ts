@@ -14,35 +14,42 @@ export async function removeTestContainers(
 ): Promise<void> {
   // An empty or malformed nonce would match foreign containers.
   if (!lowerUuid.test(owner.nonce) || !lowerUuid.test(owner.installId)) return;
-  const listed = await cli([
-    'ps',
-    '--all',
-    '--quiet',
-    '--no-trunc',
-    '--filter',
-    `label=wmh.install=${owner.installId}`,
-    '--filter',
-    `label=wmh.agent=${owner.agentId}`,
-    '--filter',
-    `label=wmh.client=${owner.nonce}`,
-  ]);
-  if (listed.code !== 0) return;
-  // A removal that fails leaves a test container behind: the teardown
-  // reports it instead of passing in silence.
+  // A listing that fails could hide a container this test left running:
+  // the teardown reports it instead of passing in silence.
+  const list = async () => {
+    const listed = await cli([
+      'ps',
+      '--all',
+      '--quiet',
+      '--no-trunc',
+      '--filter',
+      `label=wmh.install=${owner.installId}`,
+      '--filter',
+      `label=wmh.agent=${owner.agentId}`,
+      '--filter',
+      `label=wmh.client=${owner.nonce}`,
+    ]);
+    if (listed.code !== 0)
+      throw new Error('The teardown could not list the test containers.');
+    return listed.stdout.split(/\s+/).filter((id) => containerId.test(id));
+  };
+  // A removal that fails leaves a test container behind, and so does one
+  // whose labels could not be read while it still exists.
   const failed: string[] = [];
-  for (const id of listed.stdout.split(/\s+/).filter(Boolean)) {
-    if (!containerId.test(id)) continue;
+  const unread: string[] = [];
+  for (const id of await list()) {
     const inspected = await cli([
       'inspect',
       '--format',
       '{{json .Config.Labels}}',
       id,
     ]);
-    if (inspected.code !== 0) continue;
     let labels: Record<string, string> | null;
     try {
+      if (inspected.code !== 0) throw new Error();
       labels = JSON.parse(inspected.stdout) as Record<string, string> | null;
     } catch {
+      unread.push(id);
       continue;
     }
     if (
@@ -53,6 +60,11 @@ export async function removeTestContainers(
       continue;
     const removed = await cli(['rm', '--force', id]);
     if (removed.code !== 0) failed.push(id);
+  }
+  // A container that was gone before its inspection is no failure.
+  if (unread.length > 0) {
+    const remaining = new Set(await list());
+    failed.push(...unread.filter((id) => remaining.has(id)));
   }
   if (failed.length > 0)
     throw new Error(

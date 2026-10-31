@@ -1474,12 +1474,15 @@ export async function readProtectedText(path: string) {
       if (total > protectedLimit) throw new Error();
       views.push(chunk.subarray(0, filled));
     }
+    // The path must still name the same file, of exactly the size read: a
+    // file that grew after the end was reached is refused.
     const after = await lstat(path, { bigint: true });
     if (
       !after.isFile() ||
       after.ino !== opened.ino ||
       after.dev !== opened.dev ||
-      after.nlink !== 1n
+      after.nlink !== 1n ||
+      after.size !== BigInt(total)
     )
       throw new Error();
     bytes = Buffer.concat(views);

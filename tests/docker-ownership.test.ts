@@ -1208,6 +1208,53 @@ describe('Docker ownership, recovery and pooling', () => {
     await harness.ownership.close();
   });
 
+  it('owes the recovery a container id file that a clean disposal could not remove', async () => {
+    const harness = await createHarness();
+    const launch = await launchContainer(harness);
+    unlinkGuard.path = launch.cidfilePath;
+    try {
+      await harness.ownership.dispose(launch, new AbortController().signal);
+      expect(await pathExists(launch.cidfilePath)).toBe(true);
+      expect(timerArmed(harness.clock, 60_000)).toBe(true);
+    } finally {
+      unlinkGuard.path = undefined;
+    }
+    // The scheduled round removes the file and owes nothing more.
+    harness.clock.advance(60_000);
+    await harness.ownership.settled();
+    expect(await pathExists(launch.cidfilePath)).toBe(false);
+    expect(timerArmed(harness.clock, 60_000)).toBe(false);
+    await harness.ownership.close();
+  });
+
+  it('keeps the recovery armed while the purge cannot remove a file', async () => {
+    const harness = await createHarness();
+    const cidFolder = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+      randomUUID(),
+      'cid',
+    );
+    const file = join(cidFolder, `${randomUUID()}.cid`);
+    await mkdir(cidFolder, { recursive: true });
+    await writeFile(file, 'a'.repeat(64));
+    unlinkGuard.path = file;
+    try {
+      await harness.ownership.recover();
+      // The pass reached its end, but it left the file behind.
+      expect(await pathExists(file)).toBe(true);
+      expect(timerArmed(harness.clock, 60_000)).toBe(true);
+    } finally {
+      unlinkGuard.path = undefined;
+    }
+    harness.clock.advance(60_000);
+    await harness.ownership.settled();
+    expect(await pathExists(dirname(cidFolder))).toBe(false);
+    expect(timerArmed(harness.clock, 60_000)).toBe(false);
+    await harness.ownership.close();
+  });
+
   it('purges the artifacts of a dead bridge and keeps the file of a marker that remains', async () => {
     const harness = await createHarness();
     const agentRoot = join(

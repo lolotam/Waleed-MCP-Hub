@@ -20,6 +20,7 @@ import {
 } from '@waleed/contracts';
 import type { DockerCommand } from '../adapters/docker-profile.js';
 import { assertNoLinks } from '../adapters/managed-files.js';
+import { HubError } from '../errors.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
 import {
   cleanupOwnedContainers,
@@ -809,14 +810,21 @@ export function createDockerOwnership(
     join(root, agentId, owner, CID_FOLDER, `${nonce}.cid`);
 
   // The removal of a container id file whose marker is gone: the file is
-  // never evidence of ownership, so a doubt only leaves it for a later
-  // round. A path that holds a link is never touched.
-  async function discardCidfile(path: string) {
+  // never evidence of ownership. A path that holds a link is never touched,
+  // and that is no failure: no later round could remove it either. It
+  // answers false when the file could stay behind for another reason: the
+  // recovery then keeps a round scheduled for it.
+  async function discardCidfile(path: string): Promise<boolean> {
     try {
       await assertNoLinks(path, true);
+    } catch (error) {
+      return error instanceof HubError && error.code === 'conflict';
+    }
+    try {
       await unlink(path);
-    } catch {
-      // The file stays: a later purge removes it.
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT';
     }
   }
 
@@ -843,9 +851,21 @@ export function createDockerOwnership(
   // reached: the last folder it finished, and the last file of the folder
   // it was cut in. The next round resumes there, so a large folder never
   // starts again from its first file. The purge answers false while its
-  // pass is unfinished: the recovery keeps a round scheduled for the rest.
+  // pass is unfinished, and at the end of a pass that left a file behind:
+  // the recovery keeps a round scheduled for the rest, and the next pass
+  // examines that file again.
   let purgeCursor: string | undefined;
   let purgeFileCursor: { owner: string; name: string } | undefined;
+  let purgeLeftFile = false;
+  // The end of a pass: it answers whether the pass removed every file it
+  // had to.
+  const endPurgePass = () => {
+    purgeCursor = undefined;
+    purgeFileCursor = undefined;
+    const clean = !purgeLeftFile;
+    purgeLeftFile = false;
+    return clean;
+  };
   async function purgeArtifacts(
     probes: RoundProbes,
     signal: AbortSignal,
@@ -855,7 +875,7 @@ export function createDockerOwnership(
     const bridges = await readFolder(agentRoot);
     // A missing or unreadable folder of the agent holds nothing to purge
     // that this round could reach.
-    if (bridges.kind !== 'entries') return true;
+    if (bridges.kind !== 'entries') return endPurgePass();
     const owners = bridges.entries
       .filter((entry) => entry.isDirectory() && lowerUuid.test(entry.name))
       .map((entry) => entry.name)
@@ -866,11 +886,7 @@ export function createDockerOwnership(
     const batch = owners
       .filter((owner) => cursor === undefined || owner > cursor)
       .slice(0, PURGE_BATCH_SIZE);
-    if (batch.length === 0) {
-      purgeCursor = undefined;
-      purgeFileCursor = undefined;
-      return true;
-    }
+    if (batch.length === 0) return endPurgePass();
     // The other owners of the batch are probed at the same time: the slow
     // owners cost one probe bound, not one bound each.
     await probes.batch(batch.filter((owner) => owner !== bridgeId));
@@ -911,8 +927,11 @@ export function createDockerOwnership(
             // An interrupted check leaves the file cursor before this file,
             // so the next round checks it again.
             if (signal.aborted) return false;
-            if (marker === 'absent')
-              await discardCidfile(cidfileOf(owner, nonce));
+            if (
+              marker === 'absent' &&
+              !(await discardCidfile(cidfileOf(owner, nonce)))
+            )
+              purgeLeftFile = true;
           }
           purgeFileCursor = { owner, name };
         }
@@ -928,8 +947,7 @@ export function createDockerOwnership(
     }
     // The pass is over once the batch reached the last folder.
     const finished = batch[batch.length - 1] === owners[owners.length - 1];
-    if (finished) purgeCursor = undefined;
-    return finished;
+    return finished ? endPurgePass() : false;
   }
 
   // The marker transitions of one nonce are serialized: a transition waits
@@ -1580,12 +1598,12 @@ export function createDockerOwnership(
         }
         // The artifacts of finished sessions go once the passes are done. An
         // uncertain inventory keeps everything, and it is an obligation of
-        // its own. A purge whose pass is unfinished is an obligation: the
-        // next round continues it. A purge that fails never fails the round:
-        // its files wait for the next pass.
+        // its own. A purge whose pass is unfinished, or that left a file
+        // behind, is an obligation: the next round continues it. A purge
+        // that fails never fails the round, but it is an obligation too.
         const purged = inventory.uncertain
           ? true
-          : await purgeArtifacts(probes, signal).catch(() => true);
+          : await purgeArtifacts(probes, signal).catch(() => false);
         await armRecovery(
           inventory,
           probes.of,
@@ -1931,12 +1949,16 @@ export function createDockerOwnership(
         // launch state is released: the acknowledgement joined and the
         // disposal finished or handed the recovery its marker. Only a
         // marker that is really there is owed to the recovery: a clean
-        // disposal schedules nothing and removes the container id file of
-        // the session: its marker is gone, so nothing reads the file again.
+        // disposal removes the container id file of the session, since its
+        // marker is gone and nothing reads the file again. Only a file it
+        // could not remove is owed to the recovery.
         if ((await markerExists(launch.markerPath)) !== 'absent')
           scheduleRecovery();
-        else if (lowerUuid.test(launch.nonce))
-          await discardCidfile(cidfileOf(bridgeId, launch.nonce));
+        else if (
+          lowerUuid.test(launch.nonce) &&
+          !(await discardCidfile(cidfileOf(bridgeId, launch.nonce)))
+        )
+          scheduleRecovery();
         releaseLaunch(launch.nonce);
       }
     },
