@@ -376,6 +376,15 @@ describe('package-maintenance-api', { timeout: 60_000 }, () => {
     });
     expect(unauthRes.statusCode).toBe(401);
 
+    // Let the pass the hub starts on its own finish first, so the orphan
+    // below is removed by the requested pass and counted in its answer.
+    const settle = await hub.app.inject({
+      method: 'POST',
+      url: '/api/packages/cleanup',
+      headers,
+    });
+    expect(settle.statusCode).toBe(200);
+
     // Plant an unreferenced orphan folder
     const orphanId = randomUUID();
     const orphanFolder = join(packagesDir, orphanId);

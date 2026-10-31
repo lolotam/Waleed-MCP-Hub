@@ -7,11 +7,19 @@ import {
   unlink,
   link,
 } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { isAbsolute, join, parse, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { HubError } from '../errors.js';
 import { hashBytes } from '../runtime/registry.js';
 
+const maxManagedFile = 1024n * 1024n;
+// A checked file is opened for reading only. On POSIX the open never blocks on
+// a FIFO and never follows a link in the last component; Windows has no FIFOs.
+export const checkedReadFlags =
+  process.platform === 'win32'
+    ? fsConstants.O_RDONLY
+    : fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW;
 export type FileScope = 'catalog' | 'runtime';
 export interface ManagedFiles {
   path(scope: FileScope, name: string): string;
@@ -61,17 +69,30 @@ export function managedFiles(roots: Record<FileScope, string>): ManagedFiles {
   async function read(scope: FileScope, name: string) {
     const path = pathFor(scope, name);
     await assertNoLinks(path, true);
+    let isOpen = false;
     try {
-      const info = await lstat(path);
-      if (!info.isFile() || info.nlink !== 1 || info.size > 1024 * 1024)
-        throw conflict();
-      const file = await open(path, 'r');
+      // The decision is made on the open handle, then the path must still
+      // name that very file. File ids are compared as exact integers: a
+      // Windows file id does not fit in a JavaScript number.
+      const file = await open(path, checkedReadFlags);
+      isOpen = true;
       try {
-        const opened = await file.stat();
+        const opened = await file.stat({ bigint: true });
         if (
-          opened.ino !== info.ino ||
-          opened.dev !== info.dev ||
-          opened.size > 1024 * 1024
+          !opened.isFile() ||
+          opened.nlink !== 1n ||
+          opened.size > maxManagedFile
+        )
+          throw conflict();
+        // No part of the path may have become a link since the open: an
+        // ancestor swapped for a link is refused here, and one swapped back
+        // makes the path name a different file than the handle.
+        await assertNoLinks(path);
+        const named = await lstat(path, { bigint: true });
+        if (
+          !named.isFile() ||
+          named.ino !== opened.ino ||
+          named.dev !== opened.dev
         )
           throw conflict();
         return await file.readFile('utf8');
@@ -79,8 +100,13 @@ export function managedFiles(roots: Record<FileScope, string>): ManagedFiles {
         await file.close();
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // A file that vanished after the open is refused. Before the open, a
+      // link whose target is missing also fails with ENOENT on Windows: the
+      // file is missing only when no existing part of the path is a link.
+      if (isOpen) throw conflict();
+      await assertNoLinks(path, true);
+      return null;
     }
   }
   return {

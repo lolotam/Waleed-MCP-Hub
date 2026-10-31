@@ -10,10 +10,10 @@ import {
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { HubState } from '@waleed/contracts';
 import { HubError } from '../errors.js';
-import { assertNoLinks } from '../adapters/managed-files.js';
+import { assertNoLinks, checkedReadFlags } from '../adapters/managed-files.js';
 import { restrictPrivatePath } from '../integrations/files.js';
 
 // The managed package layout is spelled out here and nowhere else: the store,
@@ -83,26 +83,44 @@ export async function readOwnedFile(
   path: string,
   maxBytes: number,
 ): Promise<Buffer | null> {
+  // Only a path that does not exist is reported as missing (null). Anything
+  // else that is refused (a folder, a link, a hard link, an oversized file,
+  // a file that changed or vanished) is an error: callers such as
+  // reconciliation read "missing" as "no live job owns this marker".
+  const refused = () =>
+    new HubError('conflict', 'Owned file changed or is unsafe.');
   let handle: FileHandle;
   try {
-    handle = await open(path, 'r');
+    handle = await open(path, checkedReadFlags);
   } catch (error) {
-    // A folder or a link that cannot be followed is not a regular file: it
-    // is refused, not an error.
     const reason = code(error);
-    if (reason === 'ENOENT' || reason === 'EISDIR' || reason === 'ELOOP')
+    if (reason === 'ENOENT') {
+      // A link whose target is missing also opens as ENOENT on Windows: the
+      // path is missing only when no existing part of it is a link.
+      await assertNoLinks(path, true);
       return null;
+    }
+    if (reason === 'EISDIR' || reason === 'ELOOP') throw refused();
     throw error;
   }
   try {
-    const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1 || info.size > maxBytes) return null;
+    // File ids are compared as exact integers: a Windows file id does not fit
+    // in a JavaScript number, so two different files could look equal.
+    const info = await handle.stat({ bigint: true });
+    if (!info.isFile() || info.nlink !== 1n || info.size > BigInt(maxBytes))
+      throw refused();
     // The path must still name the file the handle points to: a link that
     // took its place in the meantime is refused, even though the handle
     // followed it.
-    const pathInfo = await lstat(path);
-    if (pathInfo.isSymbolicLink()) return null;
-    if (pathInfo.dev !== info.dev || pathInfo.ino !== info.ino) return null;
+    // No part of the path may have become a link since the open.
+    await assertNoLinks(path);
+    const pathInfo = await lstat(path, { bigint: true });
+    if (
+      pathInfo.isSymbolicLink() ||
+      pathInfo.dev !== info.dev ||
+      pathInfo.ino !== info.ino
+    )
+      throw refused();
     // The read never asks for more than one byte beyond the cap, so a file
     // that grew while it was read is refused instead of being cut short.
     const chunks: Buffer[] = [];
@@ -115,15 +133,23 @@ export async function readOwnedFile(
       size += bytesRead;
       chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
     }
-    if (size > maxBytes) return null;
+    if (size > maxBytes) throw refused();
     return Buffer.concat(chunks);
   } catch (error) {
-    if (code(error) === 'ENOENT') return null;
+    // The file existed when it was opened: one that vanished from its path
+    // since then is refused, never reported as missing.
+    if (code(error) === 'ENOENT') throw refused();
     throw error;
   } finally {
     await handle.close();
   }
 }
+// A refused owned file shares the fault code of a missing one; any other
+// read failure is rethrown unchanged.
+export const refusedAsMissing = (error: unknown): null => {
+  if (error instanceof HubError && error.code === 'conflict') return null;
+  throw error;
+};
 export async function readMarker(
   packagesDir: string,
   installId: string,
@@ -131,7 +157,12 @@ export async function readMarker(
   const bytes = await readOwnedFile(markerPath(packagesDir, installId), 4096);
   if (!bytes) return null;
   const jobId = bytes.toString('utf8').trim();
-  return UUID.test(jobId) ? jobId : null;
+  // A marker is written whole (a temporary file renamed into place), so one
+  // that exists without a job id was not written by the hub: it is refused,
+  // never read as "no job".
+  if (!UUID.test(jobId))
+    throw new HubError('conflict', 'Owned file changed or is unsafe.');
+  return jobId;
 }
 export async function removeMarker(
   packagesDir: string,
@@ -212,6 +243,9 @@ export async function removeTree(
   if (!target.toLowerCase().startsWith(prefix.toLowerCase()))
     throw invalid('The path is outside the packages folder.');
   await assertNoLinks(root, true);
+  // A folder between the packages folder and the entry (such as the jobs
+  // folder) that is a link is refused as well.
+  await assertNoLinks(dirname(target), true);
   return removeEntryTree(target);
 }
 
@@ -273,14 +307,65 @@ export async function reconcilePackages(
       options.activeJobs().has(jobId);
     const deleted = new Set<string>();
     const retained = new Set<string>();
-    let entries: Dirent[];
+    // The pass works from one listing of the packages folder. The folder is
+    // identified before the listing and checked again before every removal:
+    // a folder that was replaced or turned into a link ends the pass, so
+    // nothing is removed from a tree the listing did not come from.
+    const refused = () =>
+      new HubError('conflict', 'Owned file changed or is unsafe.');
+    const folderId = async (path: string): Promise<string> => {
+      await assertNoLinks(path);
+      const info = await lstat(path, { bigint: true });
+      if (!info.isDirectory()) throw refused();
+      return `${info.dev}:${info.ino}`;
+    };
+    const sameFolder = async (path: string, id: string): Promise<void> => {
+      let now: string;
+      try {
+        now = await folderId(path);
+      } catch {
+        now = '';
+      }
+      if (now !== id) throw refused();
+    };
+    // Only a packages folder that is missing before the pass starts means
+    // there is nothing to reconcile. Once it has been identified, any failure
+    // to list it is a conflict.
+    let root: string;
     try {
-      entries = await readdir(options.packagesDir, { withFileTypes: true });
+      root = await folderId(options.packagesDir);
     } catch (error) {
       if (code(error) === 'ENOENT')
         return { deleted: [...deleted], retained: [...retained] };
       throw error;
     }
+    const assertRoot = () => sameFolder(options.packagesDir, root);
+    let entries: Dirent[];
+    try {
+      entries = await readdir(options.packagesDir, { withFileTypes: true });
+    } catch (error) {
+      await assertRoot();
+      if (code(error) === 'ENOENT') throw refused();
+      throw error;
+    }
+    // A marker that exists but is refused (a link, a hard link, a folder, an
+    // oversized or malformed file, one that changed while read) keeps its
+    // marker and its folder for this pass; the other entries are still
+    // reconciled.
+    const refusedIds = new Set<string>();
+    const markerOf = async (installId: string) => {
+      try {
+        return { jobId: await readMarker(options.packagesDir, installId) };
+      } catch (error) {
+        if (error instanceof HubError && error.code === 'conflict') {
+          // A refusal caused by the packages folder itself ends the pass.
+          await assertRoot();
+          refusedIds.add(installId);
+          return null;
+        }
+        throw error;
+      }
+    };
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(MARKER_SUFFIX)) continue;
       const installId = entry.name.slice(0, -MARKER_SUFFIX.length);
@@ -288,8 +373,10 @@ export async function reconcilePackages(
       // Removing a marker publishes a folder, so a referenced folder keeps its
       // marker and keeps failing verification until it is reinstalled.
       if (referenced.has(installId)) continue;
-      const jobId = await readMarker(options.packagesDir, installId);
-      if (jobId && isActive(jobId)) continue;
+      const marker = await markerOf(installId);
+      if (!marker) continue;
+      if (marker.jobId && isActive(marker.jobId)) continue;
+      await assertRoot();
       await removeMarker(options.packagesDir, installId);
     }
     for (const entry of entries) {
@@ -297,33 +384,52 @@ export async function reconcilePackages(
       const folder = join(options.packagesDir, entry.name);
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
-      if (referenced.has(entry.name)) {
+      if (referenced.has(entry.name) || refusedIds.has(entry.name)) {
         retained.add(entry.name);
         continue;
       }
-      const jobId = await readMarker(options.packagesDir, entry.name);
-      if (jobId && isActive(jobId)) {
+      const marker = await markerOf(entry.name);
+      if (!marker || (marker.jobId && isActive(marker.jobId))) {
         retained.add(entry.name);
         continue;
       }
+      await assertRoot();
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);
     }
-    let jobEntries: Dirent[] = [];
+    // The jobs folder gets the same treatment as the packages folder: a
+    // link is refused, and its identity is checked before every removal.
+    const jobsDir = join(options.packagesDir, JOBS_FOLDER);
+    await assertRoot();
+    let jobs: string | null;
     try {
-      jobEntries = await readdir(join(options.packagesDir, JOBS_FOLDER), {
-        withFileTypes: true,
-      });
+      jobs = await folderId(jobsDir);
     } catch (error) {
       if (code(error) !== 'ENOENT') throw error;
+      await assertRoot();
+      jobs = null;
+    }
+    let jobEntries: Dirent[] = [];
+    if (jobs !== null) {
+      const jobsId = jobs;
+      try {
+        jobEntries = await readdir(jobsDir, { withFileTypes: true });
+      } catch (error) {
+        await assertRoot();
+        await sameFolder(jobsDir, jobsId);
+        if (code(error) === 'ENOENT') throw refused();
+        throw error;
+      }
     }
     for (const entry of jobEntries) {
       if (!UUID.test(entry.name)) continue;
-      const folder = join(options.packagesDir, JOBS_FOLDER, entry.name);
+      const folder = join(jobsDir, entry.name);
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
       if (isActive(entry.name)) continue;
+      await assertRoot();
+      if (jobs !== null) await sameFolder(jobsDir, jobs);
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);

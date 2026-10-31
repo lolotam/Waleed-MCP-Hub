@@ -111,8 +111,8 @@ test('explicit discovery displays sanitized observations and a non-applicable pi
     8,
   );
   await expect(
-    page.getByText(/version unknown · user bindings: pending/),
-  ).toHaveCount(1);
+    page.getByText(/1\.2\.3 \(manifest\) · user bindings: pending/),
+  ).toHaveCount(2);
   await page.screenshot({
     path: 'test-results/discovery-agents-390.png',
     fullPage: true,

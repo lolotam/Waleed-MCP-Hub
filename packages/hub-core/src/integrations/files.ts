@@ -2,7 +2,7 @@ import { lstat, mkdir, open, rename, link, unlink } from 'node:fs/promises';
 import { dirname, join, resolve, relative, isAbsolute, win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { assertNoLinks } from '../adapters/managed-files.js';
+import { assertNoLinks, checkedReadFlags } from '../adapters/managed-files.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
 import { HubError } from '../errors.js';
 
@@ -11,6 +11,7 @@ const conflict = () =>
     'conflict',
     'Agent file changed, is unsafe or cannot be protected. Refresh the scan; inspect recovery before retrying.',
   );
+const maxAgentFile = 1024n * 1024n;
 export interface AgentFiles {
   read(path: string): Promise<string | null>;
   replace(path: string, before: string | null, after: string): Promise<void>;
@@ -67,18 +68,31 @@ export function agentFiles(
   async function read(path: string) {
     permit(path);
     await assertNoLinks(path, true);
+    let isOpen = false;
     try {
-      const info = await lstat(path);
-      if (!info.isFile() || info.nlink !== 1 || info.size > 1024 * 1024)
-        throw conflict();
-      const file = await open(path, 'r');
+      // The decision is made on the open handle, then the path must still
+      // name that very file. File ids are compared as exact integers: a
+      // Windows file id does not fit in a JavaScript number.
+      const file = await open(path, checkedReadFlags);
+      isOpen = true;
       let bytes: Buffer | undefined;
       try {
-        const opened = await file.stat();
+        const opened = await file.stat({ bigint: true });
         if (
-          opened.ino !== info.ino ||
-          opened.dev !== info.dev ||
-          opened.size > 1024 * 1024
+          !opened.isFile() ||
+          opened.nlink !== 1n ||
+          opened.size > maxAgentFile
+        )
+          throw conflict();
+        // No part of the path may have become a link since the open: an
+        // ancestor swapped for a link is refused here, and one swapped back
+        // makes the path name a different file than the handle.
+        await assertNoLinks(path);
+        const named = await lstat(path, { bigint: true });
+        if (
+          !named.isFile() ||
+          named.ino !== opened.ino ||
+          named.dev !== opened.dev
         )
           throw conflict();
         bytes = await file.readFile();
@@ -89,8 +103,13 @@ export function agentFiles(
         await file.close();
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // A file that vanished after the open is refused. Before the open, a
+      // link whose target is missing also fails with ENOENT on Windows: the
+      // file is missing only when no existing part of the path is a link.
+      if (isOpen) throw conflict();
+      await assertNoLinks(path, true);
+      return null;
     }
   }
   return {
