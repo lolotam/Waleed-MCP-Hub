@@ -395,7 +395,10 @@ containerId? }` (`daemonId` from `docker info`, endpoint as pinned by
 - **Artifacts**: a clean disposal removes its own `--cidfile`. After the passes,
   a recovery round with a certain inventory removes the `--cidfile` of every
   session whose marker is confirmed absent (this bridge's and absent bridges'),
-  and the empty folders of absent bridges; it never follows a link.
+  and the empty folders of absent bridges; it never follows a link. A file it
+  could not remove, a folder it could not list, a purge that failed, or a
+  disposal that left its `--cidfile` keeps the 60 s recovery armed; a path
+  that holds a link is left alone and owes nothing.
 - **Admission**: refused only while this agent has an uncertain-cleanup marker,
   while it has more than 16 unacknowledged (`launching`) markers, or while any
   legacy marker exists.

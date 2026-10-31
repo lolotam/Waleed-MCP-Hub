@@ -873,9 +873,11 @@ export function createDockerOwnership(
     if (signal.aborted) return false;
     const agentRoot = join(root, agentId);
     const bridges = await readFolder(agentRoot);
-    // A missing or unreadable folder of the agent holds nothing to purge
-    // that this round could reach.
-    if (bridges.kind !== 'entries') return endPurgePass();
+    // A missing folder of the agent holds nothing to purge. An unreadable
+    // one may: the pass stays unfinished, so the recovery keeps a round
+    // scheduled for it.
+    if (bridges.kind === 'missing') return endPurgePass();
+    if (bridges.kind === 'unreadable') return false;
     const owners = bridges.entries
       .filter((entry) => entry.isDirectory() && lowerUuid.test(entry.name))
       .map((entry) => entry.name)
@@ -901,6 +903,8 @@ export function createDockerOwnership(
         const folder = join(agentRoot, owner);
         const cidFolder = join(folder, CID_FOLDER);
         const files = await readFolder(cidFolder);
+        // An unreadable folder may hold files this pass could not reach.
+        if (files.kind === 'unreadable') purgeLeftFile = true;
         // The folder was cut in a previous round: its files up to the file
         // cursor are done.
         const after =

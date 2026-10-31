@@ -1418,18 +1418,22 @@ const protectedOpenFlags =
       fsConstants.O_NOFOLLOW |
       fsConstants.O_NOCTTY;
 
-// Reads a protected file through its open handle. Only the text of the path
-// is checked before the open (a UNC, device-namespace or pipe prefix is never
+// Reads a protected file through its open handle. Before the open, the text
+// of the path is checked (a UNC, device-namespace or pipe prefix is never
 // opened; any other non-file, such as a device node, is opened read-only and
-// then refused); every file-system check runs afterwards against the handle,
-// so no check result is ever used to open the path: the path must still name
-// the very file that was opened, without a link, or the read is refused. The
+// then refused) and a link already on the path is refused. Every check that
+// decides the read runs afterwards against the handle: the path must still
+// name the very file that was opened, without a link, or the read is refused. The
 // handle is read in bounded chunks, so a file that grows after the check is
 // refused once it passes the limit, and the path is checked again after the
 // read, so a file replaced during the read is refused too. Every buffer is
 // zeroed on every path.
 export async function readProtectedText(path: string) {
   assertSafePathText(path);
+  // A link that is already there is refused before the open: Windows has no
+  // flag that stops an open from following it, and a link to a network
+  // share would reach that share before any check of the handle.
+  await assertNoLinks(path);
   const file = await open(path, protectedOpenFlags);
   const chunks: Buffer[] = [];
   let bytes: Buffer | undefined;

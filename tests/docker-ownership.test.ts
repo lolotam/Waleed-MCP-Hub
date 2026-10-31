@@ -69,6 +69,11 @@ const lstatGuard = vi.hoisted(() => ({
   after: undefined as ((path: string) => void) | undefined,
 }));
 
+// The folder of one test cannot be listed: the guard names it.
+const readdirGuard = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+}));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   const unlink = async (path: string, ...rest: unknown[]) => {
@@ -114,7 +119,19 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       lstatGuard.after?.(String(path));
     }
   };
-  return { ...actual, unlink, open, lstat };
+  const readdir = async (path: string, ...rest: unknown[]) => {
+    if (readdirGuard.path !== undefined && String(path) === readdirGuard.path) {
+      const error = new Error(
+        'synthetic listing failure',
+      ) as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    }
+    return (
+      actual.readdir as unknown as (...args: unknown[]) => Promise<unknown>
+    )(path, ...rest);
+  };
+  return { ...actual, unlink, open, lstat, readdir };
 });
 
 // The pool never reads a real clock: every timer is listed and fired by hand.
@@ -1247,6 +1264,33 @@ describe('Docker ownership, recovery and pooling', () => {
       expect(timerArmed(harness.clock, 60_000)).toBe(true);
     } finally {
       unlinkGuard.path = undefined;
+    }
+    harness.clock.advance(60_000);
+    await harness.ownership.settled();
+    expect(await pathExists(dirname(cidFolder))).toBe(false);
+    expect(timerArmed(harness.clock, 60_000)).toBe(false);
+    await harness.ownership.close();
+  });
+
+  it('keeps the recovery armed while the purge cannot list a folder', async () => {
+    const harness = await createHarness();
+    const cidFolder = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+      randomUUID(),
+      'cid',
+    );
+    const file = join(cidFolder, `${randomUUID()}.cid`);
+    await mkdir(cidFolder, { recursive: true });
+    await writeFile(file, 'a'.repeat(64));
+    readdirGuard.path = cidFolder;
+    try {
+      await harness.ownership.recover();
+      expect(await pathExists(file)).toBe(true);
+      expect(timerArmed(harness.clock, 60_000)).toBe(true);
+    } finally {
+      readdirGuard.path = undefined;
     }
     harness.clock.advance(60_000);
     await harness.ownership.settled();

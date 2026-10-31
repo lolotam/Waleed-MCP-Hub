@@ -89,7 +89,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return { ...actual, default: { ...actual, lstat, open }, lstat, open };
 });
 
-const { mkdtemp, rm, writeFile, appendFile } = await import('node:fs/promises');
+const { mkdtemp, rm, writeFile, appendFile, symlink } =
+  await import('node:fs/promises');
 const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const { readProtectedText } =
@@ -166,6 +167,21 @@ describe('protected file read', () => {
     await expect(readProtectedText(path)).rejects.toBeDefined();
     expect(hooks.readDone).toBe(true);
     expect(hooks.bytesRead).toBe(2);
+  });
+
+  it('never opens a path that already goes through a link', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'wmh-outside-'));
+    try {
+      await writeFile(join(outside, 'safety.json'), '{}');
+      // A junction needs no privilege on Windows; elsewhere it is a link.
+      await symlink(outside, join(directory, 'linked'), 'junction');
+      await expect(
+        readProtectedText(join(directory, 'linked', 'safety.json')),
+      ).rejects.toBeDefined();
+      expect(hooks.opened).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('never opens a network, device or pipe path, or a relative one', async () => {
