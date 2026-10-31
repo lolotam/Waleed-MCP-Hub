@@ -262,10 +262,15 @@ launchers are saved as data only; convert them as described in
 
 ## Current limits worth knowing
 
-- **Each tool call starts a fresh process** for native connectors. Servers that keep
-  state between calls (open SSH sessions, browser tabs, database transactions) lose
-  that state after every call. Single-call tools work normally.
-- Native sessions are capped at 120 seconds and 1 MiB of output per call.
+- **One live session per connector and agent.** The agent's bridge keeps a
+  server's process (or remote session, or container) running between calls, so
+  SSH sessions and browser tabs survive. A session closes after 5 minutes idle or
+  60 minutes of life, and is replaced after any change to the connector, its
+  approval or its credentials, after a hub restart, and after a call that timed
+  out or was cancelled. A failed call is never retried for you. See
+  [troubleshooting.md](troubleshooting.md#a-tool-forgets-a-session-ssh-browser-tab).
+- Each call is capped at 60 seconds and 1 MiB of output; a session at 64 MiB of
+  output. One bridge keeps at most 16 live sessions.
 - Agents see **tools only**: resources and prompts are not forwarded.
 - At most 256 tools are exposed across all connectors.
 

@@ -712,6 +712,48 @@ Rules that make reuse no weaker than one peer per call:
 6. **Server-side sharing.** Two agents never share a bridge-owned peer, lease or
    transport; a server that shares state by credential or globally is outside
    the hub's control.
+7. **Ambiguous error codes restart the peer.** A server that answers with
+   JSON-RPC error `-32000` or `-32001` looks to the SDK exactly like its local
+   "connection closed" or "request timeout". The bridge cannot tell them apart,
+   so it treats both as a dead peer and the next call starts a fresh one. This
+   fails closed; the cost is a restart and the lost session state.
+8. **Startup registry failure text.** A registry read that fails inside a pooled
+   startup reports the connector-unavailable text, not the registry-unavailable
+   one. Both are fixed texts.
+9. **Handshake window after an abandoned startup.** A peer whose startup
+   finishes after every waiting request left keeps its start-up budget until
+   its first operation or its idle retirement. The per-session caps and the idle
+   timeout still bound it.
+10. **Interrupted installation record.** `install.json` is created exclusively,
+    then written. If the hub dies between the two steps the file stays empty or
+    partial, every later read fails closed, and Docker connectors stay
+    unavailable until a person deletes the file (troubleshooting guide).
+    Containers labelled with the lost installation ID are then no longer
+    recovered automatically.
+
+**Implementation choices accepted in review.** Docker ownership (T6) differs
+from the first plan in these conservative ways:
+
+- A connected owner pipe that closes counts as a live owner; some live owners
+  become "unknown", so their containers are kept and the round retries.
+- Any entry at the top of the marker folder that is not an agent folder counts
+  as a legacy marker: it blocks Docker for every agent and is never deleted.
+- A daemon mismatch also stops the label sweep from removing anything.
+- The marker pass runs before the label sweep in the first round; a failed
+  removal is retried in a later round, not in the same one.
+- An image pull is bounded by the 20-second start-up deadline and fails before
+  any launch marker exists.
+- The label sweep is batched (spec amended): a listing holds at most 4 096
+  container IDs (more makes the round uncertain), 64 are processed per round
+  from a cursor, each owner is probed once per round, and the two passes share
+  one deadline with alternating order so neither starves the other.
+
+The Windows containment tests (T7) live in `scripts/smoke-sessions.mjs`, not
+in the planned `tests/bridge-sessions.windows.test.ts`: they need the compiled
+bridge, and CI runs `npm test` before `build`. CI runs the script after the
+build. `runAgentBridge` takes an optional idle limit for this test only; the
+`bridge` command never passes it and no file or environment value can set it.
+The real-daemon Docker test runs locally and is skipped in CI.
 
 ## Open investigations before/during implementation
 

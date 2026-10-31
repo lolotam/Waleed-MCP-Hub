@@ -42,10 +42,11 @@ targets from one screen.
    ([spec change summary](https://den.dev/blog/mcp-november-authorization-spec/)),
    token refresh, and a "connected accounts" list with revoke. This unblocks
    Notion, Atlassian, Sentry, GitHub and most hosted servers.
-3. **Keep connector sessions alive.** The bridge starts a fresh native process for
-   every tool call, so stateful servers break: SSH sessions, browser automation,
-   database transactions. Keep one peer per agent session with an idle timeout,
-   still revalidating approval before each call.
+3. **Keep connector sessions alive. Done (F03, D025).** Each agent's bridge keeps
+   one live session per connector (native, remote and Docker), with a 5-minute idle
+   limit and a 60-minute life, and revalidates approval, definition and
+   credentials before every request, so SSH sessions and browser automation keep
+   their state ([limits](guides/adding-mcps.md#current-limits-worth-knowing)).
 4. **Browse and add from the official MCP Registry.** Search
    [registry.modelcontextprotocol.io](https://modelcontextprotocol.io/community/working-groups/registry),
    read each `server.json` (packages, remotes, required env vars), and prefill the
