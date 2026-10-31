@@ -304,14 +304,37 @@ export async function reconcilePackages(
       options.activeJobs().has(jobId);
     const deleted = new Set<string>();
     const retained = new Set<string>();
+    // The pass works from one listing of the packages folder. The folder is
+    // identified before the listing and checked again before every removal:
+    // a folder that was replaced or turned into a link ends the pass, so
+    // nothing is removed from a tree the listing did not come from.
+    const rootId = async (): Promise<string> => {
+      await assertNoLinks(options.packagesDir);
+      const info = await lstat(options.packagesDir, { bigint: true });
+      if (!info.isDirectory())
+        throw new HubError('conflict', 'Owned file changed or is unsafe.');
+      return `${info.dev}:${info.ino}`;
+    };
+    let root: string;
     let entries: Dirent[];
     try {
+      root = await rootId();
       entries = await readdir(options.packagesDir, { withFileTypes: true });
     } catch (error) {
       if (code(error) === 'ENOENT')
         return { deleted: [...deleted], retained: [...retained] };
       throw error;
     }
+    const assertRoot = async (): Promise<void> => {
+      let now: string;
+      try {
+        now = await rootId();
+      } catch {
+        now = '';
+      }
+      if (now !== root)
+        throw new HubError('conflict', 'Owned file changed or is unsafe.');
+    };
     // A marker that exists but is refused (a link, a hard link, a folder, an
     // oversized or malformed file, one that changed while read) keeps its
     // marker and its folder for this pass; the other entries are still
@@ -322,6 +345,8 @@ export async function reconcilePackages(
         return { jobId: await readMarker(options.packagesDir, installId) };
       } catch (error) {
         if (error instanceof HubError && error.code === 'conflict') {
+          // A refusal caused by the packages folder itself ends the pass.
+          await assertRoot();
           refusedIds.add(installId);
           return null;
         }
@@ -338,6 +363,7 @@ export async function reconcilePackages(
       const marker = await markerOf(installId);
       if (!marker) continue;
       if (marker.jobId && isActive(marker.jobId)) continue;
+      await assertRoot();
       await removeMarker(options.packagesDir, installId);
     }
     for (const entry of entries) {
@@ -354,10 +380,12 @@ export async function reconcilePackages(
         retained.add(entry.name);
         continue;
       }
+      await assertRoot();
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);
     }
+    await assertRoot();
     let jobEntries: Dirent[] = [];
     try {
       jobEntries = await readdir(join(options.packagesDir, JOBS_FOLDER), {
@@ -372,6 +400,7 @@ export async function reconcilePackages(
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
       if (isActive(entry.name)) continue;
+      await assertRoot();
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);

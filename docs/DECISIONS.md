@@ -770,6 +770,11 @@ Rules that make reuse no weaker than one peer per call:
     with `O_NOFOLLOW` on POSIX, or a native Windows helper with reparse-point
     protection. A link found by the re-check is an error, never a missing
     file, so reconciliation never removes a marker because of one.
+    Reconciliation also records the packages folder's device and inode
+    before it lists the folder, and checks them again before every removal.
+    If the folder was replaced or became a link, the pass stops with
+    `conflict` and removes nothing more. The same race window applies
+    between that check and the removal itself.
 
 **Implementation choices accepted in review.** Docker ownership (T6) differs
 from the first plan in these conservative ways:

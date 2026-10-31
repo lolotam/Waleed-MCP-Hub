@@ -132,7 +132,7 @@ const reconcileWith = (packagesDir: string, active: string[]) =>
     lock: createPackageLock(),
   });
 
-it('keeps an install marker when its folder became a link during reconciliation', async () => {
+it('stops reconciliation when the packages folder became a link', async () => {
   directory = await mkdtemp(join(tmpdir(), 'wmh-swap-reconcile-'));
   const packagesDir = packagesRoot(directory);
   await mkdir(packagesDir, { recursive: true });
@@ -144,8 +144,8 @@ it('keeps an install marker when its folder became a link during reconciliation'
   await writeFile(join(foreign, installId + '.installing'), randomUUID());
   hook.path = markerPath(packagesDir, installId);
   hook.beforeOpen = swapParent(packagesDir, foreign);
-  await expect(reconcileWith(packagesDir, [jobId])).resolves.toMatchObject({
-    deleted: [],
+  await expect(reconcileWith(packagesDir, [jobId])).rejects.toMatchObject({
+    code: 'conflict',
   });
   await expect(readMarker(packagesDir + '-moved', installId)).resolves.toBe(
     jobId,
@@ -291,12 +291,16 @@ it('refuses an owned file under a link to a missing folder', async () => {
 it('refuses an agent file under a link to a missing folder, or one that vanished after the open', async () => {
   directory = await mkdtemp(join(tmpdir(), 'wmh-dangling-agent-'));
   const parent = join(directory, 'agent');
-  await symlink(join(directory, 'missing'), parent, 'junction');
+  await mkdir(parent);
   const dangling = join(parent, 'config.json');
   const real = join(directory, 'real', 'config.json');
   await mkdir(join(directory, 'real'));
   await writeFile(real, '{}');
   const files = agentFiles([dangling, real], join(directory, 'backups'));
+  // The folder is real at the pre-open check and a dangling junction at the
+  // open, so the refusal comes from the re-check after ENOENT.
+  hook.path = dangling;
+  hook.beforeOpen = swapParent(parent, join(directory, 'missing'));
   await expect(files.read(dangling)).rejects.toMatchObject({
     code: 'conflict',
   });
@@ -314,8 +318,12 @@ it('refuses a managed file whose root is a link to a missing folder', async () =
     runtime: join(directory, 'runtime'),
     catalog: join(directory, 'catalog'),
   };
-  await symlink(join(directory, 'missing'), roots.catalog, 'junction');
   const files = managedFiles(roots);
+  await mkdir(roots.catalog);
+  // The root is real at the pre-open check and a dangling junction at the
+  // open, so the refusal comes from the re-check after ENOENT.
+  hook.path = files.path('catalog', 'wmh-abcd.json');
+  hook.beforeOpen = swapParent(roots.catalog, join(directory, 'missing'));
   await expect(files.read('catalog', 'wmh-abcd.json')).rejects.toMatchObject({
     code: 'conflict',
   });
@@ -338,4 +346,28 @@ it('maps only a refused owned file to the missing-file outcome', () => {
   const other = Object.assign(new Error('denied'), { code: 'EACCES' });
   expect(() => refusedAsMissing(other)).toThrow(other);
   expect(() => refusedAsMissing(new HubError('busy', 'busy'))).toThrow();
+});
+
+it('removes nothing from a packages folder that was replaced during reconciliation', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-root-swap-'));
+  const packagesDir = packagesRoot(directory);
+  await mkdir(packagesDir, { recursive: true });
+  const installId = randomUUID();
+  await writeMarker(packagesDir, installId, randomUUID());
+  const staleId = randomUUID();
+  await mkdir(join(packagesDir, staleId));
+  // While the marker is read, the packages folder is moved away and a new
+  // folder holding a same-named entry takes its place.
+  hook.path = markerPath(packagesDir, installId);
+  hook.beforeOpen = async () => {
+    await rename(packagesDir, packagesDir + '-moved');
+    await mkdir(join(packagesDir, staleId), { recursive: true });
+    await writeFile(join(packagesDir, staleId, 'file.txt'), 'replacement');
+  };
+  await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  await expect(
+    readFile(join(packagesDir, staleId, 'file.txt'), 'utf8'),
+  ).resolves.toBe('replacement');
 });
