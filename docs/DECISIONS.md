@@ -749,7 +749,9 @@ Rules that make reuse no weaker than one peer per call:
 14. **OAuth leases close to their expiry.** A call is admitted only if the
     lease lasts longer than 30 s plus the operation deadline. In the last
     minute and a half before an OAuth token expires, calls on that connector
-    are refused until the token is refreshed.
+    are refused until the token is refreshed. The refusal keeps the pooled
+    peer, so no replacement peer is launched for each refused call, and a
+    stateful session survives until 30 s before the expiry.
 
 **Implementation choices accepted in review.** Docker ownership (T6) differs
 from the first plan in these conservative ways:

@@ -129,8 +129,10 @@ this order, immediately before each SDK request (every `tools/list` page and the
    secret makes a new immutable id (D019), changing the bindings and the hash.
 6. `lease.notAfter` is more than 30 s away, and on an admission more than 30 s
    plus the operation deadline away, so the lease timer never ends a call it
-   admitted. A shorter lease is refused, not replaced: a fresh peer would
-   resolve the same expiry.
+   admitted. A lease of 30 s or less ends the peer. A lease that only fails
+   the admission bound refuses the operation and keeps the peer: a fresh
+   peer would resolve the same expiry, so nothing is replaced or launched,
+   and listings keep using the peer until the pool ends it at its margin.
 7. Final gate, synchronous and with no `await` between it and the SDK call: the
    entry's generation is unchanged, it is not invalidated or `disposing`, the
    operation signal is not aborted, and either
@@ -332,7 +334,7 @@ operations budget. Any breach closes the session.
   `wmh.connector`. A marker per container session at
   `owned-agent-containers/<agentId>/<bridgeId>/<nonce>.json` records
   `{ nonce, connectorId, agentId, bridgeId, dockerEndpoint, daemonId, phase,
-  containerId? }` (`daemonId` from `docker info`, endpoint as pinned by
+containerId? }` (`daemonId` from `docker info`, endpoint as pinned by
   `docker-profile.ts`). `phase` is `launching` (written before `docker run`, no
   `containerId`), `running` (with the immutable container ID read from
   `docker run --cidfile`) or `removing` (with the inspected immutable container

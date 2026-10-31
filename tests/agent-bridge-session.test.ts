@@ -1377,7 +1377,17 @@ describe('agent bridge session mode', () => {
         content: [{ text: connectorUnavailable }],
       });
       expect(harness.peers[0]?.calls).toHaveLength(0);
-      expect(harness.peers[0]?.disposed).toBe(1);
+      // The refusal keeps the healthy peer: a second call is refused the
+      // same way without a replacement launch, and a listing still uses it.
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({
+        isError: true,
+        content: [{ text: connectorUnavailable }],
+      });
+      expect((await harness.agent.listTools()).tools).toHaveLength(1);
+      expect(harness.connects).toHaveLength(1);
+      expect(harness.peers[0]?.disposed).toBe(0);
     } finally {
       await harness.agent.close();
       await harness.bridge.close();

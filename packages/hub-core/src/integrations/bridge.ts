@@ -399,6 +399,10 @@ class PeerRefused extends Error {}
 // stays; only this request is refused.
 class StaleTool extends Error {}
 
+// The lease of a healthy peer ends before this operation could. The peer
+// stays; only this request is refused.
+class LeaseEnding extends Error {}
+
 // The peer answered the request with a JSON-RPC error: an ordinary tool
 // failure, so the peer keeps serving.
 class PeerAnswered extends Error {}
@@ -653,14 +657,16 @@ function createSessionBridge(
       // An admission also needs the lease to outlast the whole operation:
       // the pool ends the peer thirty seconds before the lease does, and a
       // call that is cut there may already have had its effect. A fresh
-      // peer would resolve the same stored value and the same expiry, so the
-      // peer is refused instead of replaced.
-      if (
-        pooled.peer.notAfter !== undefined &&
-        pooled.peer.notAfter - session.now() <=
-          leaseMargin + (admission ? deadline : 0)
-      )
-        throw new PeerRefused();
+      // peer would resolve the same stored value and the same expiry, so
+      // only the operation is refused: the peer stays pooled, no
+      // replacement is launched, and listings keep using it until the pool
+      // ends it at its lease margin.
+      if (pooled.peer.notAfter !== undefined) {
+        const remaining = pooled.peer.notAfter - session.now();
+        if (remaining <= leaseMargin) throw new PeerRefused();
+        if (admission && remaining <= leaseMargin + deadline)
+          throw new LeaseEnding();
+      }
       // 7. The hub restarted under this peer.
       if (snapshot.bootId !== pooled.bootId) {
         await lease.replace();
@@ -700,6 +706,7 @@ function createSessionBridge(
       // echoed credential.
       if (
         !(error instanceof StaleTool) &&
+        !(error instanceof LeaseEnding) &&
         !(error instanceof PeerAnswered) &&
         !abandoned(lease, error)
       )
