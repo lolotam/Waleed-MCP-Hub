@@ -65,6 +65,13 @@ import {
 import { packagesRoot } from '../packages/store.js';
 import { verifyPackage } from '../packages/verify.js';
 import {
+  parseToolCatalog,
+  writeToolCatalogFile,
+  type CatalogEntry,
+  type ToolCatalog,
+  type ToolCatalogStore,
+} from './tool-catalog.js';
+import {
   createSessionPool,
   type OperationLease,
   type PoolLimits,
@@ -148,6 +155,10 @@ export interface BridgeSession {
   now(): number;
   setTimer(callback: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
+  // The persisted catalog of the agent. With it, a listing answers from the
+  // last discovered tools and refreshes them in the background, so an agent's
+  // tool-fetch timeout never waits on peer startup.
+  catalog?: ToolCatalogStore;
 }
 
 export type BridgeConnect = (
@@ -1131,6 +1142,33 @@ export function createBridgeStartupRecovery(
   return { attempt: retry.attempt, stop: retry.stop, settled: retry.settled };
 }
 
+// The catalog after a discovery: a connector that listed replaces its entry,
+// one that could not list keeps its previous entry, and a connector that left
+// the registry is dropped.
+function mergeCatalog(
+  previous: ToolCatalog | undefined,
+  found: Map<string, CatalogEntry | undefined>,
+  state: HubState,
+) {
+  const next: ToolCatalog = new Map(previous);
+  let incomplete = false;
+  for (const [id, entry] of found) {
+    if (entry) next.set(id, entry);
+    else incomplete = true;
+  }
+  for (const id of next.keys())
+    if (!state.connectors.some((item) => item.id === id)) next.delete(id);
+  return { next, incomplete };
+}
+// Settles only by rejecting, when the request is cancelled.
+const whenAborted = (signal: AbortSignal) =>
+  new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else
+      signal.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      });
+  });
 export function createAgentBridge(
   read: () => Promise<HubState>,
   connect: BridgeConnect,
@@ -1193,105 +1231,188 @@ export function createAgentBridge(
       ),
     });
   };
+  // One connector's tools, or undefined when it could not list.
+  const discover = async (
+    connector: Connector,
+    snapshot: BridgeSnapshot | undefined,
+    signal: AbortSignal,
+    remaining: number,
+  ): Promise<Tool[] | undefined> => {
+    if (signal.aborted) return undefined;
+    if (
+      bridge &&
+      snapshot &&
+      (connector.executionMode === 'native' ||
+        connector.executionMode === 'remote' ||
+        connector.executionMode === 'docker')
+    ) {
+      // A pooled peer: one peer for the whole listing.
+      try {
+        return await bridge.list(connector, signal, remaining);
+      } catch {
+        // Isolate unavailable/auth-required peers; never reflect
+        // diagnostics.
+        return undefined;
+      }
+    }
+    const listed: Tool[] = [];
+    let peer: BridgePeer | undefined;
+    try {
+      const peerSignal = AbortSignal.any([signal, AbortSignal.timeout(20000)]);
+      if (closing) throw new Error();
+      peer = await connect(connector, peerSignal);
+      let cursor: string | undefined;
+      for (let page = 0; page < 8; page++) {
+        const result = await peer.client.listTools(cursor ? { cursor } : {}, {
+          signal: peerSignal,
+          timeout: 20000,
+        });
+        peer.assertPublic(result);
+        for (const tool of result.tools) {
+          if (listed.length >= remaining) break;
+          listed.push(tool);
+        }
+        if (!result.nextCursor || listed.length >= remaining) break;
+        cursor = result.nextCursor;
+      }
+    } catch {
+      /* Isolate unavailable/auth-required peers; never reflect diagnostics. */
+      return undefined;
+    } finally {
+      await disposePeer(peer);
+    }
+    return listed;
+  };
+  const latestState = async () =>
+    bridge ? (await bridge.snapshot()).state : await readState();
+  // Every enabled, approved connector's listing under the definition it was
+  // listed with. Package verification and process startup used to consume
+  // the whole deadline before later healthy peers were visited, so at most
+  // four peers start at once, in registry order, within one shared deadline
+  // and the 256-tool cap. A connector that could not list maps to undefined.
+  const discoverAll = async (signal: AbortSignal) => {
+    const snapshot = bridge ? await bridge.snapshot() : undefined;
+    const state = snapshot ? snapshot.state : await readState();
+    const connectors = state.connectors.filter(
+      (item) => item.enabled && approved(item),
+    );
+    const found = new Map<string, CatalogEntry | undefined>();
+    let count = 0;
+    for (let offset = 0; offset < connectors.length; offset += 4) {
+      if (signal.aborted || count >= 256) break;
+      const batch = connectors.slice(offset, offset + 4);
+      const results = await Promise.all(
+        batch.map((connector) =>
+          discover(connector, snapshot, signal, 256 - count),
+        ),
+      );
+      for (const [index, tools] of results.entries()) {
+        const connector = batch[index]!;
+        found.set(
+          connector.id,
+          tools && { hash: definitionHash(connector), tools },
+        );
+        count += tools?.length ?? 0;
+      }
+    }
+    return found;
+  };
+  // Registers, in registry order, the tools of every connector that still
+  // has the definition and the approval they were listed under: a connector
+  // revoked or changed meanwhile is never advertised, and the same catalog
+  // always gets the same bridge names. Synchronous, so the route table is
+  // never seen half-built.
+  const publish = (state: HubState, catalog: ToolCatalog) => {
+    const tools: Tool[] = [];
+    names.clear();
+    for (const connector of state.connectors) {
+      const entry = catalog.get(connector.id);
+      if (
+        !entry ||
+        !connector.enabled ||
+        !approved(connector) ||
+        entry.hash !== definitionHash(connector)
+      )
+        continue;
+      for (const tool of entry.tools) {
+        if (tools.length >= 256) break;
+        register(connector, tool, tools);
+      }
+    }
+    return tools;
+  };
+  const catalogStore = session?.catalog;
+  // The catalog this bridge knows, and the listing the agent last received.
+  let known: ToolCatalog | undefined;
+  let served: string | undefined;
+  let refreshing: Promise<Tool[]> | undefined;
+  let retries = 0;
+  let retryTimer: unknown;
+  // A connector that could not list keeps its last tools, and the listing is
+  // retried a few times, so a slow startup never leaves the agent with a
+  // partial catalog it takes for the whole one.
+  const scheduleRetry = (incomplete: boolean) => {
+    if (!incomplete) {
+      retries = 0;
+      return;
+    }
+    if (!session || closing || retryTimer !== undefined || retries >= 3) return;
+    retries++;
+    retryTimer = session.setTimer(() => {
+      retryTimer = undefined;
+      void refresh().catch(() => undefined);
+    }, 10_000 * retries);
+  };
+  // One discovery at a time, on its own deadline: an agent that gives up on
+  // a listing does not cancel the discovery that fills the catalog for its
+  // next attempt.
+  const refresh = (): Promise<Tool[]> => {
+    refreshing ??= (async () => {
+      try {
+        if (closing) throw new Error(connectorUnavailableText);
+        const found = await discoverAll(AbortSignal.timeout(45000));
+        const state = await latestState();
+        const { next, incomplete } = mergeCatalog(known, found, state);
+        known = next;
+        // The catalog only speeds up the next listing: a file that cannot be
+        // written leaves this listing intact.
+        await catalogStore?.write(next).catch(() => undefined);
+        const tools = publish(state, next);
+        const listing = JSON.stringify(tools);
+        if (served !== undefined && listing !== served) {
+          served = listing;
+          void server.sendToolListChanged().catch(() => undefined);
+        }
+        scheduleRetry(incomplete);
+        return tools;
+      } finally {
+        refreshing = undefined;
+      }
+    })();
+    return refreshing;
+  };
   server.setRequestHandler(ListToolsRequestSchema, (_request, extra) =>
     admitted(async () => {
-      const signal = AbortSignal.any([
-        extra.signal,
-        AbortSignal.timeout(45000),
-      ]);
-      const snapshot = bridge ? await bridge.snapshot() : undefined;
-      const state = snapshot ? snapshot.state : await readState();
-      const tools: Tool[] = [];
-      names.clear();
-      const discover = async (
-        connector: Connector,
-        remaining: number,
-      ): Promise<Tool[]> => {
-        if (signal.aborted) return [];
-        if (
-          bridge &&
-          snapshot &&
-          (connector.executionMode === 'native' ||
-            connector.executionMode === 'remote' ||
-            connector.executionMode === 'docker')
-        ) {
-          // A pooled peer: one peer for the whole listing.
-          try {
-            return await bridge.list(connector, signal, remaining);
-          } catch {
-            // Isolate unavailable/auth-required peers; never reflect
-            // diagnostics.
-            return [];
-          }
-        } else {
-          const listed: Tool[] = [];
-          let peer: BridgePeer | undefined;
-          try {
-            const peerSignal = AbortSignal.any([
-              signal,
-              AbortSignal.timeout(20000),
-            ]);
-            if (closing) throw new Error();
-            peer = await connect(connector, peerSignal);
-            let cursor: string | undefined;
-            for (let page = 0; page < 8; page++) {
-              const result = await peer.client.listTools(
-                cursor ? { cursor } : {},
-                { signal: peerSignal, timeout: 20000 },
-              );
-              peer.assertPublic(result);
-              for (const tool of result.tools) {
-                if (listed.length >= remaining) break;
-                listed.push(tool);
-              }
-              if (!result.nextCursor || listed.length >= remaining) break;
-              cursor = result.nextCursor;
-            }
-          } catch {
-            /* Isolate unavailable/auth-required peers; never reflect diagnostics. */
-          } finally {
-            await disposePeer(peer);
-          }
-          return listed;
-        }
-      };
-      const connectors = state.connectors.filter(
-        (item) => item.enabled && approved(item),
-      );
-      // Package verification and process startup used to consume the whole
-      // 45-second catalog deadline before later healthy peers were visited.
-      // Overlap at most four peers; retain registry order, the shared deadline,
-      // per-peer limits, and the final 256-tool cap.
-      for (let offset = 0; offset < connectors.length; offset += 4) {
-        if (signal.aborted) break;
-        const batch = connectors.slice(offset, offset + 4);
-        const results = await Promise.all(
-          batch.map((connector) => discover(connector, 256 - tools.length)),
+      if (!catalogStore) {
+        const found = await discoverAll(
+          AbortSignal.any([extra.signal, AbortSignal.timeout(45000)]),
         );
-        const current = bridge
-          ? (await bridge.snapshot()).state
-          : await readState();
-        for (const [index, listed] of results.entries()) {
-          const connector = batch[index]!;
-          const latest = current.connectors.find(
-            (item) => item.id === connector.id,
-          );
-          // A parallel peer may have been revoked while another peer answered.
-          // Do not advertise a route that no longer has the listed approval.
-          if (
-            !latest ||
-            !latest.enabled ||
-            !approved(latest) ||
-            definitionHash(latest) !== definitionHash(connector)
-          )
-            continue;
-          for (const tool of listed) {
-            if (tools.length >= 256) break;
-            register(connector, tool, tools);
-          }
-        }
-        if (tools.length >= 256) break;
+        const catalog: ToolCatalog = new Map();
+        for (const [id, entry] of found) if (entry) catalog.set(id, entry);
+        return { tools: publish(await latestState(), catalog) };
       }
+      // The ledger and the registry decide first: a blocked ledger serves
+      // nothing, and a revoked connector drops out of the cached catalog.
+      const state = await latestState();
+      known ??= await catalogStore.read().catch(() => undefined);
+      const cached = known ? publish(state, known) : [];
+      if (cached.length) {
+        served = JSON.stringify(cached);
+        void refresh().catch(() => undefined);
+        return { tools: cached };
+      }
+      const tools = await Promise.race([refresh(), whenAborted(extra.signal)]);
+      served = JSON.stringify(tools);
       return { tools };
     }),
   );
@@ -1442,6 +1563,8 @@ export function createAgentBridge(
   const closeServer = server.close.bind(server);
   server.close = async () => {
     closing = true;
+    if (retryTimer !== undefined) session?.clearTimer(retryTimer);
+    retryTimer = undefined;
     await bridge?.close();
     await closeServer();
   };
@@ -1562,6 +1685,7 @@ export async function runAgentBridge(
   const directory = dirname(registry);
   const safetyPath = join(directory, 'safety.json');
   const bootPath = join(directory, 'boot.json');
+  const catalogPath = join(directory, `tool-catalog-${agentId}.json`);
   const read = async () => {
     assertLedgerOpen(
       SafetyStateSchema.parse(await readProtectedJson(safetyPath)),
@@ -1633,6 +1757,16 @@ export async function runAgentBridge(
     setTimer: (callback, ms) => setTimeout(callback, ms),
     clearTimer: (handle) => {
       clearTimeout(handle as ReturnType<typeof setTimeout>);
+    },
+    catalog: {
+      async read() {
+        try {
+          return parseToolCatalog(await readProtectedText(catalogPath));
+        } catch {
+          return undefined;
+        }
+      },
+      write: (catalog) => writeToolCatalogFile(catalogPath, catalog),
     },
   };
   let backend: ReturnType<typeof windowsSecretStore> | undefined;
