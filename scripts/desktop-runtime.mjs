@@ -42,8 +42,13 @@ export async function startDesktop({
   openWindow,
   log = () => {},
   environment = process.env,
+  handoffDeadline = 0,
 }) {
   const runtime = resolve(directory);
+  const rootId = createHash('sha256')
+    .update(resolve(root).toLowerCase())
+    .digest('hex')
+    .slice(0, 24);
   const pipe = `\\\\.\\pipe\\wmh-desktop-${createHash('sha256')
     .update(homedir().toLowerCase() + '|' + runtime.toLowerCase())
     .digest('hex')
@@ -53,7 +58,8 @@ export async function startDesktop({
     closing = false,
     restarting = false,
     ready = false,
-    pending = false;
+    pending = false,
+    handoffSocket;
   function reopen() {
     if (ready && backend?.connected) backend.send('reopen', () => undefined);
     else pending = true;
@@ -72,6 +78,7 @@ export async function startDesktop({
     if (backend.connected) backend.send('shutdown', () => undefined);
   }
   const control = createServer((socket) => {
+    socket.on('error', () => socket.destroy());
     socket.setTimeout(2000, () => socket.destroy());
     let request = '';
     socket.on('data', (chunk) => {
@@ -80,9 +87,21 @@ export async function startDesktop({
         socket.destroy();
         return;
       }
-      if (request === 'open\n') {
+      if (request === 'open\n' || request === `open:${rootId}\n`) {
         void openOrRestart();
         socket.end('wmh-desktop-v1\n');
+      } else if (/^open:[a-f0-9]{24}\n$/.test(request)) {
+        // A new version lives in a different installation folder. Release the
+        // old backend and its locks before the replacement claims this pipe.
+        if (!backend?.connected || closing) {
+          socket.destroy();
+          return;
+        }
+        socket.setTimeout(15000, () => socket.destroy());
+        handoffSocket = socket;
+        log('different installation requested a desktop handoff');
+        closing = true;
+        backend.send('shutdown', () => undefined);
       } else if (request.includes('\n')) socket.destroy();
     });
   });
@@ -95,29 +114,71 @@ export async function startDesktop({
   if (error) {
     if (error.code !== 'EADDRINUSE')
       throw new Error('Desktop control unavailable. No lock was removed.');
-    await new Promise((resolveClient, reject) => {
-      const client = createConnection(pipe, () => client.write('open\n'));
+    // The old Windows pipe can remain reserved briefly after its shutdown
+    // reply. Only an acknowledged handoff permits this bounded bind retry.
+    if (Date.now() < handoffDeadline) {
+      await new Promise((resolveRetry) => setTimeout(resolveRetry, 25));
+      return startDesktop({
+        root,
+        directory,
+        port,
+        openWindow,
+        log,
+        environment,
+        handoffDeadline,
+      });
+    }
+    const handedOff = await new Promise((resolveClient, reject) => {
+      const client = createConnection(pipe, () =>
+        client.write(`open:${rootId}\n`),
+      );
       let reply = '';
-      client.setTimeout(3000, () => {
+      let acknowledged = false,
+        replace = false;
+      client.setTimeout(15000, () => {
         client.destroy();
         reject(new Error('Desktop control timed out.'));
       });
       client.on('data', (data) => {
         reply += data.toString();
-        if (reply === 'wmh-desktop-v1\n') {
+        if (reply === 'wmh-desktop-v1\n' || reply === 'wmh-desktop-handoff\n') {
+          acknowledged = true;
+          replace = reply === 'wmh-desktop-handoff\n';
           client.destroy();
-          resolveClient();
         } else if (reply.length > 64 || reply.includes('\n')) {
           client.destroy();
           reject(new Error('Unknown desktop control owner.'));
         }
       });
-      client.once('error', () =>
+      client.once('error', (error) =>
         reject(
-          new Error('Existing desktop unavailable; no process was stopped.'),
+          new Error('Existing desktop unavailable; no process was stopped.', {
+            cause: error,
+          }),
         ),
       );
+      client.once('close', () => {
+        if (acknowledged) resolveClient(replace);
+        else
+          reject(
+            new Error(
+              'Stop the existing desktop manager in Settings, then open this installation again. No process was stopped.',
+            ),
+          );
+      });
     });
+    if (handedOff) {
+      log('previous desktop backend stopped; claiming its control pipe');
+      return startDesktop({
+        root,
+        directory,
+        port,
+        openWindow,
+        log,
+        environment,
+        handoffDeadline: Date.now() + 3000,
+      });
+    }
     return { reused: true, closed: Promise.resolve(), stop() {} };
   }
   let resolveExit;
@@ -194,7 +255,13 @@ export async function startDesktop({
         });
         return;
       }
-      control.close(() => resolveExit());
+      if (handoffSocket) {
+        // Keep the Windows pipe listener alive until its reply has flushed.
+        // Closing it earlier can reset the handoff connection on Windows.
+        handoffSocket.end('wmh-desktop-handoff\n', () =>
+          control.close(() => resolveExit()),
+        );
+      } else control.close(() => resolveExit());
       if (code) process.exitCode = code;
     });
     backend.once('error', () => {

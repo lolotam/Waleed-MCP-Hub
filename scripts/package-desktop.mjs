@@ -5,13 +5,14 @@ import { createRequire } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { buildLauncher } from './build-launcher.mjs';
 
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Package using Node 24 on Windows.');
 const root = fileURLToPath(new URL('../', import.meta.url));
 await access(join(root, 'apps/server/dist/main.js'));
 await access(join(root, 'apps/web/dist/index.html'));
-const output = join(
+export const output = join(
   root,
   'desktop-builds',
   `Waleed-MCP-Hub-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`,
@@ -107,11 +108,7 @@ await cp(
   join(output, 'runtime/NODE-LICENSE.txt'),
 );
 await mkdir(join(output, 'scripts'), { recursive: true });
-try {
-  await cp(join(root, 'WaleedMcpHub.exe'), join(output, 'WaleedMcpHub.exe'));
-} catch {
-  /* WaleedMcpHub.exe will be compiled if csc is present. */
-}
+await cp(await buildLauncher(root), join(output, 'WaleedMcpHub.exe'));
 for (const file of [
   'desktop.mjs',
   'desktop-runtime.mjs',
@@ -137,6 +134,6 @@ await writeFile(
 );
 await writeFile(
   join(output, 'README.txt'),
-  'Run scripts\\start-desktop.bat. Edge is required. Install a shortcut by running scripts\\install-desktop-shortcut.ps1. This portable folder does not install a service, startup task, agent integration, or copy credentials. Keep production package licenses with this folder. Closing the window leaves the same-user manager running; use Settings > Stop desktop manager.\r\n',
+  'Run WaleedMcpHub.exe. Windows 10/11 x64 and Microsoft Edge are required. Node.js and production packages are included; no development tools or npm install are needed. Docker Desktop is needed only for Docker connectors. Install a shortcut by running scripts\\install-desktop-shortcut.ps1. This portable folder does not install a service, startup task, agent integration, or copy credentials. Keep production package licenses with this folder. Closing the window leaves the same-user manager running; use Settings > Stop desktop manager.\r\n',
 );
 console.info(`Portable desktop folder created: ${relative(root, output)}`);
