@@ -2,7 +2,7 @@ import { lstat, mkdir, open, rename, link, unlink } from 'node:fs/promises';
 import { dirname, join, resolve, relative, isAbsolute, win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { assertNoLinks } from '../adapters/managed-files.js';
+import { assertNoLinks, checkedReadFlags } from '../adapters/managed-files.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
 import { HubError } from '../errors.js';
 
@@ -69,19 +69,24 @@ export function agentFiles(
     permit(path);
     await assertNoLinks(path, true);
     try {
-      // File ids are compared as exact integers: a Windows file id does not
-      // fit in a JavaScript number, so two different files could look equal.
-      const info = await lstat(path, { bigint: true });
-      if (!info.isFile() || info.nlink !== 1n || info.size > maxAgentFile)
-        throw conflict();
-      const file = await open(path, 'r');
+      // The decision is made on the open handle, then the path must still
+      // name that very file. File ids are compared as exact integers: a
+      // Windows file id does not fit in a JavaScript number.
+      const file = await open(path, checkedReadFlags);
       let bytes: Buffer | undefined;
       try {
         const opened = await file.stat({ bigint: true });
         if (
-          opened.ino !== info.ino ||
-          opened.dev !== info.dev ||
+          !opened.isFile() ||
+          opened.nlink !== 1n ||
           opened.size > maxAgentFile
+        )
+          throw conflict();
+        const named = await lstat(path, { bigint: true });
+        if (
+          !named.isFile() ||
+          named.ino !== opened.ino ||
+          named.dev !== opened.dev
         )
           throw conflict();
         bytes = await file.readFile();
