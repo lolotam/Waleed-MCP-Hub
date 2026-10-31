@@ -812,6 +812,10 @@ Residuals:
 - If a Grok command rewrites `config.toml` and drops the hub's marker comments,
   the hub sees a foreign `waleed-mcp-hub` table and refuses to edit or remove it
   (fails closed) until the user resolves it.
+- Disconnecting Grok while Claude Code or Cursor stays integrated lets Grok fall
+  back to their hub entry. The connecting-agents guide documents
+  `grok mcp disable waleed-mcp-hub` and the `[compat.*] mcps = false` switches;
+  the hub does not write Grok's compat or disabled-server settings.
 - Both installed builds share `~/.grok`; one integration covers both.
 
 ## Open investigations before/during implementation

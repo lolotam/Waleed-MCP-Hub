@@ -64,6 +64,16 @@ theirs. Integrating Grok writes its own `waleed-mcp-hub` entry into
 `~/.grok/config.toml`, which wins over those entries for the same name, so Grok
 then runs the hub as Grok.
 
+**Disconnect** removes only Grok's own entry. If Claude Code or Cursor is still
+integrated, Grok falls back to their hub entry and keeps using the hub, while the
+hub shows Grok as not integrated. To stop that, after disconnecting run
+`grok mcp disable waleed-mcp-hub` (it adds the name to Grok's
+`disabled_mcp_servers`; undo with `grok mcp enable waleed-mcp-hub` before
+integrating again), or turn off Grok's scanning of those files with
+`[compat.claude] mcps = false` and `[compat.cursor] mcps = false` in
+`~/.grok/config.toml`. Run `grok mcp disable` only after disconnecting: with the
+hub entry present it edits that entry, and the hub then reports a conflict.
+
 Grok's `GROK_CONFIG`/`GROK_CONFIG_PATH` overlays and an administrator's
 `requirements.toml` can still hide or deny the entry; `grok mcp doctor
 waleed-mcp-hub` shows whether Grok loaded it.
