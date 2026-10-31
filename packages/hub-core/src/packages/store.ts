@@ -13,7 +13,7 @@ import {
 import { join, resolve, sep } from 'node:path';
 import type { HubState } from '@waleed/contracts';
 import { HubError } from '../errors.js';
-import { assertNoLinks } from '../adapters/managed-files.js';
+import { assertNoLinks, checkedReadFlags } from '../adapters/managed-files.js';
 import { restrictPrivatePath } from '../integrations/files.js';
 
 // The managed package layout is spelled out here and nowhere else: the store,
@@ -85,7 +85,7 @@ export async function readOwnedFile(
 ): Promise<Buffer | null> {
   let handle: FileHandle;
   try {
-    handle = await open(path, 'r');
+    handle = await open(path, checkedReadFlags);
   } catch (error) {
     // A folder or a link that cannot be followed is not a regular file: it
     // is refused, not an error.
@@ -103,6 +103,12 @@ export async function readOwnedFile(
     // The path must still name the file the handle points to: a link that
     // took its place in the meantime is refused, even though the handle
     // followed it.
+    // No part of the path may have become a link since the open.
+    try {
+      await assertNoLinks(path);
+    } catch {
+      return null;
+    }
     const pathInfo = await lstat(path, { bigint: true });
     if (pathInfo.isSymbolicLink()) return null;
     if (pathInfo.dev !== info.dev || pathInfo.ino !== info.ino) return null;

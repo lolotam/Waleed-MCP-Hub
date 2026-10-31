@@ -82,6 +82,10 @@ export function managedFiles(roots: Record<FileScope, string>): ManagedFiles {
           opened.size > maxManagedFile
         )
           throw conflict();
+        // No part of the path may have become a link since the open: an
+        // ancestor swapped for a link is refused here, and one swapped back
+        // makes the path name a different file than the handle.
+        await assertNoLinks(path);
         const named = await lstat(path, { bigint: true });
         if (
           !named.isFile() ||
