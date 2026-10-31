@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { FileHandle } from 'node:fs/promises';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -55,8 +56,14 @@ const { agentFiles } =
   await import('../packages/hub-core/src/integrations/files.js');
 const { managedFiles } =
   await import('../packages/hub-core/src/adapters/managed-files.js');
-const { readOwnedFile } =
-  await import('../packages/hub-core/src/packages/store.js');
+const {
+  createPackageLock,
+  markerPath,
+  readOwnedFile,
+  reconcilePackages,
+  writeMarker,
+} = await import('../packages/hub-core/src/packages/store.js');
+const { emptyState } = await import('../packages/hub-core/src/state.js');
 
 let directory = '';
 afterEach(async () => {
@@ -112,4 +119,23 @@ it('refuses an owned package file whose path names another file id above 2^53', 
   ids.opened = ids.named;
   expect((await readOwnedFile(ids.target, 1024))?.toString()).toBe('x');
   ids.opened = 2n ** 53n + 1n;
+});
+
+it('preserves an active install marker when its opened file identity differs', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-marker-ids-'));
+  const packagesDir = join(directory, 'packages');
+  await mkdir(packagesDir);
+  const installId = randomUUID();
+  const jobId = randomUUID();
+  await writeMarker(packagesDir, installId, jobId);
+  ids.target = markerPath(packagesDir, installId);
+  await expect(
+    reconcilePackages({
+      packagesDir,
+      readState: async () => emptyState(),
+      activeJobs: () => new Set([jobId]),
+      lock: createPackageLock(),
+    }),
+  ).rejects.toMatchObject({ code: 'conflict' });
+  await expect(readFile(ids.target, 'utf8')).resolves.toBe(jobId);
 });
