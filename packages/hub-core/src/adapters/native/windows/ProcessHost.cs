@@ -21,6 +21,8 @@ namespace WaleedHub {
         public long Deadline { get; set; }
         public int OutputLimitBytes { get; set; }
         public bool Duplex { get; set; }
+        public bool Session { get; set; }
+        public int InputLimitBytes { get; set; }
     }
 
     public static class ProcessHost {
@@ -154,18 +156,23 @@ namespace WaleedHub {
             BlockingCollection<byte[]> inputQueue = new BlockingCollection<byte[]>(64);
             try {
                 Request request = Json.Deserialize<Request>(payload);
-                if (request == null || request.OutputLimitBytes < 1 || request.OutputLimitBytes > 1048576) throw new InvalidOperationException();
+                if (request == null) throw new InvalidOperationException();
+                // A session run raises the budgets it was asked for; every other
+                // request keeps the limits it always had.
+                if (request.Session) {
+                    if (!request.Duplex || request.OutputLimitBytes < 1 || request.OutputLimitBytes > 67108864 || request.InputLimitBytes < 1 || request.InputLimitBytes > 16777216) throw new InvalidOperationException();
+                } else if (request.OutputLimitBytes < 1 || request.OutputLimitBytes > 1048576) throw new InvalidOperationException();
                 if (Now() >= request.Deadline) { Emit(new { @event = "result", outcome = "timed_out", exitCode = (int?)null }); return 0; }
                 // A detached parent closes stdin, causing the same owned-job cleanup
                 // as explicit cancellation. No PID enumeration or taskkill is used.
                 Task.Run(() => {
-                    try { int supplied = 0; while (true) {
+                    try { int supplied = 0; int inputLimit = request.Session ? request.InputLimitBytes : 1048576; while (true) {
                         string line = Console.In.ReadLine();
                         if (line == null || line == "cancel") { inputQueue.CompleteAdding(); Interlocked.Exchange(ref cancelled, 1); return; }
                         if (request.Duplex && line.StartsWith("stdin ", StringComparison.Ordinal)) {
                             if (line.Length > 44000) throw new InvalidOperationException();
                             byte[] bytes = Convert.FromBase64String(line.Substring(6)); supplied += bytes.Length;
-                            if (bytes.Length > 32768 || supplied > 1048576 || !inputQueue.TryAdd(bytes)) throw new InvalidOperationException();
+                            if (bytes.Length > 32768 || supplied > inputLimit || !inputQueue.TryAdd(bytes)) throw new InvalidOperationException();
                         }
                     } }
                     catch { Interlocked.Exchange(ref cancelled, 1); }

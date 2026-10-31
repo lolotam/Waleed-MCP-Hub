@@ -13,6 +13,7 @@ import {
   localRuntimeAdapters,
   windowsAgentTargets,
   definitionHash,
+  writeBootRecord,
 } from '@waleed/hub-core';
 if (process.platform !== 'win32')
   throw new Error('Windows integration smoke requires Windows.');
@@ -38,6 +39,9 @@ for (const target of targets) {
 }
 const store = await openStateStore(runtime),
   safety = await openSafetyLedger(runtime);
+// The compiled bridge fails closed without a boot record: it names the hub
+// generation it belongs to.
+await writeBootRecord(runtime);
 const hub = createLifecycle(
   store,
   Date.now,
@@ -145,6 +149,52 @@ try {
       await readFile(join(directory, 'evidence.json'), 'utf8'),
     );
     assert(evidence.methods.includes('tools/call'));
+    // A second native connector keeps its process between the calls: the
+    // counter answers 1, 2 and 3 over one connection.
+    await apply({
+      kind: 'create_connector',
+      definition: {
+        id: 'counter',
+        name: 'Counter',
+        description: '',
+        enabled: true,
+        environmentLiterals: {},
+        secretBindings: {},
+        headerBindings: {},
+        trustApproval: null,
+        executionMode: 'native',
+        transport: 'stdio',
+        executable: process.execPath,
+        arguments: [
+          fileURLToPath(
+            new URL('../tests/fixtures/counter-peer.mjs', import.meta.url),
+          ),
+        ],
+      },
+    });
+    const counter = (await store.read()).connectors.find(
+      (item) => item.id === 'counter',
+    );
+    await apply({
+      kind: 'approve_connector',
+      connectorId: 'counter',
+      expectedConnectorRevision: counter.revision,
+      definitionHash: definitionHash(counter),
+      approveExecution: true,
+    });
+    const listed = await agent.listTools();
+    assert.equal(listed.tools.length, 2);
+    const increment = listed.tools.find(
+      (tool) => tool.name === 'counter__increment',
+    );
+    assert(increment);
+    for (const expected of ['1', '2', '3']) {
+      const counted = await agent.callTool({
+        name: increment.name,
+        arguments: {},
+      });
+      assert.equal(counted.content[0].text, expected);
+    }
     await apply({
       kind: 'set_connector_enabled',
       connectorId: 'synthetic',
@@ -170,7 +220,7 @@ try {
   }
   success = true;
   console.info(
-    'Compiled nine-scope private backup/integrate/disconnect and DPAPI-backed independent bridge passed. Discovery invoked no tools; one explicit synthetic call succeeded; disabled routing was rejected. No real agent/pilot was changed.',
+    'Compiled nine-scope private backup/integrate/disconnect and DPAPI-backed independent bridge passed. Discovery invoked no tools; one explicit synthetic call succeeded; a pooled native connector answered 1, 2 and 3 over one persistent process; disabled routing was rejected. No real agent/pilot was changed.',
   );
 } finally {
   await hub.close();

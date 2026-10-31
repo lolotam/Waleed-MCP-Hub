@@ -25,7 +25,7 @@
     "test:e2e": "playwright test",
     "test:windows-runtime": "node scripts/smoke-process-runner.mjs",
     "test:windows-secrets": "node scripts/smoke-secrets.mjs",
-    "test:windows-integrations": "node scripts/smoke-integrations.mjs",
+    "test:windows-integrations": "node scripts/smoke-integrations.mjs && node scripts/smoke-sessions.mjs",
     "test:disposable-profile": "node scripts/verify-disposable-profile.mjs",
     "test:disposable-secret": "node scripts/verify-disposable-secrets.mjs",
     "discovery:read-only": "node scripts/discover-readonly.mjs",

@@ -645,6 +645,147 @@ outcome of the newest call.
 Python packages (`uvx`) stay out of scope until F01b decides interpreter
 provenance, wheel targeting and credential isolation.
 
+## D025 — Persistent connector sessions in the agent bridge (2026-10-30)
+
+F03 (spec `docs/specs/F03-persistent-sessions.md`, plan
+`docs/plans/F03-persistent-sessions-plan.md`) keeps one live peer per connector
+inside each agent's bridge process and reuses it across `tools/list` and
+`tools/call`, so stateful servers (an SSH session, a browser tab) work. Fixed
+inputs: 5-minute idle timeout, 60-minute maximum session life, graceful
+re-initialisation after a hub restart, pooling for native stdio, remote
+Streamable HTTP and SSE, and Docker, and Windows Job Object containment. The
+design went through six Codex review rounds (18, 15, 7, 6, 5 and 3 findings, all
+accepted; verdict tables in the plan).
+
+Rules that make reuse no weaker than one peer per call:
+
+- **Validation before every SDK request**, after the caller holds the peer
+  exclusively: unblocked ledger, agent integrated, valid boot record, connector
+  enabled and approved, unchanged definition hash and credential references,
+  lease not near expiry, then a synchronous final gate (generation, state,
+  cancellation, max age by the clock) with no `await` before the dispatch. New
+  peers are authorised (state checks, then package verification) before any
+  secret is resolved or any process starts.
+- **Security invalidation is not retirement.** A failed check, a timeout or a
+  cancellation after dispatch aborts the peer at once and discards its result;
+  only reaching max age or idle retires gracefully. A failed call is never
+  replayed.
+- **Snapshots are serialised and numbered on completion**; reconciliation of
+  watched files is decided inside the same mutex, so an older observation never
+  overrides a newer one.
+- **Hub restart** is detected through `boot.json`, a boot ID the hub writes after
+  recovery reconciliation. A mismatch replaces the peer inside the request that
+  notices it. A missing or malformed boot record fails closed.
+- **Budgets** per operation, per session and between operations are enforced in
+  the C# process host, the stdio transport and, for remote servers, by framing
+  JSON and SSE bodies before the SDK parses them. Session runs keep byte counts,
+  not output.
+- **SDK use**: pooled peers call `client.request` directly (no tool-metadata
+  cache, no client-side schema validation), with operation-owned abort
+  controllers so a finished request never sends a late cancellation.
+- **Docker ownership** rests on container labels (installation ID from
+  `install.json`, agent, bridge, nonce) and OS-held named pipes: each bridge
+  listens on its own pipe for life, and recovery for an agent holds a pipe
+  mutex. Only a conclusively absent owner, or this bridge's own abandoned
+  launch, allows removal. Launch and removal phases are recorded in markers and
+  never expire by time.
+
+**Residual limits (accepted, stated rather than claimed away):**
+
+1. **Remote state.** Closing a remote session (`DELETE`) is best-effort; the
+   server may keep state or keep working after a cancelled call. The hub only
+   stops its own participation.
+2. **Lazy loading.** A running Node package server can load a file that changes
+   between verification and load; the D024 check-to-launch race now spans the
+   session, not only start-up.
+3. **Transient ledger states.** A ledger that is `prepared` and then `committed`
+   between two snapshots may never be observed; its committed registry change is
+   caught by the next validation.
+4. **Echo detection** catches lease values in the representations
+   `assertNoCredentialEcho` checks. Split or re-encoded values are not detected.
+   Secrets live in the bridge for up to 61 minutes instead of one call;
+   immutable JS strings cannot be wiped (D019).
+5. **Docker manual reconciliation.** A launch whose CLI was killed before Docker
+   acknowledged a container ID keeps its marker until the container is found.
+   More than 16 such markers block Docker for that agent until a person removes
+   them (troubleshooting guide). Pre-F03 markers are never auto-recovered.
+6. **Server-side sharing.** Two agents never share a bridge-owned peer, lease or
+   transport; a server that shares state by credential or globally is outside
+   the hub's control.
+7. **Ambiguous error codes restart the peer.** A server that answers with
+   JSON-RPC error `-32000` or `-32001` looks to the SDK exactly like its local
+   "connection closed" or "request timeout". The bridge cannot tell them apart,
+   so it treats both as a dead peer and the next call starts a fresh one. This
+   fails closed; the cost is a restart and the lost session state.
+8. **Startup registry failure text.** A registry read that fails inside a pooled
+   startup reports the connector-unavailable text, not the registry-unavailable
+   one. Both are fixed texts.
+9. **Handshake window after an abandoned startup.** A peer whose startup
+   finishes after every waiting request left keeps its start-up budget until
+   its first operation or its idle retirement. The per-session caps and the idle
+   timeout still bound it.
+10. **Lost installation record.** `install.json` is written to a temporary
+    file and linked into place, so a start that stops halfway never leaves a
+    partial record. The next start removes a temporary name that is still
+    linked to the record at once, and an unlinked temporary file once it is a
+    minute old (it blocks nothing meanwhile). A record damaged from outside
+    stops the hub from starting until a person deletes it (troubleshooting
+    guide); a deleted record is simply written anew at the next start. Either
+    way the hub gets a new installation ID, and containers labelled with the
+    old one are no longer recovered automatically.
+11. **Verification time of a large managed package.** The full
+    `verifyPackage` of a new peer runs inside the 20-second start-up deadline
+    (a reused peer's inside the operation deadline). A package near D024's
+    limits (500 MiB, 50 000 files) on a slow disk can take longer; the
+    connector then reports unavailable and nothing unverified is launched.
+12. **A hub write left `prepared`.** While the safety ledger's only open entry
+    is `prepared`, reconciliation keeps idle peers instead of closing them, so
+    an unrelated edit never ends every session. Every request still fails
+    closed on the same ledger. If the hub stops with a write `prepared`, idle
+    peers stay alive (serving nothing) until their 5-minute idle limit.
+13. **Recovery cut short by a shutdown.** A bridge that shuts down waits at
+    most 5 s for a running Docker recovery round, then exits. The markers keep
+    the unfinished work, and the next start completes it.
+14. **OAuth leases close to their expiry.** A call is admitted only if the
+    lease lasts longer than 30 s plus the operation deadline. In the last
+    minute and a half before an OAuth token expires, calls on that connector
+    are refused until the token is refreshed. The refusal keeps the pooled
+    peer, so no replacement peer is launched for each refused call, and a
+    stateful session survives until 30 s before the expiry.
+15. **Link swapped in during a protected read.** `readProtectedText` refuses
+    a path that already goes through a link, opens the file with `O_NOFOLLOW`
+    on POSIX, and after reading refuses a handle that is not the file the
+    path names. A same-user process that replaces a folder of the path with
+    a link between the check and the open can still make the open follow it
+    (on Windows also to a network path, which can start a network sign-in)
+    before the read is refused. Node has no per-component no-follow open.
+    Same threat model as D024 residual 2; the files live in the user's own
+    profile folder.
+
+**Implementation choices accepted in review.** Docker ownership (T6) differs
+from the first plan in these conservative ways:
+
+- A connected owner pipe that closes counts as a live owner; some live owners
+  become "unknown", so their containers are kept and the round retries.
+- Any entry at the top of the marker folder that is not an agent folder counts
+  as a legacy marker: it blocks Docker for every agent and is never deleted.
+- A daemon mismatch also stops the label sweep from removing anything.
+- The marker pass runs before the label sweep in the first round; a failed
+  removal is retried in a later round, not in the same one.
+- An image pull is bounded by the 20-second start-up deadline and fails before
+  any launch marker exists.
+- The label sweep is batched (spec amended): a listing holds at most 4 096
+  container IDs (more makes the round uncertain), 64 are processed per round
+  from a cursor, each owner is probed once per round, and the two passes share
+  one deadline with alternating order so neither starves the other.
+
+The Windows containment tests (T7) live in `scripts/smoke-sessions.mjs`, not
+in the planned `tests/bridge-sessions.windows.test.ts`: they need the compiled
+bridge, and CI runs `npm test` before `build`. CI runs the script after the
+build. `runAgentBridge` takes an optional idle limit for this test only; the
+`bridge` command never passes it and no file or environment value can set it.
+The real-daemon Docker test runs locally and is skipped in CI.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint

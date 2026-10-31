@@ -147,11 +147,45 @@ the npm version bundled with the hub, not the one on your `PATH`.
    [connecting-agents.md](connecting-agents.md#claude-desktop).
 5. Docker connectors with protected values are not exposed to agents yet.
 
-## A tool works once, then "forgets" a session
+## A tool forgets a session (SSH, browser tab)
 
-Native connectors start a fresh process for each tool call, so state such as an
-open SSH session doesn't survive between calls. Use the server's single-shot tools
-(for example `run-command` instead of `open-session` + `read-session-output`).
+Each agent's bridge keeps one live session per connector, so state survives
+between calls. The server starts fresh, and its state is gone, when:
+
+- the session was idle for 5 minutes or is 60 minutes old;
+- the connector was edited, disabled or unapproved, or its credentials changed;
+- the hub restarted;
+- a call timed out or was cancelled, or the server answered with error `-32000`
+  or `-32001`;
+- the agent restarted (every agent has its own bridge and its own sessions).
+
+A failed call is never repeated for you. Open the session again (for example call
+`open-session` again) and carry on.
+
+## Docker connectors stay unavailable for one agent
+
+The bridge records every container it launches in
+`%LOCALAPPDATA%\WaleedMcpHub\owned-agent-containers\<agent>\<bridge>\<nonce>.json`
+and removes the container and its record itself, also after a crash. It refuses
+Docker for an agent when it cannot be sure what a record means. Quit the agent
+first, then:
+
+1. **More than 16 unfinished launches** for the agent: for each record, run
+   `docker ps -a --filter label=wmh.client=<nonce>` (the file name is the nonce).
+   Remove a listed container with `docker rm -f <id>`, then delete the record.
+2. **Records from an older hub version**: files directly in
+   `owned-agent-containers` (not in an agent folder). Each holds a `nonce`; check
+   and remove its container the same way, then delete the file. These block
+   Docker for every agent.
+3. **A record for another Docker engine** (you switched Docker context or
+   reinstalled Docker): check that engine with the same command, or delete the
+   record once no container with that nonce exists anywhere.
+4. **A damaged `install.json`** in `%LOCALAPPDATA%\WaleedMcpHub`: the hub
+   never leaves it partial, so only a change from outside damages it, and the
+   hub then does not start at all. Quit the hub, delete the file, and start the
+   hub again; it writes a new one. Containers from the old installation are not
+   cleaned up automatically: list them with
+   `docker ps -a --filter label=wmh.agent` and remove the ones no agent uses.
 
 ## A tool call says "Refresh the hub tool list"
 

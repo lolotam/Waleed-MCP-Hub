@@ -83,6 +83,13 @@ Updated: 2026-10-30
   update, Update and Reinstall; reconciliation of install folders; `npx` import
   entries offered as package proposals; and the web UI for all of it (PR #3 back
   end, PR #4 UI).
+- F03 persistent connector sessions (D025): each agent's bridge keeps one live
+  peer per connector for native stdio, remote Streamable HTTP/SSE and Docker,
+  with a 5-minute idle limit and 60-minute life, validation of approval,
+  definition, credentials, ledger and boot ID before every request, session
+  budgets in the process host and transports, label- and pipe-based Docker
+  ownership with crash recovery, and Windows containment tests against the
+  compiled bridge.
 
 ## Not implemented
 
@@ -120,8 +127,10 @@ Updated: 2026-10-30
   stores. P5 tests compensate known Docker/file states only; uncertainty blocks.
 - No verified live Docker image MCP execution or real Chrome launch. Synthetic
   protocol peers and ownership/cleanup fault tests do not claim provider compatibility.
-- Generated native sessions are bounded to 120 seconds/1 MiB, not unlimited persistent
-  gateways. Shell/shim recipes and real installed-agent reconnect remain unverified.
+- Persistent sessions (F03) are tested with synthetic peers, a real Docker daemon
+  (locally, skipped in CI) and Windows process trees, not yet against a live SSH or
+  browser server from a real agent. Shell/shim recipes and real installed-agent
+  reconnect remain unverified.
 - No automatic job replay/resumption, recovery override, or guided stale-lock/backup
   restore interface. Ambiguous changes deliberately stay blocked for inspection.
 - No MCP usage metrics. Per-project/per-agent/CLI traffic accounting is recorded

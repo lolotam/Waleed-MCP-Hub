@@ -7,6 +7,8 @@ import {
   AgentBindingSchema,
 } from './runtime.js';
 export * from './safety.js';
+export * from './boot.js';
+export * from './docker.js';
 export * from './imports.js';
 export * from './runtime.js';
 export * from './auth.js';

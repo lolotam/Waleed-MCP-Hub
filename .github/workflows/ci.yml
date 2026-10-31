@@ -35,3 +35,4 @@ jobs:
       - run: npm run build
       - run: npm run test:windows-runtime
       - run: npm run test:windows-secrets
+      - run: node scripts/smoke-sessions.mjs
