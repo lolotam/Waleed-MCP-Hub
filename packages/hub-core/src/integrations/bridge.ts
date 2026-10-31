@@ -1192,10 +1192,11 @@ export function createAgentBridge(
       const state = snapshot ? snapshot.state : await readState();
       const tools: Tool[] = [];
       names.clear();
-      for (const connector of state.connectors.filter(
-        (item) => item.enabled && approved(item),
-      )) {
-        if (signal.aborted) break;
+      const discover = async (
+        connector: Connector,
+        remaining: number,
+      ): Promise<Tool[]> => {
+        if (signal.aborted) return [];
         if (
           bridge &&
           snapshot &&
@@ -1204,19 +1205,15 @@ export function createAgentBridge(
             connector.executionMode === 'docker')
         ) {
           // A pooled peer: one peer for the whole listing.
-          let listed: Tool[];
           try {
-            listed = await bridge.list(connector, signal, 256 - tools.length);
+            return await bridge.list(connector, signal, remaining);
           } catch {
             // Isolate unavailable/auth-required peers; never reflect
             // diagnostics.
-            listed = [];
-          }
-          for (const tool of listed) {
-            if (tools.length >= 256) break;
-            register(connector, tool, tools);
+            return [];
           }
         } else {
+          const listed: Tool[] = [];
           let peer: BridgePeer | undefined;
           try {
             const peerSignal = AbortSignal.any([
@@ -1233,16 +1230,53 @@ export function createAgentBridge(
               );
               peer.assertPublic(result);
               for (const tool of result.tools) {
-                if (tools.length >= 256) break;
-                register(connector, tool, tools);
+                if (listed.length >= remaining) break;
+                listed.push(tool);
               }
-              if (!result.nextCursor || tools.length >= 256) break;
+              if (!result.nextCursor || listed.length >= remaining) break;
               cursor = result.nextCursor;
             }
           } catch {
             /* Isolate unavailable/auth-required peers; never reflect diagnostics. */
           } finally {
             await disposePeer(peer);
+          }
+          return listed;
+        }
+      };
+      const connectors = state.connectors.filter(
+        (item) => item.enabled && approved(item),
+      );
+      // Package verification and process startup used to consume the whole
+      // 45-second catalog deadline before later healthy peers were visited.
+      // Overlap at most two peers; retain registry order, the shared deadline,
+      // per-peer limits, and the final 256-tool cap.
+      for (let offset = 0; offset < connectors.length; offset += 2) {
+        if (signal.aborted) break;
+        const batch = connectors.slice(offset, offset + 2);
+        const results = await Promise.all(
+          batch.map((connector) => discover(connector, 256 - tools.length)),
+        );
+        const current = bridge
+          ? (await bridge.snapshot()).state
+          : await readState();
+        for (const [index, listed] of results.entries()) {
+          const connector = batch[index]!;
+          const latest = current.connectors.find(
+            (item) => item.id === connector.id,
+          );
+          // A parallel peer may have been revoked while another peer answered.
+          // Do not advertise a route that no longer has the listed approval.
+          if (
+            !latest ||
+            !latest.enabled ||
+            !approved(latest) ||
+            definitionHash(latest) !== definitionHash(connector)
+          )
+            continue;
+          for (const tool of listed) {
+            if (tools.length >= 256) break;
+            register(connector, tool, tools);
           }
         }
         if (tools.length >= 256) break;

@@ -12,6 +12,63 @@ import {
   assertNoCredentialEcho,
   bridgeToolName,
 } from '../packages/hub-core/src/integrations/bridge.js';
+it('discovers seven healthy catalogs with bounded overlap instead of waiting for each earlier peer', async () => {
+  const state = profileState(
+    Array.from({ length: 7 }, () => 'native' as const),
+  );
+  const pending: Array<() => void> = [];
+  let started = 0;
+  let active = 0;
+  let peak = 0;
+  const bridge = createAgentBridge(
+    async () => structuredClone(state),
+    async () => {
+      const peer = new Server(
+        { name: 'delayed-peer', version: '1' },
+        { capabilities: { tools: {} } },
+      );
+      peer.setRequestHandler(ListToolsRequestSchema, async () => {
+        started++;
+        peak = Math.max(peak, ++active);
+        await new Promise<void>((resolve) => pending.push(resolve));
+        active--;
+        return {
+          tools: [{ name: 'read', inputSchema: { type: 'object' as const } }],
+        };
+      });
+      const [a, b] = InMemoryTransport.createLinkedPair();
+      await peer.connect(a);
+      const client = new Client({ name: 'catalog-client', version: '1' });
+      await client.connect(b);
+      return {
+        client,
+        assertPublic() {},
+        async dispose() {
+          await client.close();
+          await peer.close();
+        },
+      };
+    },
+  );
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await bridge.connect(a);
+  const agent = new Client({ name: 'catalog-agent', version: '1' });
+  await agent.connect(b);
+  const listing = agent.listTools();
+  try {
+    for (const count of [2, 4, 6, 7]) {
+      await expect.poll(() => started).toBe(count);
+      pending.splice(0).forEach((resolve) => resolve());
+    }
+    expect((await listing).tools).toHaveLength(7);
+    expect(peak).toBe(2);
+  } finally {
+    pending.splice(0).forEach((resolve) => resolve());
+    await agent.close();
+    await bridge.close();
+    await listing.catch(() => undefined);
+  }
+});
 it('dynamic bridge lists without tools/call, forwards only explicit calls, and rejects disabled/stale routes', async () => {
   const state = profileState(['native']);
   let calls = 0;

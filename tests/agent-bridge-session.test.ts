@@ -1000,18 +1000,39 @@ describe('agent bridge session mode', () => {
     const state = profileState(['native', 'native']);
     const harness = await createHarness({
       state,
-      peer: {
-        onPage: () => {
-          // The second connector is disabled while the first one is listed.
-          disable(state, 'connector-1');
-        },
-      },
     });
+    const snapshot = harness.session.snapshot.bind(harness.session);
+    let reads = 0;
+    harness.session.snapshot = async (inside) => {
+      // The first listing snapshot approved both peers. Revoke the second
+      // before its fresh startup admission, independently of listing order.
+      if (++reads === 3) disable(state, 'connector-1');
+      return snapshot(inside);
+    };
     try {
       const tools = await harness.agent.listTools();
       expect(tools.tools).toHaveLength(1);
       // The second connector never resolved a credential or launched.
       expect(harness.connects).toEqual(['connector-0']);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+    }
+  });
+
+  it('omits a concurrent peer revoked while another catalog is being answered', async () => {
+    const state = profileState(['native', 'native']);
+    const harness = await createHarness({
+      state,
+      peer: { onPage: () => disable(state, 'connector-1') },
+    });
+    try {
+      expect((await harness.agent.listTools()).tools).toHaveLength(1);
+      // Both admissions happened before revocation; the later response must
+      // not advertise the peer whose approval has since been withdrawn.
+      expect(harness.connects).toEqual(['connector-0', 'connector-1']);
+      await harness.bridge.reconcile();
+      expect(harness.peers[1]?.disposed).toBe(1);
     } finally {
       await harness.agent.close();
       await harness.bridge.close();
