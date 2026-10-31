@@ -69,11 +69,13 @@ export function managedFiles(roots: Record<FileScope, string>): ManagedFiles {
   async function read(scope: FileScope, name: string) {
     const path = pathFor(scope, name);
     await assertNoLinks(path, true);
+    let isOpen = false;
     try {
       // The decision is made on the open handle, then the path must still
       // name that very file. File ids are compared as exact integers: a
       // Windows file id does not fit in a JavaScript number.
       const file = await open(path, checkedReadFlags);
+      isOpen = true;
       try {
         const opened = await file.stat({ bigint: true });
         if (
@@ -98,8 +100,13 @@ export function managedFiles(roots: Record<FileScope, string>): ManagedFiles {
         await file.close();
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // A file that vanished after the open is refused. Before the open, a
+      // link whose target is missing also fails with ENOENT on Windows: the
+      // file is missing only when no existing part of the path is a link.
+      if (isOpen) throw conflict();
+      await assertNoLinks(path, true);
+      return null;
     }
   }
   return {

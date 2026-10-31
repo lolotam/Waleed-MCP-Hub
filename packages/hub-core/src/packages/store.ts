@@ -94,7 +94,12 @@ export async function readOwnedFile(
     handle = await open(path, checkedReadFlags);
   } catch (error) {
     const reason = code(error);
-    if (reason === 'ENOENT') return null;
+    if (reason === 'ENOENT') {
+      // A link whose target is missing also opens as ENOENT on Windows: the
+      // path is missing only when no existing part of it is a link.
+      await assertNoLinks(path, true);
+      return null;
+    }
     if (reason === 'EISDIR' || reason === 'ELOOP') throw refused();
     throw error;
   }
@@ -139,6 +144,12 @@ export async function readOwnedFile(
     await handle.close();
   }
 }
+// A refused owned file shares the fault code of a missing one; any other
+// read failure is rethrown unchanged.
+export const refusedAsMissing = (error: unknown): null => {
+  if (error instanceof HubError && error.code === 'conflict') return null;
+  throw error;
+};
 export async function readMarker(
   packagesDir: string,
   installId: string,
@@ -146,7 +157,12 @@ export async function readMarker(
   const bytes = await readOwnedFile(markerPath(packagesDir, installId), 4096);
   if (!bytes) return null;
   const jobId = bytes.toString('utf8').trim();
-  return UUID.test(jobId) ? jobId : null;
+  // A marker is written whole (a temporary file renamed into place), so one
+  // that exists without a job id was not written by the hub: it is refused,
+  // never read as "no job".
+  if (!UUID.test(jobId))
+    throw new HubError('conflict', 'Owned file changed or is unsafe.');
+  return jobId;
 }
 export async function removeMarker(
   packagesDir: string,
@@ -296,6 +312,22 @@ export async function reconcilePackages(
         return { deleted: [...deleted], retained: [...retained] };
       throw error;
     }
+    // A marker that exists but is refused (a link, a hard link, a folder, an
+    // oversized or malformed file, one that changed while read) keeps its
+    // marker and its folder for this pass; the other entries are still
+    // reconciled.
+    const refusedIds = new Set<string>();
+    const markerOf = async (installId: string) => {
+      try {
+        return { jobId: await readMarker(options.packagesDir, installId) };
+      } catch (error) {
+        if (error instanceof HubError && error.code === 'conflict') {
+          refusedIds.add(installId);
+          return null;
+        }
+        throw error;
+      }
+    };
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(MARKER_SUFFIX)) continue;
       const installId = entry.name.slice(0, -MARKER_SUFFIX.length);
@@ -303,8 +335,9 @@ export async function reconcilePackages(
       // Removing a marker publishes a folder, so a referenced folder keeps its
       // marker and keeps failing verification until it is reinstalled.
       if (referenced.has(installId)) continue;
-      const jobId = await readMarker(options.packagesDir, installId);
-      if (jobId && isActive(jobId)) continue;
+      const marker = await markerOf(installId);
+      if (!marker) continue;
+      if (marker.jobId && isActive(marker.jobId)) continue;
       await removeMarker(options.packagesDir, installId);
     }
     for (const entry of entries) {
@@ -312,12 +345,12 @@ export async function reconcilePackages(
       const folder = join(options.packagesDir, entry.name);
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
-      if (referenced.has(entry.name)) {
+      if (referenced.has(entry.name) || refusedIds.has(entry.name)) {
         retained.add(entry.name);
         continue;
       }
-      const jobId = await readMarker(options.packagesDir, entry.name);
-      if (jobId && isActive(jobId)) {
+      const marker = await markerOf(entry.name);
+      if (!marker || (marker.jobId && isActive(marker.jobId))) {
         retained.add(entry.name);
         continue;
       }

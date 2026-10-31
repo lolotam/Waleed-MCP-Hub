@@ -52,9 +52,11 @@ const {
   readMarker,
   readOwnedFile,
   reconcilePackages,
+  refusedAsMissing,
   writeMarker,
 } = await import('../packages/hub-core/src/packages/store.js');
 const { emptyState } = await import('../packages/hub-core/src/state.js');
+const { HubError } = await import('../packages/hub-core/src/errors.js');
 
 let directory = '';
 afterEach(async () => {
@@ -120,6 +122,16 @@ it('refuses an owned package file whose parent folder became a link before the o
   });
 });
 
+// Reconciliation keeps an install whose marker exists but is refused, and
+// still reconciles every other entry in the same pass.
+const reconcileWith = (packagesDir: string, active: string[]) =>
+  reconcilePackages({
+    packagesDir,
+    readState: async () => emptyState(),
+    activeJobs: () => new Set(active),
+    lock: createPackageLock(),
+  });
+
 it('keeps an install marker when its folder became a link during reconciliation', async () => {
   directory = await mkdtemp(join(tmpdir(), 'wmh-swap-reconcile-'));
   const packagesDir = packagesRoot(directory);
@@ -132,14 +144,9 @@ it('keeps an install marker when its folder became a link during reconciliation'
   await writeFile(join(foreign, installId + '.installing'), randomUUID());
   hook.path = markerPath(packagesDir, installId);
   hook.beforeOpen = swapParent(packagesDir, foreign);
-  await expect(
-    reconcilePackages({
-      packagesDir,
-      readState: async () => emptyState(),
-      activeJobs: () => new Set([jobId]),
-      lock: createPackageLock(),
-    }),
-  ).rejects.toMatchObject({ code: 'conflict' });
+  await expect(reconcileWith(packagesDir, [jobId])).resolves.toMatchObject({
+    deleted: [],
+  });
   await expect(readMarker(packagesDir + '-moved', installId)).resolves.toBe(
     jobId,
   );
@@ -170,21 +177,16 @@ it('keeps an active install when its marker vanishes after the open', async () =
   hook.afterOpen = async () => {
     await rename(marker, join(directory, 'moved.installing'));
   };
-  await expect(
-    reconcilePackages({
-      packagesDir,
-      readState: async () => emptyState(),
-      activeJobs: () => new Set([jobId]),
-      lock: createPackageLock(),
-    }),
-  ).rejects.toMatchObject({ code: 'conflict' });
+  const result = await reconcileWith(packagesDir, [jobId]);
+  expect(result.retained).toContain(installId);
+  expect(result.deleted).toEqual([]);
   await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
     'installing',
   );
 });
 
-// A marker that exists but is refused (a hard link, a folder, a link) must
-// never read as missing: reconciliation would then remove an active install.
+// An active install plus one stale, unreferenced folder in the same packages
+// folder: the stale one must still be deleted in the pass.
 const activeInstall = async (prefix: string) => {
   directory = await mkdtemp(join(tmpdir(), prefix));
   const packagesDir = packagesRoot(directory);
@@ -194,54 +196,129 @@ const activeInstall = async (prefix: string) => {
   const folder = join(packagesDir, installId);
   await mkdir(folder);
   await writeFile(join(folder, 'file.txt'), 'installing');
-  const reconcile = () =>
-    reconcilePackages({
-      packagesDir,
-      readState: async () => emptyState(),
-      activeJobs: () => new Set([jobId]),
-      lock: createPackageLock(),
-    });
-  return { packagesDir, installId, jobId, folder, reconcile };
+  const staleId = randomUUID();
+  await mkdir(join(packagesDir, staleId));
+  const reconcile = async () => {
+    const result = await reconcileWith(packagesDir, [jobId]);
+    expect(result.retained).toContain(installId);
+    expect(result.deleted).toEqual([staleId]);
+    await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
+      'installing',
+    );
+  };
+  return { packagesDir, installId, jobId, reconcile };
 };
 
 it('keeps an active install whose marker is a hard link', async () => {
-  const { packagesDir, installId, jobId, folder, reconcile } =
-    await activeInstall('wmh-refused-hardlink-');
+  const { packagesDir, installId, jobId, reconcile } = await activeInstall(
+    'wmh-refused-hardlink-',
+  );
   await writeMarker(packagesDir, installId, jobId);
   await link(markerPath(packagesDir, installId), join(directory, 'extra'));
-  await expect(reconcile()).rejects.toMatchObject({ code: 'conflict' });
-  await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
-    'installing',
-  );
+  await reconcile();
+  await expect(readFile(join(directory, 'extra'), 'utf8')).resolves.toBe(jobId);
 });
 
 it('keeps an active install whose marker is a folder', async () => {
-  const { packagesDir, installId, folder, reconcile } = await activeInstall(
+  const { packagesDir, installId, reconcile } = await activeInstall(
     'wmh-refused-folder-',
   );
   await mkdir(markerPath(packagesDir, installId));
-  await expect(reconcile()).rejects.toMatchObject({ code: 'conflict' });
-  await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
-    'installing',
-  );
+  await reconcile();
 });
 
-it('keeps an active install whose marker is a link', async (context) => {
-  const { packagesDir, installId, jobId, folder, reconcile } =
-    await activeInstall('wmh-refused-link-');
-  const target = join(directory, 'target.installing');
-  await writeFile(target, jobId);
+it('keeps an active install whose marker holds no job id', async () => {
+  const { packagesDir, installId, reconcile } = await activeInstall(
+    'wmh-refused-malformed-',
+  );
+  await writeFile(markerPath(packagesDir, installId), 'not-a-job-id');
+  await expect(readMarker(packagesDir, installId)).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  await reconcile();
+  await expect(
+    readFile(markerPath(packagesDir, installId), 'utf8'),
+  ).resolves.toBe('not-a-job-id');
+});
+
+const fileLink = async (
+  target: string,
+  path: string,
+  context: { skip: () => void },
+) => {
   try {
-    await symlink(target, markerPath(packagesDir, installId), 'file');
+    await symlink(target, path, 'file');
   } catch (error) {
     // Windows needs Developer Mode or elevation for a file link.
     if ((error as NodeJS.ErrnoException).code === 'EPERM') context.skip();
     throw error;
   }
-  await expect(reconcile()).rejects.toMatchObject({ code: 'conflict' });
-  await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
-    'installing',
+};
+
+it('keeps an active install whose marker is a link', async (context) => {
+  const { packagesDir, installId, jobId, reconcile } =
+    await activeInstall('wmh-refused-link-');
+  const target = join(directory, 'target.installing');
+  await writeFile(target, jobId);
+  await fileLink(target, markerPath(packagesDir, installId), context);
+  await reconcile();
+});
+
+it('keeps an active install whose marker is a link to a missing file', async (context) => {
+  const { packagesDir, installId, reconcile } = await activeInstall(
+    'wmh-refused-dangling-',
   );
+  await fileLink(
+    join(directory, 'missing.installing'),
+    markerPath(packagesDir, installId),
+    context,
+  );
+  await reconcile();
+});
+
+it('refuses an owned file under a link to a missing folder', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-dangling-owned-'));
+  const parent = join(directory, 'install');
+  await symlink(join(directory, 'missing'), parent, 'junction');
+  await expect(
+    readOwnedFile(join(parent, 'marker.json'), 1024),
+  ).rejects.toMatchObject({ code: 'conflict' });
+  await expect(
+    readOwnedFile(join(directory, 'none.json'), 1024),
+  ).resolves.toBeNull();
+});
+
+it('refuses an agent file under a link to a missing folder, or one that vanished after the open', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-dangling-agent-'));
+  const parent = join(directory, 'agent');
+  await symlink(join(directory, 'missing'), parent, 'junction');
+  const dangling = join(parent, 'config.json');
+  const real = join(directory, 'real', 'config.json');
+  await mkdir(join(directory, 'real'));
+  await writeFile(real, '{}');
+  const files = agentFiles([dangling, real], join(directory, 'backups'));
+  await expect(files.read(dangling)).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  hook.path = real;
+  hook.afterOpen = async () => {
+    await rename(real, real + '.moved');
+  };
+  await expect(files.read(real)).rejects.toMatchObject({ code: 'conflict' });
+  await expect(files.read(real)).resolves.toBeNull();
+});
+
+it('refuses a managed file whose root is a link to a missing folder', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-dangling-managed-'));
+  const roots = {
+    runtime: join(directory, 'runtime'),
+    catalog: join(directory, 'catalog'),
+  };
+  await symlink(join(directory, 'missing'), roots.catalog, 'junction');
+  const files = managedFiles(roots);
+  await expect(files.read('catalog', 'wmh-abcd.json')).rejects.toMatchObject({
+    code: 'conflict',
+  });
 });
 
 it('refuses an owned file over its size cap with an error', async () => {
@@ -254,4 +331,11 @@ it('refuses an owned file over its size cap with an error', async () => {
   await expect(
     readOwnedFile(join(directory, 'none.json'), 1024),
   ).resolves.toBeNull();
+});
+
+it('maps only a refused owned file to the missing-file outcome', () => {
+  expect(refusedAsMissing(new HubError('conflict', 'refused'))).toBeNull();
+  const other = Object.assign(new Error('denied'), { code: 'EACCES' });
+  expect(() => refusedAsMissing(other)).toThrow(other);
+  expect(() => refusedAsMissing(new HubError('busy', 'busy'))).toThrow();
 });

@@ -21,7 +21,12 @@ import {
   type RegistryTarget,
 } from './npm.js';
 import { PREVIEW_TTL_MS, type PreviewStore } from './previews.js';
-import { jobDirectory, readOwnedFile, removeTree } from './store.js';
+import {
+  jobDirectory,
+  readOwnedFile,
+  refusedAsMissing,
+  removeTree,
+} from './store.js';
 import {
   WATCHDOG_MAX_BYTES,
   WATCHDOG_MAX_FILES,
@@ -502,9 +507,8 @@ export const resolvePackage = async (
 
     // The frozen lock.
     const lockPath = join(paths.project, 'package-lock.json');
-    // A refused file keeps the fault code of a missing one.
     const lockBytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES).catch(
-      () => null,
+      refusedAsMissing,
     );
     if (!lockBytes) throw new PackageFault('install_failed');
     let lock: unknown;

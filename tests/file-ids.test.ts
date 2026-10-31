@@ -136,6 +136,6 @@ it('preserves an active install marker when its opened file identity differs', a
       activeJobs: () => new Set([jobId]),
       lock: createPackageLock(),
     }),
-  ).rejects.toMatchObject({ code: 'conflict' });
+  ).resolves.toMatchObject({ deleted: [] });
   await expect(readFile(ids.target, 'utf8')).resolves.toBe(jobId);
 });
