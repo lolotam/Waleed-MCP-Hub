@@ -382,6 +382,9 @@ export async function reconcilePackages(
     for (const entry of entries) {
       if (!UUID.test(entry.name)) continue;
       const folder = join(options.packagesDir, entry.name);
+      // Checked before the entry is looked at: a folder that is gone because
+      // the packages folder was replaced must not be skipped as missing.
+      await assertRoot();
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
       if (referenced.has(entry.name) || refusedIds.has(entry.name)) {
@@ -422,18 +425,27 @@ export async function reconcilePackages(
         throw error;
       }
     }
+    const assertTrees = async (): Promise<void> => {
+      await assertRoot();
+      if (jobs !== null) await sameFolder(jobsDir, jobs);
+    };
     for (const entry of jobEntries) {
       if (!UUID.test(entry.name)) continue;
       const folder = join(jobsDir, entry.name);
+      // As above: a job folder that is gone because the jobs folder was
+      // replaced must not be skipped as missing.
+      await assertTrees();
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
       if (isActive(entry.name)) continue;
-      await assertRoot();
-      if (jobs !== null) await sameFolder(jobsDir, jobs);
+      await assertTrees();
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);
     }
+    // A pass that skipped every entry still reports success only when both
+    // folders are the ones it listed.
+    await assertTrees();
     return { deleted: [...deleted], retained: [...retained] };
   });
 }

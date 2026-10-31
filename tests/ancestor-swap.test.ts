@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   link,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -470,5 +471,32 @@ it('deletes a stale job folder when nothing changed', async () => {
   await expect(reconcileWith(packagesDir, [])).resolves.toMatchObject({
     deleted: [jobId],
   });
-  await expect(readFile(join(jobsDir, jobId), 'utf8')).rejects.toBeTruthy();
+  await expect(lstat(join(jobsDir, jobId))).rejects.toMatchObject({
+    code: 'ENOENT',
+  });
+});
+
+it('reports a conflict when the jobs folder is replaced by a link to an empty folder after it was listed', async () => {
+  const { packagesDir, jobsDir, jobId } = await staleJob('wmh-jobs-empty-');
+  const empty = join(directory, 'empty');
+  await mkdir(empty);
+  hook.listPath = jobsDir;
+  hook.afterList = swapParent(jobsDir, empty);
+  await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  // The listed job folder was moved with the old jobs folder and is kept.
+  await expect(lstat(join(jobsDir + '-moved', jobId))).resolves.toBeTruthy();
+});
+
+it('reports a conflict when the packages folder is replaced by an empty folder after it was listed', async () => {
+  const { packagesDir } = await activeInstall('wmh-root-empty-');
+  hook.listPath = packagesDir;
+  hook.afterList = async () => {
+    await rename(packagesDir, packagesDir + '-moved');
+    await mkdir(packagesDir);
+  };
+  await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
+    code: 'conflict',
+  });
 });
