@@ -95,12 +95,15 @@ export async function readOwnedFile(
     throw error;
   }
   try {
-    const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1 || info.size > maxBytes) return null;
+    // File ids are compared as exact integers: a Windows file id does not fit
+    // in a JavaScript number, so two different files could look equal.
+    const info = await handle.stat({ bigint: true });
+    if (!info.isFile() || info.nlink !== 1n || info.size > BigInt(maxBytes))
+      return null;
     // The path must still name the file the handle points to: a link that
     // took its place in the meantime is refused, even though the handle
     // followed it.
-    const pathInfo = await lstat(path);
+    const pathInfo = await lstat(path, { bigint: true });
     if (pathInfo.isSymbolicLink()) return null;
     if (pathInfo.dev !== info.dev || pathInfo.ino !== info.ino) return null;
     // The read never asks for more than one byte beyond the cap, so a file

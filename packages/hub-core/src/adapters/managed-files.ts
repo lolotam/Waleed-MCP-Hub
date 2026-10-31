@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { HubError } from '../errors.js';
 import { hashBytes } from '../runtime/registry.js';
 
+const maxManagedFile = 1024n * 1024n;
 export type FileScope = 'catalog' | 'runtime';
 export interface ManagedFiles {
   path(scope: FileScope, name: string): string;
@@ -62,16 +63,18 @@ export function managedFiles(roots: Record<FileScope, string>): ManagedFiles {
     const path = pathFor(scope, name);
     await assertNoLinks(path, true);
     try {
-      const info = await lstat(path);
-      if (!info.isFile() || info.nlink !== 1 || info.size > 1024 * 1024)
+      // File ids are compared as exact integers: a Windows file id does not
+      // fit in a JavaScript number, so two different files could look equal.
+      const info = await lstat(path, { bigint: true });
+      if (!info.isFile() || info.nlink !== 1n || info.size > maxManagedFile)
         throw conflict();
       const file = await open(path, 'r');
       try {
-        const opened = await file.stat();
+        const opened = await file.stat({ bigint: true });
         if (
           opened.ino !== info.ino ||
           opened.dev !== info.dev ||
-          opened.size > 1024 * 1024
+          opened.size > maxManagedFile
         )
           throw conflict();
         return await file.readFile('utf8');

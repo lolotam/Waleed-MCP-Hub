@@ -53,6 +53,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 const { agentFiles } =
   await import('../packages/hub-core/src/integrations/files.js');
+const { managedFiles } =
+  await import('../packages/hub-core/src/adapters/managed-files.js');
+const { readOwnedFile } =
+  await import('../packages/hub-core/src/packages/store.js');
 
 let directory = '';
 afterEach(async () => {
@@ -78,5 +82,32 @@ it('still reads the file when both ids match exactly', async () => {
   await writeFile(ids.target, '{"a":1}');
   const files = agentFiles([ids.target], join(directory, 'backups'));
   await expect(files.read(ids.target)).resolves.toBe('{"a":1}');
+  ids.opened = 2n ** 53n + 1n;
+});
+
+it('refuses a managed file whose opened file id differs only above 2^53', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-managed-ids-'));
+  const roots = {
+    runtime: join(directory, 'runtime'),
+    catalog: join(directory, 'catalog'),
+  };
+  const files = managedFiles(roots);
+  await files.write('catalog', 'wmh-abcd.json', null, '{}');
+  ids.target = files.path('catalog', 'wmh-abcd.json');
+  await expect(files.read('catalog', 'wmh-abcd.json')).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  ids.opened = ids.named;
+  await expect(files.read('catalog', 'wmh-abcd.json')).resolves.toBe('{}');
+  ids.opened = 2n ** 53n + 1n;
+});
+
+it('refuses an owned package file whose path names another file id above 2^53', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-owned-ids-'));
+  ids.target = join(directory, 'owned.json');
+  await writeFile(ids.target, 'x');
+  await expect(readOwnedFile(ids.target, 1024)).resolves.toBeNull();
+  ids.opened = ids.named;
+  expect((await readOwnedFile(ids.target, 1024))?.toString()).toBe('x');
   ids.opened = 2n ** 53n + 1n;
 });
