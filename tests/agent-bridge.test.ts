@@ -56,12 +56,12 @@ it('discovers seven healthy catalogs with bounded overlap instead of waiting for
   await agent.connect(b);
   const listing = agent.listTools();
   try {
-    for (const count of [2, 4, 6, 7]) {
+    for (const count of [4, 7]) {
       await expect.poll(() => started).toBe(count);
       pending.splice(0).forEach((resolve) => resolve());
     }
     expect((await listing).tools).toHaveLength(7);
-    expect(peak).toBe(2);
+    expect(peak).toBe(4);
   } finally {
     pending.splice(0).forEach((resolve) => resolve());
     await agent.close();

@@ -1256,11 +1256,11 @@ export function createAgentBridge(
       );
       // Package verification and process startup used to consume the whole
       // 45-second catalog deadline before later healthy peers were visited.
-      // Overlap at most two peers; retain registry order, the shared deadline,
+      // Overlap at most four peers; retain registry order, the shared deadline,
       // per-peer limits, and the final 256-tool cap.
-      for (let offset = 0; offset < connectors.length; offset += 2) {
+      for (let offset = 0; offset < connectors.length; offset += 4) {
         if (signal.aborted) break;
-        const batch = connectors.slice(offset, offset + 2);
+        const batch = connectors.slice(offset, offset + 4);
         const results = await Promise.all(
           batch.map((connector) => discover(connector, 256 - tools.length)),
         );
