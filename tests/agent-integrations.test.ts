@@ -270,6 +270,30 @@ describe('comment-preserving managed agent entries', () => {
     expect((await hub.inventory()).revision).toBe(0);
     await hub.close();
   });
+  // Incident 2026-10-31: Claude Code rewrote ~/.claude.json while the hub
+  // relocated its entry. The replace never landed, yet the whole-file
+  // comparison journaled needs_review and every agent bridge stopped serving.
+  it('aborts instead of blocking recovery when an agent rewrites unrelated settings during a failed replace', async () => {
+    const { hub, files, safety, contents } = setup();
+    const agent = (await hub.integrations.scan()).agents[0]!;
+    files.replace = async (path, before) => {
+      contents.set(path, before + '// agent rewrote its own settings\n');
+      throw new Error('SYNTHETIC concurrent agent write');
+    };
+    await expect(
+      hub.integrations.integrate(agent.agentId, {
+        expectedRevision: 0,
+        fingerprint: agent.fingerprint,
+        confirmConfigurationChange: true,
+      }),
+    ).rejects.toBeDefined();
+    expect((await safety.read()).operations[0]).toMatchObject({
+      phase: 'aborted',
+      reason: 'commit_failed',
+    });
+    expect((await hub.inventory()).revision).toBe(0);
+    await hub.close();
+  });
   it('emits exactly the documented OpenCode V2/Kimi/Kilo/VS Code scopes', () => {
     expect(
       agentEntry('opencode', 'node', 'bridge', 'state', 'opencode'),
