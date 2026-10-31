@@ -1,4 +1,4 @@
-import { readFile, lstat } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
 import { watchFile, unwatchFile } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -1305,29 +1305,38 @@ export function createAgentBridge(
   };
   return bridgeServer;
 }
+// Reads a protected file through the handle that was checked: the opened file
+// must be the very file the path named, so a file swapped in between the
+// check and the read is refused.
 async function readProtectedText(path: string) {
   await assertNoLinks(path);
-  const info = await lstat(path);
-  if (!info.isFile() || info.nlink !== 1 || info.size > 4 * 1024 * 1024)
+  // The identities are compared as exact integers: a Windows file id does
+  // not fit in a JavaScript number.
+  const info = await lstat(path, { bigint: true });
+  if (!info.isFile() || info.nlink !== 1n || info.size > 4n * 1024n * 1024n)
     throw new Error();
-  const bytes = await readFile(path);
+  const file = await open(path, 'r');
+  let bytes: Buffer | undefined;
   try {
+    const opened = await file.stat({ bigint: true });
+    if (
+      !opened.isFile() ||
+      opened.ino !== info.ino ||
+      opened.dev !== info.dev ||
+      opened.nlink !== 1n ||
+      opened.size > 4n * 1024n * 1024n
+    )
+      throw new Error();
+    bytes = await file.readFile();
+    if (bytes.length > 4 * 1024 * 1024) throw new Error();
     return bytes.toString('utf8');
   } finally {
-    bytes.fill(0);
+    bytes?.fill(0);
+    await file.close();
   }
 }
 async function readProtectedJson(path: string) {
-  await assertNoLinks(path);
-  const info = await lstat(path);
-  if (!info.isFile() || info.nlink !== 1 || info.size > 4 * 1024 * 1024)
-    throw new Error();
-  const bytes = await readFile(path);
-  try {
-    return JSON.parse(bytes.toString('utf8')) as unknown;
-  } finally {
-    bytes.fill(0);
-  }
+  return JSON.parse(await readProtectedText(path)) as unknown;
 }
 export async function runAgentBridge(
   registry: string,

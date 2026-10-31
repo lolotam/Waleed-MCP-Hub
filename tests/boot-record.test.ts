@@ -5,8 +5,10 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -172,6 +174,49 @@ describe('install record', () => {
     await expect(readInstallRecord(directory)).resolves.toMatchObject({
       installId: left.installId,
     });
+  });
+
+  it('never leaves a partial record from a hub that stopped while writing', async () => {
+    const directory = await createTempDir();
+    // The hub stopped after writing part of its temporary file, before the
+    // link: there is no record yet, only an old temporary file.
+    const leftover = join(directory, `.wmh-install-${randomUUID()}.tmp`);
+    await writeFile(leftover, '{"installId":');
+    const old = new Date(Date.now() - 120_000);
+    await utimes(leftover, old, old);
+
+    const record = await ensureInstallRecord(directory);
+    await expect(readInstallRecord(directory)).resolves.toEqual(record);
+    expect(
+      (await readdir(directory)).filter((name) => name.endsWith('.tmp')),
+    ).toEqual([]);
+  });
+
+  it('recovers a record whose temporary name outlived a stopped hub', async () => {
+    const directory = await createTempDir();
+    const first = await ensureInstallRecord(directory);
+    // The hub stopped between the link and the removal of the temporary
+    // name: the record has two names and is refused until one is removed.
+    await link(
+      installPath(directory),
+      join(directory, `.wmh-install-${randomUUID()}.tmp`),
+    );
+    await expect(readInstallRecord(directory)).rejects.toMatchObject({
+      code: 'unavailable',
+    });
+
+    const again = await ensureInstallRecord(directory);
+    expect(again.installId).toBe(first.installId);
+    await expect(readInstallRecord(directory)).resolves.toEqual(first);
+  });
+
+  it('keeps a fresh temporary file of another hub that is still writing', async () => {
+    const directory = await createTempDir();
+    const writing = join(directory, `.wmh-install-${randomUUID()}.tmp`);
+    await writeFile(writing, '{"installId":');
+
+    await ensureInstallRecord(directory);
+    await expect(readFile(writing, 'utf8')).resolves.toBe('{"installId":');
   });
 
   it('refuses a missing record', async () => {

@@ -292,7 +292,8 @@ operations budget. Any breach closes the session.
 ### Docker (T6)
 
 - **Installation ID**: the hub creates `install.json` (`{ installId: <uuid> }`)
-  once in its data folder (create-exclusive, protected like `boot.json`) and
+  once in its data folder (written to a temporary file and linked into place,
+  so it is never partial and never replaced; protected like `boot.json`) and
   never changes it. Pipe names and labels use it, never a path-derived hash. A
   bridge that cannot read it refuses Docker peers.
 - **Pipe names**: one function `pipeName(kind, installId, id)` returns

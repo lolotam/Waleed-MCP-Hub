@@ -724,12 +724,20 @@ Rules that make reuse no weaker than one peer per call:
    finishes after every waiting request left keeps its start-up budget until
    its first operation or its idle retirement. The per-session caps and the idle
    timeout still bound it.
-10. **Interrupted installation record.** `install.json` is created exclusively,
-    then written. If the hub dies between the two steps the file stays empty or
-    partial, every later read fails closed, and Docker connectors stay
-    unavailable until a person deletes the file (troubleshooting guide).
-    Containers labelled with the lost installation ID are then no longer
-    recovered automatically.
+10. **Lost installation record.** `install.json` is written to a temporary
+    file and linked into place, so a start that stops halfway never leaves a
+    partial record. The next start removes a temporary name that is still
+    linked to the record at once, and an unlinked temporary file once it is a
+    minute old (it blocks nothing meanwhile). A record damaged from outside
+    stops the hub from starting until a person deletes it (troubleshooting
+    guide); a deleted record is simply written anew at the next start. Either
+    way the hub gets a new installation ID, and containers labelled with the
+    old one are no longer recovered automatically.
+11. **Verification time of a large managed package.** The full
+    `verifyPackage` of a new peer runs inside the 20-second start-up deadline
+    (a reused peer's inside the operation deadline). A package near D024's
+    limits (500 MiB, 50 000 files) on a slow disk can take longer; the
+    connector then reports unavailable and nothing unverified is launched.
 
 **Implementation choices accepted in review.** Docker ownership (T6) differs
 from the first plan in these conservative ways:

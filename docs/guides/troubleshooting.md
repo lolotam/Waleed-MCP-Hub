@@ -180,8 +180,9 @@ first, then:
 3. **A record for another Docker engine** (you switched Docker context or
    reinstalled Docker): check that engine with the same command, or delete the
    record once no container with that nonce exists anywhere.
-4. **An empty or broken `install.json`** in `%LOCALAPPDATA%\WaleedMcpHub` (the
-   hub stopped while creating it): quit the hub, delete the file, and start the
+4. **A damaged `install.json`** in `%LOCALAPPDATA%\WaleedMcpHub`: the hub
+   never leaves it partial, so only a change from outside damages it, and the
+   hub then does not start at all. Quit the hub, delete the file, and start the
    hub again; it writes a new one. Containers from the old installation are not
    cleaned up automatically: list them with
    `docker ps -a --filter label=wmh.agent` and remove the ones no agent uses.

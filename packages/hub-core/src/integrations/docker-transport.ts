@@ -3,7 +3,7 @@ import { createWindowsDiscoveryPorts } from '../adapters/discovery-files.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
 import { dockerCommand } from '../adapters/docker-profile.js';
 import { ContainedStdioTransport } from '../adapters/mcp/stdio.js';
-import type { ProcessRunner } from '../ports.js';
+import type { ProcessResult, ProcessRunner } from '../ports.js';
 import type { DockerOwnership } from './docker-ownership.js';
 
 // The Docker CLI of one bridge: the executable, the runner of the short
@@ -20,6 +20,66 @@ export interface DockerSession {
   createRunner(): Promise<ProcessRunner>;
 }
 
+// The short commands of one bridge wait for a free slot of their runner
+// instead of failing: an image pull or a recovery round never turns a busy
+// runner into an unavailable daemon. The wait counts against the command's
+// own timeout, and an abort ends it.
+// The shortest timeout the process runner accepts: a command whose wait
+// left less than this has timed out.
+const MIN_RUNNER_TIMEOUT_MS = 50;
+
+export function queuedRunner(
+  runner: ProcessRunner,
+  slots: number,
+): ProcessRunner {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  const empty = (outcome: ProcessResult['outcome']): ProcessResult => ({
+    exitCode: null,
+    stdout: '',
+    stderr: '',
+    outcome,
+  });
+  // A finished command hands its slot to the next waiting one.
+  const release = () => {
+    const next = waiting.shift();
+    if (next) next();
+    else active--;
+  };
+  return {
+    async run(request) {
+      const queuedAt = Date.now();
+      if (request.signal.aborted) return empty('cancelled');
+      if (active < slots) active++;
+      else {
+        const admitted = await new Promise<boolean>((resolve) => {
+          const leave = (value: boolean) => {
+            clearTimeout(timer);
+            request.signal.removeEventListener('abort', cancel);
+            const index = waiting.indexOf(turn);
+            if (index !== -1) waiting.splice(index, 1);
+            resolve(value);
+          };
+          const turn = () => leave(true);
+          const cancel = () => leave(false);
+          const timer = setTimeout(cancel, request.timeoutMs);
+          waiting.push(turn);
+          request.signal.addEventListener('abort', cancel, { once: true });
+        });
+        if (!admitted)
+          return empty(request.signal.aborted ? 'cancelled' : 'timed_out');
+      }
+      try {
+        const remaining = request.timeoutMs - (Date.now() - queuedAt);
+        if (remaining < MIN_RUNNER_TIMEOUT_MS) return empty('timed_out');
+        return await runner.run({ ...request, timeoutMs: remaining });
+      } finally {
+        release();
+      }
+    },
+  };
+}
+
 export async function createDockerSession(
   directory: string,
   signal: AbortSignal,
@@ -31,14 +91,17 @@ export async function createDockerSession(
   }).find(['docker'], signal);
   if (!executable) throw new Error();
   // The short commands of the daemon run in their own runner: a container
-  // that stays alive never blocks a recovery.
-  const commandRunner = await createWindowsProcessRunner({
-    allowedExecutables: [executable],
-    workingDirectory: directory,
-    concurrency: 2,
-    // The image pull of the pre-flight is the longest command.
-    maxTimeoutMs: 600_000,
-  });
+  // that stays alive never blocks a recovery. They queue for its two slots.
+  const commandRunner = queuedRunner(
+    await createWindowsProcessRunner({
+      allowedExecutables: [executable],
+      workingDirectory: directory,
+      concurrency: 2,
+      // The image pull of the pre-flight is the longest command.
+      maxTimeoutMs: 600_000,
+    }),
+    2,
+  );
   const command = dockerCommand(
     commandRunner,
     executable,
