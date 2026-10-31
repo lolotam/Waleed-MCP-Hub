@@ -48,7 +48,11 @@ export {
 export { localRuntimeAdapters } from './adapters/local-runtime.js';
 export { windowsAgentTargets } from './integrations/targets.js';
 export { agentFiles } from './integrations/files.js';
-export { createAgentBridge } from './integrations/bridge.js';
+export {
+  createAgentBridge,
+  runAgentBridge,
+  type AgentBridgeOptions,
+} from './integrations/bridge.js';
 export { addManualMcp, writeCredentialValues } from './integrations/manual.js';
 export {
   createPackageService,

@@ -59,6 +59,7 @@ import { verifyPackage } from '../packages/verify.js';
 import {
   createSessionPool,
   type OperationLease,
+  type PoolLimits,
   type SessionPool,
 } from './session-pool.js';
 
@@ -130,6 +131,34 @@ export type BridgeConnect = (
 export interface ShutdownBudget {
   deadline?: number;
 }
+
+// The limits of the pool of one bridge. Test-only: the production bridge
+// command never passes them, and no environment variable, file or registry
+// field can set them. Only the idle limit may be shortened, and only to a
+// value the production limit already allows.
+export interface AgentBridgeOptions {
+  limits?: {
+    idleMs?: number;
+  };
+}
+
+// The idle limit of the pool: five minutes in production, shorter only in a
+// test that asks for it.
+const minimumIdleMs = 100;
+const maximumIdleMs = 3_600_000;
+const poolLimits = (
+  options?: AgentBridgeOptions,
+): Partial<PoolLimits> | undefined => {
+  const idleMs = options?.limits?.idleMs;
+  if (idleMs === undefined) return undefined;
+  if (
+    !Number.isInteger(idleMs) ||
+    idleMs < minimumIdleMs ||
+    idleMs > maximumIdleMs
+  )
+    throw new Error('The pool limits of the bridge are invalid.');
+  return { idleMs };
+};
 
 // The Docker runtime of one bridge: the Docker session and the ownership
 // manager of its agent.
@@ -456,6 +485,7 @@ function createSessionBridge(
   connect: BridgeConnect,
   server: Server,
   budget?: ShutdownBudget,
+  limits?: Partial<PoolLimits>,
 ): SessionBridge {
   let closed = false;
   // The peer's own tool list changes reach the agent, at most once a second.
@@ -523,6 +553,7 @@ function createSessionBridge(
     now: () => session.now(),
     setTimer: (callback, ms) => session.setTimer(callback, ms),
     clearTimer: (handle) => session.clearTimer(handle),
+    ...(limits ? { limits } : {}),
   });
 
   // The validation before one SDK request. A boot mismatch is not a failure:
@@ -1003,6 +1034,7 @@ export function createAgentBridge(
   connect: BridgeConnect,
   session?: BridgeSession,
   budget?: ShutdownBudget,
+  limits?: Partial<PoolLimits>,
 ) {
   const server = new Server(
     { name: 'waleed-mcp-hub', version: '0.1.0' },
@@ -1034,7 +1066,7 @@ export function createAgentBridge(
     }
   };
   const bridge = session
-    ? createSessionBridge(session, connect, server, budget)
+    ? createSessionBridge(session, connect, server, budget, limits)
     : undefined;
   // The bridge tool name of one tool, and the route it belongs to.
   const register = (connector: Connector, tool: Tool, tools: Tool[]) => {
@@ -1297,8 +1329,13 @@ async function readProtectedJson(path: string) {
     bytes.fill(0);
   }
 }
-export async function runAgentBridge(registry: string, agentId: string) {
+export async function runAgentBridge(
+  registry: string,
+  agentId: string,
+  options?: AgentBridgeOptions,
+) {
   IntegrationAgentIdSchema.parse(agentId);
+  const limits = poolLimits(options);
   const directory = dirname(registry);
   const safetyPath = join(directory, 'safety.json');
   const bootPath = join(directory, 'boot.json');
@@ -1535,7 +1572,7 @@ export async function runAgentBridge(registry: string, agentId: string) {
     }
   };
   const initial = await read();
-  const server = createAgentBridge(read, connect, session, budget);
+  const server = createAgentBridge(read, connect, session, budget, limits);
   await server.connect(new StdioServerTransport());
   // The Docker connectors of the agent, as the registry sees them now: the
   // recovery of the agent is owed to every agent that owns an enabled Docker
