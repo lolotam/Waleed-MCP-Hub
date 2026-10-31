@@ -167,6 +167,9 @@ describe.skipIf(!availability.available)(
       );
       let replacement: ReturnType<typeof spawn> | undefined;
       let nonce = '';
+      // Set when the test itself failed: its error is the one reported.
+      let bodyFailed = false;
+      let teardownError: unknown;
       try {
         nonce = await new Promise<string>((resolve, reject) => {
           const timer = setTimeout(
@@ -237,16 +240,30 @@ describe.skipIf(!availability.available)(
           return (await markerFiles(directory, 'opencode')).length === 0;
         });
         expect(await markerFiles(directory, 'opencode')).toHaveLength(0);
+      } catch (error) {
+        bodyFailed = true;
+        throw error;
       } finally {
-        await stopBridge(child);
-        await stopBridge(replacement);
-        await removeTestContainers(cli, {
-          installId,
-          agentId: 'opencode',
-          nonce,
-        });
-        await rm(directory, { recursive: true, force: true, maxRetries: 4 });
+        try {
+          await stopBridge(child);
+          await stopBridge(replacement);
+          await removeTestContainers(cli, {
+            installId,
+            agentId: 'opencode',
+            nonce,
+          });
+        } catch (error) {
+          teardownError = error;
+          // A failed test keeps its own error; the teardown failure is still
+          // shown, since it can leave a container behind.
+          if (bodyFailed) console.error(error);
+        } finally {
+          // The data directory goes even when the teardown failed.
+          await rm(directory, { recursive: true, force: true, maxRetries: 4 });
+        }
       }
+      // Reached only when the test itself passed.
+      if (teardownError !== undefined) throw teardownError;
     }, 240_000);
   },
 );

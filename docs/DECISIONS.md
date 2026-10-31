@@ -752,6 +752,15 @@ Rules that make reuse no weaker than one peer per call:
     are refused until the token is refreshed. The refusal keeps the pooled
     peer, so no replacement peer is launched for each refused call, and a
     stateful session survives until 30 s before the expiry.
+15. **Link swapped in during a protected read.** `readProtectedText` refuses
+    a path that already goes through a link, opens the file with `O_NOFOLLOW`
+    on POSIX, and after reading refuses a handle that is not the file the
+    path names. A same-user process that replaces a folder of the path with
+    a link between the check and the open can still make the open follow it
+    (on Windows also to a network path, which can start a network sign-in)
+    before the read is refused. Node has no per-component no-follow open.
+    Same threat model as D024 residual 2; the files live in the user's own
+    profile folder.
 
 **Implementation choices accepted in review.** Docker ownership (T6) differs
 from the first plan in these conservative ways:
