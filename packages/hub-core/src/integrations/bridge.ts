@@ -487,8 +487,9 @@ export function bridgeToolName(
   connector: Pick<Connector, 'id' | 'name'>,
   tool: string,
   taken: ReadonlySet<string>,
+  separator: '__' | '_' = '__',
 ) {
-  const name = `${slug(connector.name).toLowerCase() || 'connector'}__${slug(tool) || 'tool'}`;
+  const name = `${slug(connector.name).toLowerCase() || 'connector'}${separator}${slug(tool) || 'tool'}`;
   if (name.length <= toolNameLimit && !taken.has(name)) return name;
   // Too long or colliding: keep the readable prefix and add a stable short hash.
   const suffix = `_${hashData([connector.id, tool]).slice(0, 6)}`;
@@ -1132,6 +1133,7 @@ export function createAgentBridge(
   session?: BridgeSession,
   budget?: ShutdownBudget,
   limits?: Partial<PoolLimits>,
+  toolSeparator: '__' | '_' = '__',
 ) {
   const server = new Server(
     { name: 'waleed-mcp-hub', version: '0.1.0' },
@@ -1167,7 +1169,12 @@ export function createAgentBridge(
     : undefined;
   // The bridge tool name of one tool, and the route it belongs to.
   const register = (connector: Connector, tool: Tool, tools: Tool[]) => {
-    const name = bridgeToolName(connector, tool.name, new Set(names.keys()));
+    const name = bridgeToolName(
+      connector,
+      tool.name,
+      new Set(names.keys()),
+      toolSeparator,
+    );
     names.set(name, {
       connectorId: connector.id,
       hash: definitionHash(connector),
@@ -1778,7 +1785,16 @@ export async function runAgentBridge(
     }
   };
   const initial = await read();
-  const server = createAgentBridge(read, connect, session, budget, limits);
+  // Grok reserves "__" for its server/tool qualifier and rejects tools that
+  // contain another qualifier. Slugs already collapse repeated underscores.
+  const server = createAgentBridge(
+    read,
+    connect,
+    session,
+    budget,
+    limits,
+    agentId === 'grok' ? '_' : '__',
+  );
   await server.connect(new StdioServerTransport());
   // The Docker connectors of the agent, as the registry sees them now: the
   // recovery of the agent is owed to every agent that owns an enabled Docker
