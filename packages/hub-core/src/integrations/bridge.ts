@@ -1,5 +1,5 @@
 import { lstat, open } from 'node:fs/promises';
-import { watchFile, unwatchFile } from 'node:fs';
+import { constants as fsConstants, watchFile, unwatchFile } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -26,7 +26,10 @@ import {
   type Connector,
   type HubState,
 } from '@waleed/contracts';
-import { assertNoLinks } from '../adapters/managed-files.js';
+import {
+  assertNoLinks,
+  assertSafePathText,
+} from '../adapters/managed-files.js';
 import { windowsSecretStore } from '../adapters/secrets/windows.js';
 import { createBindingResolver, type SecretLease } from '../auth/bindings.js';
 import {
@@ -1396,30 +1399,50 @@ export function createAgentBridge(
 const protectedLimit = 4 * 1024 * 1024;
 const protectedChunk = 64 * 1024;
 
-// Reads a protected file through the handle that was checked: the opened file
-// must be the very file the path named, so a file swapped in between the
-// check and the read is refused. The handle is read in bounded chunks, so a
-// file that grows after the check is refused once it passes the limit, and
-// the path is checked again after the read, so a file swapped in during the
-// read is refused too. Every buffer is zeroed on every path.
+// A protected file is opened for reading only. On POSIX the open never blocks
+// on a FIFO, never follows a link in the last component and never makes a
+// terminal the controlling one; Windows has no FIFOs and its text guard below
+// refuses UNC, device-namespace and pipe prefixes.
+const protectedOpenFlags =
+  process.platform === 'win32'
+    ? fsConstants.O_RDONLY
+    : fsConstants.O_RDONLY |
+      fsConstants.O_NONBLOCK |
+      fsConstants.O_NOFOLLOW |
+      fsConstants.O_NOCTTY;
+
+// Reads a protected file through its open handle. Only the text of the path
+// is checked before the open (a UNC, device-namespace or pipe prefix is never
+// opened; any other non-file, such as a device node, is opened read-only and
+// then refused); every file-system check runs afterwards against the handle,
+// so no check result is ever used to open the path: the path must still name
+// the very file that was opened, without a link, or the read is refused. The
+// handle is read in bounded chunks, so a file that grows after the check is
+// refused once it passes the limit, and the path is checked again after the
+// read, so a file replaced during the read is refused too. Every buffer is
+// zeroed on every path.
 export async function readProtectedText(path: string) {
-  await assertNoLinks(path);
-  // The identities are compared as exact integers: a Windows file id does
-  // not fit in a JavaScript number.
-  const info = await lstat(path, { bigint: true });
-  if (!info.isFile() || info.nlink !== 1n || info.size > BigInt(protectedLimit))
-    throw new Error();
-  const file = await open(path, 'r');
+  assertSafePathText(path);
+  const file = await open(path, protectedOpenFlags);
   const chunks: Buffer[] = [];
   let bytes: Buffer | undefined;
   try {
+    // The identities are compared as exact integers: a Windows file id does
+    // not fit in a JavaScript number.
     const opened = await file.stat({ bigint: true });
     if (
       !opened.isFile() ||
-      opened.ino !== info.ino ||
-      opened.dev !== info.dev ||
       opened.nlink !== 1n ||
       opened.size > BigInt(protectedLimit)
+    )
+      throw new Error();
+    await assertNoLinks(path);
+    const named = await lstat(path, { bigint: true });
+    if (
+      !named.isFile() ||
+      named.ino !== opened.ino ||
+      named.dev !== opened.dev ||
+      named.nlink !== 1n
     )
       throw new Error();
     // At most one byte more than the limit is ever read or allocated: a

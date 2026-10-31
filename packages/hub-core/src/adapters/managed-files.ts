@@ -28,9 +28,16 @@ const conflict = () =>
     'conflict',
     'Managed file changed or is unsafe. Re-preview; no foreign file was intentionally overwritten.',
   );
-export async function assertNoLinks(path: string, missing = false) {
-  if (!isAbsolute(path) || /^\\\\/.test(path) || /[\0\r\n]/.test(path))
+// The text of a path the hub may touch: absolute, with no UNC, device or
+// named-pipe prefix (Windows accepts either separator, so any two leading
+// separators are refused) and no control character. It reads only the
+// string, so it can run before a file is opened.
+export function assertSafePathText(path: string) {
+  if (!isAbsolute(path) || /^[\\/]{2}/.test(path) || /[\0\r\n]/.test(path))
     throw conflict();
+}
+export async function assertNoLinks(path: string, missing = false) {
+  assertSafePathText(path);
   let current = parse(path).root;
   for (const part of relative(current, path).split(sep)) {
     current = join(current, part);

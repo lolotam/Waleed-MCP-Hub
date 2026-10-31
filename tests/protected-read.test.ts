@@ -16,6 +16,8 @@ const hooks = vi.hoisted(() => ({
   shortReads: false,
   // Every distinct buffer the reader handed to the handle.
   buffers: new Set<Buffer>(),
+  // Every path the reader opened.
+  opened: [] as string[],
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -73,8 +75,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       { ino: (result.ino as bigint) + 1n },
     );
   }) as typeof actual.lstat;
-  const open = (async (...args: Parameters<typeof actual.open>) =>
-    wrap(await actual.open(...args))) as typeof actual.open;
+  const open = (async (...args: Parameters<typeof actual.open>) => {
+    hooks.opened.push(String(args[0]));
+    return wrap(await actual.open(...args));
+  }) as typeof actual.open;
   return { ...actual, default: { ...actual, lstat, open }, lstat, open };
 });
 
@@ -92,6 +96,7 @@ beforeEach(async () => {
   hooks.replaced = false;
   hooks.shortReads = false;
   hooks.buffers.clear();
+  hooks.opened = [];
   directory = await mkdtemp(join(tmpdir(), 'wmh-protected-'));
 });
 afterEach(async () => {
@@ -141,5 +146,21 @@ describe('protected file read', () => {
     hooks.replaced = true;
     await expect(readProtectedText(path)).rejects.toBeDefined();
     expect(hooks.readDone).toBe(true);
+  });
+
+  it('never opens a network, device or pipe path, or a relative one', async () => {
+    for (const path of [
+      String.raw`\\server\share\safety.json`,
+      String.raw`\\.\pipe\wmh-sample`,
+      String.raw`\\?\C:\safety.json`,
+      '//server/share/safety.json',
+      '//./pipe/wmh-sample',
+      String.raw`/\.\pipe\wmh-sample`,
+      String.raw`\/server/share/safety.json`,
+      'safety.json',
+      join(directory, 'safety\n.json'),
+    ])
+      await expect(readProtectedText(path)).rejects.toBeDefined();
+    expect(hooks.opened).toEqual([]);
   });
 });
