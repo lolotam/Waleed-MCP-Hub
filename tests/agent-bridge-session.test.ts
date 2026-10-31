@@ -1290,7 +1290,7 @@ describe('agent bridge session mode', () => {
     }
   });
 
-  it('connects a docker connector once per request in session mode', async () => {
+  it('pools a docker connector across requests', async () => {
     const harness = await createHarness({ state: profileState(['docker']) });
     try {
       const tools = await harness.agent.listTools();
@@ -1302,12 +1302,15 @@ describe('agent bridge session mode', () => {
       expect(
         await harness.agent.callTool({ name, arguments: {} }),
       ).toMatchObject({ content: [{ text: 'synthetic success' }] });
-      // The listing and the two calls connect once each.
-      expect(harness.connects).toHaveLength(3);
-      expect(harness.peers.every((peer) => peer.disposed === 1)).toBe(true);
+      // The listing and the two calls share one pooled peer.
+      expect(harness.connects).toHaveLength(1);
+      expect(harness.peers).toHaveLength(1);
+      expect(harness.peers[0]?.disposed).toBe(0);
     } finally {
       await harness.agent.close();
       await harness.bridge.close();
     }
+    // The pooled peer is disposed once, when the bridge closes.
+    expect(harness.peers[0]?.disposed).toBe(1);
   });
 });

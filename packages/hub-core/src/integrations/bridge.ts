@@ -2,6 +2,7 @@ import { readFile, lstat } from 'node:fs/promises';
 import { watchFile, unwatchFile } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -37,8 +38,22 @@ import { createWindowsProcessRunner } from '../adapters/native/process-runner.js
 import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
 import { approved, definitionHash, hashData } from '../runtime/registry.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
-import { readBootRecord } from '../runtime/boot.js';
-import { dockerAgentTransport } from './docker-transport.js';
+import { readBootRecord, readInstallRecord } from '../runtime/boot.js';
+import {
+  createDockerSession,
+  dockerAgentTransport,
+  type DockerSession,
+} from './docker-transport.js';
+import {
+  agentOwesRecovery,
+  createDockerOwnership,
+  createDockerRuntimeOnce,
+  listenBridge,
+  scanAgentMarkers,
+  startDockerRecovery,
+  type BridgeListener,
+  type DockerOwnership,
+} from './docker-ownership.js';
 import { packagesRoot } from '../packages/store.js';
 import { verifyPackage } from '../packages/verify.js';
 import {
@@ -49,7 +64,10 @@ import {
 
 export interface BridgePeer {
   client: Client;
-  dispose(): Promise<void>;
+  // Closes the peer. The deadline is the absolute end of the shutdown
+  // sequence when one is running: the cleanup of the peer runs on the
+  // budget that is left.
+  dispose(deadline?: number): Promise<void>;
   assertPublic(value: unknown): void;
   // The earliest expiry of the peer's lease, when it resolved one.
   notAfter?: number;
@@ -74,6 +92,8 @@ const listTimeout = 20_000;
 const leaseMargin = 30_000;
 // The shutdown sequence gives the pooled peers five seconds to go away.
 const poolCloseDeadline = 5_000;
+// The interval of the retry of the startup recovery of the agent.
+const RECOVERY_RETRY_INTERVAL_MS = 60_000;
 // A hub that restarts again during one operation ends it: the peer is replaced
 // a few times at most.
 const maxReplacements = 3;
@@ -103,8 +123,115 @@ export type BridgeConnect = (
   died?: () => void,
 ) => Promise<BridgePeer>;
 
+// The shutdown budget of the bridge: the absolute end of the shutdown
+// sequence. The pooled peers and the cleanup of a startup that failed
+// during the shutdown share it, so no cleanup ever runs on a fresh bound
+// while the bridge is leaving.
+export interface ShutdownBudget {
+  deadline?: number;
+}
+
+// The Docker runtime of one bridge: the Docker session and the ownership
+// manager of its agent.
+export interface BridgeDockerRuntime {
+  session: DockerSession;
+  ownership: DockerOwnership;
+  // The liveness listener of the bridge: it exists for the whole life of
+  // the bridge.
+  listener: BridgeListener;
+}
+
 // The remote connector of the session mode.
 type RemoteConnector = Extract<Connector, { executionMode: 'remote' }>;
+
+// One pooled peer of the session mode: a native process or a Docker
+// container. The death of the transport is observed before the handshake and
+// the operation window covers the handshake and every operation of the peer.
+async function pooledSessionPeer(
+  client: Client,
+  transport: ContainedStdioTransport,
+  died: (() => void) | undefined,
+  cleanup: (deadline?: number) => Promise<void>,
+  lease: SecretLease | undefined,
+): Promise<BridgePeer> {
+  // The window opens before the handshake, so `initialize` counts against the
+  // first operation. It stays open until the first operation ends.
+  let windowOpen = false;
+  const beginOperation = () => {
+    if (windowOpen) return;
+    transport.beginOperation();
+    windowOpen = true;
+  };
+  const endOperation = () => {
+    if (!windowOpen) return;
+    transport.endOperation();
+    windowOpen = false;
+  };
+  const sessionTransport: Transport = {
+    onmessage: undefined,
+    onerror: undefined,
+    onclose: undefined,
+    setProtocolVersion: (version) => transport.setProtocolVersion?.(version),
+    async start() {
+      await transport.start();
+      beginOperation();
+    },
+    async send(message) {
+      await transport.send(message);
+    },
+    async close() {
+      await transport.close();
+    },
+  };
+  transport.onmessage = (message, extra) =>
+    sessionTransport.onmessage?.(message, extra);
+  // The death of the transport is observed before the handshake, and only
+  // once.
+  let dead = false;
+  const signalDeath = () => {
+    if (dead) return;
+    dead = true;
+    died?.();
+  };
+  transport.onerror = (error) => {
+    signalDeath();
+    sessionTransport.onerror?.(error);
+  };
+  transport.onclose = () => {
+    signalDeath();
+    sessionTransport.onclose?.();
+  };
+  // A protocol error the SDK raises (an unknown response id, a malformed
+  // notification) ends the session as a transport error does, from the
+  // handshake on.
+  client.onerror = () => {
+    signalDeath();
+  };
+  await client.connect(sessionTransport, { timeout: 20000 });
+  return {
+    client,
+    ...(lease?.notAfter === undefined ? {} : { notAfter: lease.notAfter }),
+    beginOperation,
+    endOperation,
+    async dispose(deadline?: number) {
+      try {
+        await client.close();
+      } finally {
+        try {
+          await cleanup(deadline);
+        } finally {
+          lease?.dispose();
+        }
+      }
+    },
+    assertPublic(value) {
+      assertNoCredentialEcho(value, [
+        ...Object.values(lease?.environment ?? {}),
+        ...Object.values(lease?.headers ?? {}),
+      ]);
+    },
+  };
+}
 
 // The pooled remote peer of the session mode: one HTTP session for the whole
 // life of the pool entry. The cleanup is idempotent and terminates the remote
@@ -253,9 +380,9 @@ function credentialStamp(connector: Connector, state: HubState) {
 
 // Provider cleanup diagnostics can contain credentials. Recovery evidence stays
 // local; a failed peer must never expose a raw SDK/process error to an agent.
-async function disposePeer(peer: BridgePeer | undefined) {
+async function disposePeer(peer: BridgePeer | undefined, deadline?: number) {
   try {
-    await peer?.dispose();
+    await peer?.dispose(deadline);
   } catch {
     /* Scoped Docker markers remain blocking. */
   }
@@ -328,6 +455,7 @@ function createSessionBridge(
   session: BridgeSession,
   connect: BridgeConnect,
   server: Server,
+  budget?: ShutdownBudget,
 ): SessionBridge {
   let closed = false;
   // The peer's own tool list changes reach the agent, at most once a second.
@@ -363,7 +491,8 @@ function createSessionBridge(
       if (
         !connector ||
         (connector.executionMode !== 'native' &&
-          connector.executionMode !== 'remote') ||
+          connector.executionMode !== 'remote' &&
+          connector.executionMode !== 'docker') ||
         !connector.enabled ||
         !approved(connector)
       )
@@ -388,8 +517,8 @@ function createSessionBridge(
         seq: snapshot.seq,
       };
     },
-    async dispose(pooled) {
-      await disposePeer(pooled.peer);
+    async dispose(pooled, deadline) {
+      await disposePeer(pooled.peer, deadline);
     },
     now: () => session.now(),
     setTimer: (callback, ms) => session.setTimer(callback, ms),
@@ -629,15 +758,251 @@ function createSessionBridge(
       closed = true;
       if (changedTimer !== undefined) session.clearTimer(changedTimer);
       changedTimer = undefined;
+      // One absolute deadline for every cleanup of this shutdown: the
+      // pooled peers and a startup that fails while the bridge leaves
+      // share it.
+      if (budget) budget.deadline = session.now() + poolCloseDeadline;
       await pool.close(poolCloseDeadline);
     },
   };
+}
+
+// The Docker peer of the bridge: the admission of the agent, the launch of
+// the container and the handshake. A startup that fails during the
+// shutdown cleans up on the budget that is left of the shutdown.
+export async function connectDockerPeer(
+  connector: Extract<Connector, { executionMode: 'docker' }>,
+  signal: AbortSignal,
+  died: (() => void) | undefined,
+  runtime: BridgeDockerRuntime,
+  budget: ShutdownBudget,
+): Promise<BridgePeer> {
+  const client = new Client(
+    { name: 'waleed-managed-agent', version: '0.1.0' },
+    { capabilities: {} },
+  );
+  let docker: Awaited<ReturnType<typeof dockerAgentTransport>> | undefined;
+  try {
+    // The admission: the recovery round of the agent and its refusal
+    // rules run before any container starts.
+    await runtime.ownership.admit();
+    docker = await dockerAgentTransport(
+      connector,
+      signal,
+      runtime.session,
+      runtime.ownership,
+    );
+    // The container peer: the same window and death wiring as a native
+    // process, whether it is pooled or not.
+    return await pooledSessionPeer(
+      client,
+      docker.transport,
+      died,
+      async (deadline) => {
+        await docker?.dispose(deadline);
+      },
+      undefined,
+    );
+  } catch (error) {
+    try {
+      await client.close();
+    } finally {
+      try {
+        // The cleanup of a failed startup runs on the budget of the
+        // shutdown that is running: no fresh bound is created here.
+        await docker?.dispose(budget.deadline);
+      } finally {
+        /* The container of a failed startup is gone or owed to the
+           recovery. */
+      }
+    }
+    throw error;
+  }
+}
+
+// The Docker runtime of one bridge: the installation id of install.json,
+// the liveness listener of this bridge and the ownership of its agent. A
+// failed attempt leaves no listener behind, so the next attempt may listen
+// on the same pipe again.
+export interface BridgeDockerRuntimeOptions {
+  directory: string;
+  agentId: string;
+  bridgeId: string;
+  now(): number;
+  setTimer(callback: () => void, ms: number): unknown;
+  clearTimer(handle: unknown): void;
+  // The factory of the Docker session: the production code discovers the
+  // CLI of the machine.
+  createSession?: (
+    directory: string,
+    signal: AbortSignal,
+    now: () => number,
+  ) => Promise<DockerSession>;
+}
+
+export async function createBridgeDockerRuntime(
+  options: BridgeDockerRuntimeOptions,
+): Promise<BridgeDockerRuntime> {
+  // The installation id names every pipe and every label of this
+  // installation.
+  const install = await readInstallRecord(options.directory);
+  // The liveness listener exists before any marker or container; a
+  // listener that fails refuses the Docker peers of this bridge.
+  const listener = await listenBridge(install.installId, options.bridgeId);
+  try {
+    const session = await (
+      options.createSession ??
+      ((directory, signal, now) => createDockerSession(directory, signal, now))
+    )(options.directory, AbortSignal.timeout(20_000), options.now);
+    const ownership = createDockerOwnership({
+      docker: session.command,
+      directory: options.directory,
+      agentId: options.agentId,
+      bridgeId: options.bridgeId,
+      installId: install.installId,
+      now: options.now,
+      setTimer: options.setTimer,
+      clearTimer: options.clearTimer,
+    });
+    return { session, ownership, listener };
+  } catch (error) {
+    // The failed attempt closes the listener it opened: the next attempt
+    // may listen on the same pipe again.
+    await listener.close();
+    throw error;
+  }
+}
+
+// The retry of the startup recovery of the agent: a bridge whose Docker
+// initialization failed tries again, because the Docker daemon of the
+// machine may come up after the bridge started. The retry continues only
+// while the agent can still owe a cleanup, and the shutdown cancels it.
+export interface StartupRecoveryRetryOptions {
+  // Whether the agent can still owe a cleanup: a marker, an uncertain
+  // inventory, an enabled Docker connector or the durable flag.
+  due(): Promise<boolean>;
+  // One recovery round of the agent. It throws when the Docker
+  // initialization failed.
+  recover(): Promise<void>;
+  setTimer(callback: () => void, ms: number): unknown;
+  clearTimer(handle: unknown): void;
+  intervalMs?: number;
+}
+
+export interface StartupRecoveryRetry {
+  // One attempt: a failed round arms the next one.
+  attempt(): Promise<void>;
+  // The shutdown: the pending attempt is cancelled.
+  stop(): void;
+  // Whether an attempt is armed.
+  readonly pending: boolean;
+}
+
+export function createStartupRecoveryRetry(
+  options: StartupRecoveryRetryOptions,
+): StartupRecoveryRetry {
+  const intervalMs = options.intervalMs ?? RECOVERY_RETRY_INTERVAL_MS;
+  let timer: unknown;
+  let stopped = false;
+  function arm() {
+    if (stopped || timer !== undefined) return;
+    timer = options.setTimer(() => {
+      timer = undefined;
+      void attempt();
+    }, intervalMs);
+  }
+  async function attempt() {
+    if (stopped) return;
+    try {
+      await options.recover();
+      // The round ran: the ownership manager owns the schedule from now on.
+      return;
+    } catch {
+      // The Docker initialization failed: the agent may still owe a cleanup.
+    }
+    if (stopped) return;
+    let owed: boolean;
+    try {
+      owed = await options.due();
+    } catch {
+      // The scan cannot decide: the agent may still owe a cleanup.
+      owed = true;
+    }
+    if (owed) arm();
+  }
+  return {
+    attempt,
+    stop() {
+      stopped = true;
+      if (timer !== undefined) {
+        options.clearTimer(timer);
+        timer = undefined;
+      }
+    },
+    get pending() {
+      return timer !== undefined;
+    },
+  };
+}
+
+// The startup recovery of the agent at bridge start: the marker folder of
+// the agent is checked without the Docker runtime, so a bridge whose agent
+// owns neither a marker nor an enabled Docker connector never creates it. A
+// bridge whose Docker initialization failed retries the recovery, because
+// the Docker daemon of the machine may come up after the bridge started. The
+// retry continues only while the agent can still owe a cleanup, and the
+// shutdown cancels it.
+export interface BridgeStartupRecoveryOptions {
+  directory: string;
+  agentId: string;
+  // Whether the agent owns an enabled Docker connector.
+  hasDockerConnector(): Promise<boolean>;
+  // The runtime of the bridge: it is created only when a recovery is due.
+  runtime(): Promise<DockerOwnership>;
+  setTimer(callback: () => void, ms: number): unknown;
+  clearTimer(handle: unknown): void;
+  intervalMs?: number;
+}
+
+export interface BridgeStartupRecovery {
+  // One attempt at bridge start: a failed Docker initialization arms the
+  // next one.
+  attempt(): Promise<void>;
+  // The shutdown: the pending retry is cancelled.
+  stop(): void;
+}
+
+export function createBridgeStartupRecovery(
+  options: BridgeStartupRecoveryOptions,
+): BridgeStartupRecovery {
+  const retry = createStartupRecoveryRetry({
+    due: async () =>
+      agentOwesRecovery(
+        await scanAgentMarkers(options.directory, options.agentId),
+        await options.hasDockerConnector(),
+      ),
+    recover: async () => {
+      await startDockerRecovery({
+        directory: options.directory,
+        agentId: options.agentId,
+        hasDockerConnector: await options.hasDockerConnector(),
+        runtime: options.runtime,
+      });
+    },
+    setTimer: options.setTimer,
+    clearTimer: options.clearTimer,
+    ...(options.intervalMs === undefined
+      ? {}
+      : { intervalMs: options.intervalMs }),
+  });
+  return { attempt: retry.attempt, stop: retry.stop };
 }
 
 export function createAgentBridge(
   read: () => Promise<HubState>,
   connect: BridgeConnect,
   session?: BridgeSession,
+  budget?: ShutdownBudget,
 ) {
   const server = new Server(
     { name: 'waleed-mcp-hub', version: '0.1.0' },
@@ -669,7 +1034,7 @@ export function createAgentBridge(
     }
   };
   const bridge = session
-    ? createSessionBridge(session, connect, server)
+    ? createSessionBridge(session, connect, server, budget)
     : undefined;
   // The bridge tool name of one tool, and the route it belongs to.
   const register = (connector: Connector, tool: Tool, tools: Tool[]) => {
@@ -706,7 +1071,8 @@ export function createAgentBridge(
           bridge &&
           snapshot &&
           (connector.executionMode === 'native' ||
-            connector.executionMode === 'remote')
+            connector.executionMode === 'remote' ||
+            connector.executionMode === 'docker')
         ) {
           // A pooled peer: one peer for the whole listing.
           let listed: Tool[];
@@ -803,7 +1169,8 @@ export function createAgentBridge(
         if (
           session &&
           (connector.executionMode === 'native' ||
-            connector.executionMode === 'remote')
+            connector.executionMode === 'remote' ||
+            connector.executionMode === 'docker')
         ) {
           // The call's deadline runs on the session clock and ends with the
           // call: a finished request leaves no deadline that could fire later.
@@ -1015,17 +1382,60 @@ export async function runAgentBridge(registry: string, agentId: string) {
     },
   };
   let backend: ReturnType<typeof windowsSecretStore> | undefined;
+  // The Docker runtime of this bridge: the installation id of install.json,
+  // the liveness listener of this bridge and the ownership of its agent. A
+  // bridge that cannot read the install record refuses Docker peers; every
+  // other mode is unaffected.
+  const bridgeId = randomUUID();
+  // The runtime that exists, if any: the shutdown closes its ownership and
+  // never creates it.
+  let dockerState: BridgeDockerRuntime | undefined;
+  // One runtime per bridge: the whole initialization is memoized before its
+  // first await, so the startup recovery and the first admission share one
+  // ownership manager and one live set. A failed attempt leaves no listener
+  // behind and the next admission tries again.
+  const dockerRuntime = createDockerRuntimeOnce(async () => {
+    const runtime = await createBridgeDockerRuntime({
+      directory,
+      agentId,
+      bridgeId,
+      now: session.now,
+      setTimer: session.setTimer,
+      clearTimer: session.clearTimer,
+    });
+    dockerState = runtime;
+    return runtime;
+  });
+  // The budget of the shutdown sequence: the cleanup of a startup that
+  // fails while the bridge leaves runs on it.
+  const budget: ShutdownBudget = {};
   const connect = async (
     connector: Connector,
     signal: AbortSignal,
     diedCallback?: () => void,
   ): Promise<BridgePeer> => {
+    if (connector.executionMode === 'docker') {
+      // A Docker connector that needs protected values is refused before the
+      // credentials are resolved and before the Docker runtime exists.
+      if (
+        Object.keys(connector.secretBindings).length ||
+        Object.keys(connector.headerBindings).length
+      )
+        throw new RuntimeFault('dependency_unavailable');
+      const runtime = await dockerRuntime();
+      return await connectDockerPeer(
+        connector,
+        signal,
+        diedCallback,
+        runtime,
+        budget,
+      );
+    }
     let lease: SecretLease | undefined;
     const client = new Client(
       { name: 'waleed-managed-agent', version: '0.1.0' },
       { capabilities: {} },
     );
-    let docker: Awaited<ReturnType<typeof dockerAgentTransport>> | undefined;
     try {
       // A managed install is verified before the secret is resolved and before
       // any process starts.
@@ -1041,10 +1451,7 @@ export async function runAgentBridge(registry: string, agentId: string) {
           signal,
         );
       }
-      if (connector.executionMode === 'docker') {
-        docker = await dockerAgentTransport(connector, directory, signal);
-        await client.connect(docker.transport, { timeout: 20000 });
-      } else if (connector.executionMode === 'remote') {
+      if (connector.executionMode === 'remote') {
         if (!diedCallback) {
           // Not pooled: one peer per request, as before.
           await client.connect(
@@ -1091,86 +1498,15 @@ export async function runAgentBridge(registry: string, agentId: string) {
           },
           signal,
         );
-        // The window opens before the handshake, so `initialize` counts against
-        // the first operation. It stays open until the first operation ends.
-        let windowOpen = false;
-        const beginOperation = () => {
-          if (windowOpen) return;
-          transport.beginOperation();
-          windowOpen = true;
-        };
-        const endOperation = () => {
-          if (!windowOpen) return;
-          transport.endOperation();
-          windowOpen = false;
-        };
-        const sessionTransport: Transport = {
-          onmessage: undefined,
-          onerror: undefined,
-          onclose: undefined,
-          setProtocolVersion: (version) =>
-            transport.setProtocolVersion?.(version),
-          async start() {
-            await transport.start();
-            beginOperation();
-          },
-          async send(message) {
-            await transport.send(message);
-          },
-          async close() {
-            await transport.close();
-          },
-        };
-        transport.onmessage = (message, extra) =>
-          sessionTransport.onmessage?.(message, extra);
-        // The death of the transport is observed before the handshake, and
-        // only once.
-        let died = false;
-        const signalDeath = () => {
-          if (died) return;
-          died = true;
-          diedCallback?.();
-        };
-        transport.onerror = (error) => {
-          signalDeath();
-          sessionTransport.onerror?.(error);
-        };
-        transport.onclose = () => {
-          signalDeath();
-          sessionTransport.onclose?.();
-        };
-        // A protocol error the SDK raises (an unknown response id, a malformed
-        // notification) ends the session as a transport error does, from the
-        // handshake on.
-        client.onerror = () => {
-          signalDeath();
-        };
-        await client.connect(sessionTransport, { timeout: 20000 });
-        return {
+        return await pooledSessionPeer(
           client,
-          ...(lease?.notAfter === undefined
-            ? {}
-            : { notAfter: lease.notAfter }),
-          beginOperation,
-          endOperation,
-          async dispose() {
-            try {
-              await client.close();
-            } finally {
-              try {
-                await docker?.dispose();
-              } finally {
-                lease?.dispose();
-              }
-            }
+          transport,
+          diedCallback,
+          async () => {
+            /* A native peer owns no container. */
           },
-          assertPublic(value) {
-            assertNoCredentialEcho(value, [
-              ...Object.values(lease?.environment ?? {}),
-              ...Object.values(lease?.headers ?? {}),
-            ]);
-          },
-        };
+          lease,
+        );
       }
       return {
         client,
@@ -1179,11 +1515,7 @@ export async function runAgentBridge(registry: string, agentId: string) {
           try {
             await client.close();
           } finally {
-            try {
-              await docker?.dispose();
-            } finally {
-              lease?.dispose();
-            }
+            lease?.dispose();
           }
         },
         assertPublic(value) {
@@ -1197,18 +1529,50 @@ export async function runAgentBridge(registry: string, agentId: string) {
       try {
         await client.close();
       } finally {
-        try {
-          await docker?.dispose();
-        } finally {
-          lease?.dispose();
-        }
+        lease?.dispose();
       }
       throw error;
     }
   };
-  await read();
-  const server = createAgentBridge(read, connect, session);
+  const initial = await read();
+  const server = createAgentBridge(read, connect, session, budget);
   await server.connect(new StdioServerTransport());
+  // The Docker connectors of the agent, as the registry sees them now: the
+  // recovery of the agent is owed to every agent that owns an enabled Docker
+  // connector.
+  let dockerConnectorEnabled = initial.connectors.some(
+    (connector) => connector.executionMode === 'docker' && connector.enabled,
+  );
+  const refreshDockerConnector = async () => {
+    try {
+      const state = await read();
+      dockerConnectorEnabled = state.connectors.some(
+        (connector) =>
+          connector.executionMode === 'docker' && connector.enabled,
+      );
+    } catch {
+      /* The registry is unreadable: the last known state stays. */
+    }
+    return dockerConnectorEnabled;
+  };
+  // The recovery of the agent runs at bridge start when the agent owns a
+  // marker or an enabled Docker connector. The marker folder of the agent is
+  // checked without the Docker runtime, so a bridge whose agent owns neither
+  // never creates it. It never delays the agent.
+  //
+  // A bridge whose Docker initialization failed retries the recovery,
+  // because the Docker daemon of the machine may come up after the bridge
+  // started. The retry uses the clock of the session, and the shutdown
+  // cancels it.
+  const startupRecovery = createBridgeStartupRecovery({
+    directory,
+    agentId,
+    hasDockerConnector: refreshDockerConnector,
+    runtime: async () => (await dockerRuntime()).ownership,
+    setTimer: session.setTimer,
+    clearTimer: session.clearTimer,
+  });
+  void startupRecovery.attempt();
   const changed = () => {
     void server.reconcile();
   };
@@ -1221,17 +1585,23 @@ export async function runAgentBridge(registry: string, agentId: string) {
   const stop = (code: number) => {
     if (stopping) return;
     stopping = true;
+    // The pending retry of the startup recovery is cancelled: the bridge
+    // leaves and creates nothing new.
+    startupRecovery.stop();
     unwatchFile(registry, changed);
     unwatchFile(safetyPath, changed);
     unwatchFile(bootPath, changed);
-    void server.close().then(
-      () => {
-        process.exit(code);
-      },
-      () => {
-        process.exit(code);
-      },
-    );
+    void server
+      .close()
+      .then(() => dockerState?.ownership.close())
+      .then(
+        () => {
+          process.exit(code);
+        },
+        () => {
+          process.exit(code);
+        },
+      );
   };
   process.stdin.once('end', () => {
     stop(0);

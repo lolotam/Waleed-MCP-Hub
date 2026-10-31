@@ -13,7 +13,13 @@ export interface DockerProfiles {
 export interface DockerCommand {
   executable: string;
   environment: Record<string, string>;
-  run(args: readonly string[], signal: AbortSignal): Promise<string>;
+  // `timeoutMs` raises the bound of a long command (an image pull); every
+  // other command keeps the eight seconds of the profile.
+  run(
+    args: readonly string[],
+    signal: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<string>;
 }
 export function dockerCommand(
   runner: ProcessRunner,
@@ -46,13 +52,17 @@ export function dockerCommand(
   ])
     if (declared[key]) environment[key] = declared[key]!;
   let ready: Promise<void> | undefined;
-  const execute = async (args: readonly string[], signal: AbortSignal) => {
+  const execute = async (
+    args: readonly string[],
+    signal: AbortSignal,
+    timeoutMs = 8000,
+  ) => {
     const result = await runner.run({
       executable,
       arguments: args,
       environment,
       signal,
-      timeoutMs: 8000,
+      timeoutMs,
       outputLimitBytes: 1024 * 1024,
     });
     if (result.outcome !== 'exited' || result.exitCode !== 0)
@@ -65,7 +75,7 @@ export function dockerCommand(
   return {
     executable,
     environment,
-    async run(args, signal) {
+    async run(args, signal, timeoutMs) {
       if (!ready)
         ready = (async () => {
           if (
@@ -115,7 +125,7 @@ export function dockerCommand(
           throw error;
         });
       await ready;
-      return execute(args, signal);
+      return execute(args, signal, timeoutMs);
     },
   };
 }

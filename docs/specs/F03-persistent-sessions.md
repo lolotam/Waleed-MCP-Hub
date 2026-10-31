@@ -345,12 +345,20 @@ operations budget. Any breach closes the session.
   this bridge itself and the nonce belongs to none of its live entries. Case (b)
   never applies to another bridge, live or unknown. It has two parts:
   - _Label sweep_ on the current daemon: list containers with
-    `wmh.install=<installId>` and `wmh.agent=<agentId>`; remove (by immutable ID
-    after inspect, recording first as above) each whose `wmh.bridge` probes
-    **absent**, and each whose `wmh.bridge` is this bridge but whose nonce
-    belongs to no live entry (an abandoned launch of this bridge). This also
-    removes a container whose creation completed late, with or without a
-    marker.
+    `wmh.install=<installId>` and `wmh.agent=<agentId>`; the listing holds
+    at most 4 096 64-hex IDs (else uncertain), processed 64 per round from a
+    cursor that continues on the next round; one probe per owner per round;
+    remove (by immutable ID after inspect, recording first as above) each whose
+    `wmh.bridge` probes **absent**, and each whose `wmh.bridge` is this bridge
+    but whose nonce belongs to no live entry (an abandoned launch of this
+    bridge). This also removes a container whose creation completed late, with
+    or without a marker. The two passes of a round share one deadline: they
+    alternate their order, the owners of a marker batch are probed at the same
+    time before that batch is processed, and each cursor advances only past an
+    item that completed (removed, skipped as not authorised, or failed), or past
+    an item the deadline interrupted in two consecutive rounds, which is
+    revisited after the cursor wraps, so a pass that the deadline cut never
+    starves the other.
   - _Marker pass_ for markers in case (a) or (b): daemon mismatch
     or daemon unavailable → uncertain-cleanup, keep. `running` or `removing` →
     remove if present, confirm the ID absent, delete the marker. `launching`

@@ -23,8 +23,10 @@ export interface SessionPoolOptions<P> {
     lifetime: AbortSignal,
     died: () => void,
   ): Promise<StartedPeer<P>>;
-  // Closes one peer; the pool calls it at most once per entry.
-  dispose(peer: P): Promise<void>;
+  // Closes one peer; the pool calls it at most once per entry. The deadline
+  // is the absolute end of the shutdown sequence when one is running: the
+  // cleanup of the peer runs on the budget that is left.
+  dispose(peer: P, deadline?: number): Promise<void>;
   now(): number;
   setTimer(callback: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
@@ -164,6 +166,9 @@ export function createSessionPool<P>(
   let generation = 0;
   let closed = false;
   let closing: Promise<void> | undefined;
+  // The absolute end of the shutdown sequence: the disposals it starts run
+  // on the budget that is left.
+  let closingDeadline: number | undefined;
 
   const fault = (
     reason: 'cancelled' | 'timed_out' | 'dependency_unavailable',
@@ -289,7 +294,7 @@ export function createSessionPool<P>(
     if (peer === undefined) return Promise.resolve();
     // A synchronous throw from `dispose` is caught by the same handler.
     entry.peerDisposal ??= Promise.resolve()
-      .then(() => options.dispose(peer))
+      .then(() => options.dispose(peer, closingDeadline))
       .catch(() => {
         /* The peer is gone either way; diagnostics never leave the pool. */
       });
@@ -790,6 +795,8 @@ export function createSessionPool<P>(
     close(deadlineMs: number): Promise<void> {
       if (closing) return closing;
       closed = true;
+      // One absolute deadline for every disposal of this shutdown.
+      closingDeadline = options.now() + deadlineMs;
       for (const entry of [...live]) invalidateEntry(entry);
       const disposals = [...live]
         .map((entry) => entry.disposal)
