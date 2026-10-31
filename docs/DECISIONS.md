@@ -577,8 +577,7 @@ Isolation rules:
   or Verify files.
 
 **Bundled npm, repacked.** The hub runs its own pinned npm
-(`node.exe <npm>in
-pm-cli.js`), never the user's. npm 12.2.1 bundles `undici`,
+(`node.exe <npm>\bin\npm-cli.js`), never the user's. npm 12.2.1 bundles `undici`,
 `ip-address`, `minimatch` and `glob` versions with open advisories
 (GHSA-4qv8-2p9j-2685, GHSA-xjj6-f33q-929c, GHSA-2m5v-pch6-74hx,
 GHSA-qrxm-fqhp-jwvm, GHSA-9fm3-97px-rjf6, GHSA-rxp7-6hxx-x8q5,
