@@ -130,7 +130,10 @@ export async function readOwnedFile(
     if (size > maxBytes) return null;
     return Buffer.concat(chunks);
   } catch (error) {
-    if (code(error) === 'ENOENT') return null;
+    // The file existed when it was opened: one that vanished from its path
+    // since then is refused, never reported as missing.
+    if (code(error) === 'ENOENT')
+      throw new HubError('conflict', 'Owned file changed or is unsafe.');
     throw error;
   } finally {
     await handle.close();

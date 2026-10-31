@@ -12,11 +12,13 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// Runs once, right before the reader opens the armed path: the moment an
-// attacker would swap a parent folder for a link.
+// Runs once, right before (or right after) the reader opens the armed path:
+// the moment an attacker would swap a parent folder for a link, or move the
+// file away.
 const hook = vi.hoisted(() => ({
   path: '',
   beforeOpen: undefined as undefined | (() => Promise<void>),
+  afterOpen: undefined as undefined | (() => Promise<void>),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -27,7 +29,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       hook.beforeOpen = undefined;
       await run();
     }
-    return actual.open(...args);
+    const handle = await actual.open(...args);
+    if (args[0] === hook.path && hook.afterOpen) {
+      const run = hook.afterOpen;
+      hook.afterOpen = undefined;
+      await run();
+    }
+    return handle;
   }) as typeof actual.open;
   return { ...actual, open, default: { ...actual, open } };
 });
@@ -51,6 +59,7 @@ let directory = '';
 afterEach(async () => {
   hook.path = '';
   hook.beforeOpen = undefined;
+  hook.afterOpen = undefined;
   if (directory) await rm(directory, { recursive: true, force: true });
   directory = '';
 });
@@ -136,4 +145,39 @@ it('keeps an install marker when its folder became a link during reconciliation'
   await expect(
     readFile(join(foreign, installId + '.installing'), 'utf8'),
   ).resolves.toBeTruthy();
+});
+
+it('keeps an active install when its marker vanishes after the open', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-vanish-reconcile-'));
+  const packagesDir = packagesRoot(directory);
+  await mkdir(packagesDir, { recursive: true });
+  const installId = randomUUID();
+  const jobId = randomUUID();
+  const folder = join(packagesDir, installId);
+  await mkdir(folder);
+  await writeFile(join(folder, 'file.txt'), 'installing');
+  await writeMarker(packagesDir, installId, jobId);
+  const marker = markerPath(packagesDir, installId);
+  hook.path = marker;
+  hook.afterOpen = async () => {
+    await rename(marker, join(directory, 'moved.installing'));
+  };
+  await expect(readOwnedFile(marker, 4096)).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  await rename(join(directory, 'moved.installing'), marker);
+  hook.afterOpen = async () => {
+    await rename(marker, join(directory, 'moved.installing'));
+  };
+  await expect(
+    reconcilePackages({
+      packagesDir,
+      readState: async () => emptyState(),
+      activeJobs: () => new Set([jobId]),
+      lock: createPackageLock(),
+    }),
+  ).rejects.toMatchObject({ code: 'conflict' });
+  await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
+    'installing',
+  );
 });
