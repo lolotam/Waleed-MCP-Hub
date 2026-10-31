@@ -168,7 +168,8 @@ Files: `integrations/docker-transport.ts`, `adapters/mcp/container-cleanup.ts`.
   three outcomes (live / absent / unknown, 2 s bound); removal only when the
   owner probes absent, or for this bridge's own nonce with no live entry; per-agent recovery pipe mutex; per-session markers under
   `<agentId>/<bridgeId>/` with `dockerEndpoint`, `daemonId` and `phase`
-  (`launching`, then `running` + ID from `--cidfile`); recovery = label sweep
+  (`launching`; `running` + ID from `--cidfile`; `removing` + inspected ID and
+  daemon identity); recovery = label sweep
   plus marker pass, at start, before admission and every 60 s while a non-live
   bridge's marker or any unresolved `launching` marker remains; image
   pre-flight before any marker; acknowledged only with a `--cidfile` ID; a
@@ -241,7 +242,8 @@ and plan under `docs/specs` and `docs/plans`.
 | 10  | Same between two `tools/list` pages                                                              | connector dropped from the list; entry invalidated                                                                   |
 | 11  | Credential reference changed / not present / owner removed                                       | invalidated at next validation and by the watcher                                                                    |
 | 12  | OAuth `notAfter` reached with no registry change                                                 | invalidated by timer                                                                                                 |
-| 13  | Ledger `prepared` and seen by a reconciliation snapshot, no traffic                              | idle entries invalidated by that reconciliation                                                                      |
+| 12a | Call admitted 31–89 s before `notAfter`                                                          | refused before dispatch; no SDK request sent                                                                         |
+| 13  | Ledger `prepared` and seen by a reconciliation snapshot, no traffic                              | idle entries kept; requests fail closed; `needs_review` invalidates idle entries                                     |
 | 14  | Ledger blocked during acquisition                                                                | refused with "registry unavailable"                                                                                  |
 | 15  | Ledger recovers                                                                                  | next request starts fresh                                                                                            |
 | 16  | Boot ID changes, files otherwise unchanged                                                       | idle entries closed; busy ones retire after the call; next fresh                                                     |
@@ -261,6 +263,7 @@ and plan under `docs/specs` and `docs/plans`.
 | 27e | Failed reconciliation read, then a newer successful dispatch validation                          | the failure was applied inside the mutex before the newer snapshot; the newly validated entry is untouched           |
 | 27c | Snapshot retry (ledger changed mid-read) inside the mutex                                        | one sequence number for the successful read only                                                                     |
 | 28  | Boot ID changes; request arrives before the watcher reconciles                                   | request served on a fresh entry; no "unavailable"                                                                    |
+| 28a | Boot ID changes with 16 live entries                                                             | predecessor disposed first; request served on a fresh entry                                                          |
 | 29  | Boot record deleted after a valid one                                                            | registry unavailable until the hub rewrites it                                                                       |
 | 30  | Credential change during `verifyPackage`                                                         | final gate refuses; invalidated                                                                                      |
 | 31  | Peer sends `tools/list_changed`                                                                  | forwarded once to the agent; no SDK auto-refresh                                                                     |

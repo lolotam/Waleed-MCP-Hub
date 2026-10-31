@@ -1,6 +1,7 @@
 import { describe, expect, it, afterAll, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
+  access,
   mkdir,
   mkdtemp,
   readFile,
@@ -27,6 +28,7 @@ import {
   listenBridge,
   pipeName,
   probeBridge,
+  settleWithin,
   startDockerRecovery,
   type DockerOwnership,
 } from '../packages/hub-core/src/integrations/docker-ownership.js';
@@ -50,8 +52,10 @@ import { profileState } from './helpers/runtime.js';
 
 // The marker deletion of one test fails with a permission error: the guard
 // names the file that the file system refuses to delete.
+// The hook of one test runs after every deletion that succeeded.
 const unlinkGuard = vi.hoisted(() => ({
   path: undefined as string | undefined,
+  after: undefined as ((path: string) => void) | undefined,
 }));
 // The durable flag of one test cannot be written: the guard names the file
 // that the file system refuses to create.
@@ -62,6 +66,7 @@ const openGuard = vi.hoisted(() => ({
 // existence the file system refuses to answer.
 const lstatGuard = vi.hoisted(() => ({
   path: undefined as string | undefined,
+  after: undefined as ((path: string) => void) | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -74,10 +79,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       error.code = 'EPERM';
       throw error;
     }
-    return (actual.unlink as unknown as (...args: unknown[]) => Promise<void>)(
+    await (actual.unlink as unknown as (...args: unknown[]) => Promise<void>)(
       path,
       ...rest,
     );
+    unlinkGuard.after?.(String(path));
   };
   const open = async (path: string, ...rest: unknown[]) => {
     if (openGuard.path !== undefined && String(path) === openGuard.path) {
@@ -100,9 +106,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       error.code = 'EACCES';
       throw error;
     }
-    return (
-      actual.lstat as unknown as (...args: unknown[]) => Promise<unknown>
-    )(path, ...rest);
+    try {
+      return await (
+        actual.lstat as unknown as (...args: unknown[]) => Promise<unknown>
+      )(path, ...rest);
+    } finally {
+      lstatGuard.after?.(String(path));
+    }
   };
   return { ...actual, unlink, open, lstat };
 });
@@ -373,6 +383,14 @@ async function writeMarkerFile(
   return path;
 }
 
+// Whether a path exists: a missing path and an unreadable one are both
+// absent for the assertions of this file.
+const pathExists = (path: string) =>
+  access(path).then(
+    () => true,
+    () => false,
+  );
+
 async function readMarkerFile(path: string) {
   return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
 }
@@ -521,6 +539,11 @@ async function createHarness(
       : {}),
   });
   return { directory, daemon, ownership, agentId, bridgeId, installId, clock };
+}
+
+// A timer of the given delay is armed on the virtual clock.
+function timerArmed(clock: FakeClock, delay: number): boolean {
+  return [...clock.timers.values()].some((timer) => timer.delay === delay);
 }
 
 // The recovery round is complete when the container is gone and its marker
@@ -851,13 +874,12 @@ describe('Docker ownership, recovery and pooling', () => {
       `wmh-${randomUUID()}.json`,
     );
     await mkdir(dirname(legacy), { recursive: true });
-    await writeFile(legacy, JSON.stringify({ nonce: randomUUID() }));
+    // The content written here is kept: the legacy marker must read back
+    // byte for byte after the admission and its recovery round.
+    const original = JSON.stringify({ nonce: randomUUID() });
+    await writeFile(legacy, original);
     await expect(harness.ownership.admit()).rejects.toBeDefined();
-    expect(await readFile(legacy, 'utf8')).toBe(
-      JSON.stringify({
-        nonce: JSON.parse(await readFile(legacy, 'utf8')).nonce,
-      }),
-    );
+    expect(await readFile(legacy, 'utf8')).toBe(original);
     expect(harness.daemon.calls.some((call) => call[0] === 'rm')).toBe(false);
     await harness.ownership.close();
   });
@@ -909,24 +931,27 @@ describe('Docker ownership, recovery and pooling', () => {
       installId,
       agentId: 'opencode',
     });
-    const paused = await spawnPipeOwner(
-      pipeName('bridge', installId, owner.bridgeId),
-    );
-    await launchContainer(owner);
-    expect(await probeBridge(installId, owner.bridgeId)).toBe('unknown');
     const other = await createHarness({
       directory,
       daemon,
       installId,
       agentId: 'opencode',
     });
-    // The probe of the busy owner runs on the virtual clock of the round.
-    await advanceUntilSettled(other.clock, other.ownership.recover());
-    expect(daemon.containers.size).toBe(1);
-    expect(await markerFiles(directory, 'opencode')).toHaveLength(1);
-    paused.kill();
-    await owner.ownership.close();
-    await other.ownership.close();
+    const paused = await spawnPipeOwner(
+      pipeName('bridge', installId, owner.bridgeId),
+    );
+    try {
+      await launchContainer(owner);
+      expect(await probeBridge(installId, owner.bridgeId)).toBe('unknown');
+      // The probe of the busy owner runs on the virtual clock of the round.
+      await advanceUntilSettled(other.clock, other.ownership.recover());
+      expect(daemon.containers.size).toBe(1);
+      expect(await markerFiles(directory, 'opencode')).toHaveLength(1);
+    } finally {
+      paused.kill();
+      await owner.ownership.close();
+      await other.ownership.close();
+    }
   });
 
   it('shares one recovery mutex between bridges that opened the data folder through differently cased paths', async () => {
@@ -1118,6 +1143,262 @@ describe('Docker ownership, recovery and pooling', () => {
     ).rejects.toBeDefined();
     expect(await markerFiles(harness.directory, 'opencode')).toHaveLength(0);
     expect(harness.daemon.calls.some((call) => call[0] === 'pull')).toBe(true);
+    await harness.ownership.close();
+  });
+
+  it('never cleans a valid stale marker while the inventory of the agent is uncertain', async () => {
+    const daemon = new FakeDaemon();
+    const directory = await temporaryDirectory();
+    const installId = randomUUID();
+    const agentId = 'opencode';
+    // A valid running marker of an absent bridge names its container.
+    const absent = randomUUID();
+    const nonce = randomUUID();
+    const containerId = 'd'.repeat(64);
+    const markerPath = await writeMarkerFile(
+      directory,
+      agentId,
+      absent,
+      nonce,
+      markerBody({
+        nonce,
+        agentId,
+        bridgeId: absent,
+        phase: 'running',
+        containerId,
+      }),
+    );
+    daemon.add(containerId, {
+      'wmh.install': installId,
+      'wmh.agent': agentId,
+      'wmh.bridge': absent,
+      'wmh.client': nonce,
+      'wmh.connector': 'connector-0',
+    });
+    // An unsafe entry beside it makes the inventory of the agent uncertain.
+    await writeFile(
+      join(directory, 'owned-agent-containers', agentId, 'stray.txt'),
+      '',
+    );
+    const harness = await createHarness({
+      directory,
+      daemon,
+      installId,
+      agentId,
+    });
+    await harness.ownership.recover();
+    // Nothing is cleaned: the container, its marker and its phase stay.
+    expect(daemon.containers.size).toBe(1);
+    expect(daemon.calls.some((call) => call[0] === 'rm')).toBe(false);
+    expect(await markerFiles(directory, agentId)).toEqual([markerPath]);
+    expect((await readMarkerFile(markerPath))['phase']).toBe('running');
+    await harness.ownership.close();
+  });
+
+  it('removes the container id file of a session after a clean disposal', async () => {
+    const harness = await createHarness();
+    const launch = await launchContainer(harness);
+    expect(await pathExists(launch.cidfilePath)).toBe(true);
+    await harness.ownership.dispose(launch, new AbortController().signal);
+    expect(harness.daemon.containers.size).toBe(0);
+    expect(await markerFiles(harness.directory, 'opencode')).toHaveLength(0);
+    expect(await pathExists(launch.cidfilePath)).toBe(false);
+    // The folders of the live bridge stay for its next launch.
+    expect(await pathExists(dirname(launch.cidfilePath))).toBe(true);
+    await harness.ownership.close();
+  });
+
+  it('purges the artifacts of a dead bridge and keeps the file of a marker that remains', async () => {
+    const harness = await createHarness();
+    const agentRoot = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+    );
+    // A dead bridge left the container id file of a finished session.
+    const finished = randomUUID();
+    const finishedNonce = randomUUID();
+    await mkdir(join(agentRoot, finished, 'cid'), { recursive: true });
+    await writeFile(
+      join(agentRoot, finished, 'cid', `${finishedNonce}.cid`),
+      'a'.repeat(64),
+    );
+    // Another dead bridge left an unacknowledged launch: its marker stays,
+    // so the container id file of that session stays as well.
+    const pending = randomUUID();
+    const pendingNonce = randomUUID();
+    await writeMarkerFile(
+      harness.directory,
+      harness.agentId,
+      pending,
+      pendingNonce,
+      markerBody({
+        nonce: pendingNonce,
+        agentId: harness.agentId,
+        bridgeId: pending,
+        phase: 'launching',
+      }),
+    );
+    const pendingFile = join(agentRoot, pending, 'cid', `${pendingNonce}.cid`);
+    await mkdir(dirname(pendingFile), { recursive: true });
+    await writeFile(pendingFile, '');
+    await harness.ownership.recover();
+    // The finished bridge left nothing behind: its file and its empty
+    // folders are gone.
+    expect(await pathExists(join(agentRoot, finished))).toBe(false);
+    expect(await pathExists(pendingFile)).toBe(true);
+    expect(await markerFiles(harness.directory, harness.agentId)).toHaveLength(
+      1,
+    );
+    await harness.ownership.close();
+  });
+
+  it('never follows a link of a dead bridge while it purges artifacts', async () => {
+    const harness = await createHarness();
+    const agentRoot = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+    );
+    // The container id folder of a dead bridge is a link to a foreign
+    // folder that holds a file with the name of a session.
+    const outside = await temporaryDirectory();
+    const nonce = randomUUID();
+    await writeFile(join(outside, `${nonce}.cid`), 'kept');
+    const dead = randomUUID();
+    await mkdir(join(agentRoot, dead), { recursive: true });
+    await symlink(outside, join(agentRoot, dead, 'cid'), 'junction');
+    await harness.ownership.recover();
+    expect(await readFile(join(outside, `${nonce}.cid`), 'utf8')).toBe('kept');
+    expect(await pathExists(join(agentRoot, dead, 'cid'))).toBe(true);
+    await harness.ownership.close();
+  });
+
+  it('purges at most sixteen dead bridges in one round and schedules the rest', async () => {
+    const harness = await createHarness();
+    const agentRoot = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+    );
+    // Twenty dead bridges each left the container id file of a finished
+    // session. No marker and no container exists: only the purge owes work.
+    const dead = Array.from({ length: 20 }, () => randomUUID());
+    for (const owner of dead) {
+      await mkdir(join(agentRoot, owner, 'cid'), { recursive: true });
+      await writeFile(
+        join(agentRoot, owner, 'cid', `${randomUUID()}.cid`),
+        'a'.repeat(64),
+      );
+    }
+    const remaining = async () => {
+      let count = 0;
+      for (const owner of dead)
+        if (await pathExists(join(agentRoot, owner))) count += 1;
+      return count;
+    };
+    // The first round examines one batch: the rest waits for a later round.
+    await harness.ownership.recover();
+    expect(await remaining()).toBe(4);
+    // The unfinished pass keeps the 60 second recovery armed, and that
+    // round finishes the pass.
+    expect(timerArmed(harness.clock, 60_000)).toBe(true);
+    harness.clock.advance(60_000);
+    await harness.ownership.settled();
+    expect(await remaining()).toBe(0);
+    // The finished pass owes nothing more.
+    expect(timerArmed(harness.clock, 60_000)).toBe(false);
+    await harness.ownership.close();
+  });
+
+  it('bounds the files of one folder per round and resumes them in a scheduled round', async () => {
+    const harness = await createHarness();
+    const cidFolder = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+      randomUUID(),
+      'cid',
+    );
+    // One dead bridge left one hundred container id files.
+    await mkdir(cidFolder, { recursive: true });
+    for (let index = 0; index < 100; index++)
+      await writeFile(join(cidFolder, `${randomUUID()}.cid`), 'a'.repeat(64));
+    await harness.ownership.recover();
+    // One round examines at most 64 files.
+    expect(await readdir(cidFolder)).toHaveLength(36);
+    expect(timerArmed(harness.clock, 60_000)).toBe(true);
+    harness.clock.advance(60_000);
+    await harness.ownership.settled();
+    expect(await pathExists(dirname(cidFolder))).toBe(false);
+    expect(timerArmed(harness.clock, 60_000)).toBe(false);
+    await harness.ownership.close();
+  });
+
+  it('stops the purge inside a folder at the deadline of the round', async () => {
+    const harness = await createHarness();
+    const cidFolder = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+      randomUUID(),
+      'cid',
+    );
+    await mkdir(cidFolder, { recursive: true });
+    for (let index = 0; index < 10; index++)
+      await writeFile(join(cidFolder, `${randomUUID()}.cid`), 'a'.repeat(64));
+    // The deadline of the round expires right after the first deletion.
+    unlinkGuard.after = (path) => {
+      if (!path.endsWith('.cid')) return;
+      unlinkGuard.after = undefined;
+      // The deadline timer of the round is the only timer of 30 seconds.
+      harness.clock.advance(30_000);
+    };
+    try {
+      await harness.ownership.recover();
+    } finally {
+      unlinkGuard.after = undefined;
+    }
+    // Nothing is deleted after the deadline.
+    expect(await readdir(cidFolder)).toHaveLength(9);
+    // The rest is owed to the next round, which finishes the folder.
+    expect(timerArmed(harness.clock, 60_000)).toBe(true);
+    harness.clock.advance(60_000);
+    await harness.ownership.settled();
+    expect(await pathExists(dirname(cidFolder))).toBe(false);
+    await harness.ownership.close();
+  });
+
+  it('checks a file again when the deadline ends its marker check', async () => {
+    const harness = await createHarness();
+    const bridgeFolder = join(
+      harness.directory,
+      'owned-agent-containers',
+      harness.agentId,
+      randomUUID(),
+    );
+    const cidFolder = join(bridgeFolder, 'cid');
+    await mkdir(cidFolder, { recursive: true });
+    for (let index = 0; index < 3; index++)
+      await writeFile(join(cidFolder, `${randomUUID()}.cid`), 'a'.repeat(64));
+    // The deadline of the round expires during the first marker check.
+    lstatGuard.after = (path) => {
+      if (!path.startsWith(bridgeFolder) || !path.endsWith('.json')) return;
+      lstatGuard.after = undefined;
+      harness.clock.advance(30_000);
+    };
+    try {
+      await harness.ownership.recover();
+    } finally {
+      lstatGuard.after = undefined;
+    }
+    // The interrupted file was not decided, so nothing is deleted yet.
+    expect(await readdir(cidFolder)).toHaveLength(3);
+    // The next round checks it again and finishes the folder.
+    expect(timerArmed(harness.clock, 60_000)).toBe(true);
+    harness.clock.advance(60_000);
+    await harness.ownership.settled();
+    expect(await pathExists(bridgeFolder)).toBe(false);
     await harness.ownership.close();
   });
 
@@ -1770,6 +2051,7 @@ describe('Docker ownership, recovery and pooling', () => {
         recorded = signal;
       },
       recover: async () => undefined,
+      settled: async () => undefined,
       close: async () => undefined,
     } as unknown as DockerOwnership;
     const session: DockerSession = {
@@ -1811,6 +2093,7 @@ describe('Docker ownership, recovery and pooling', () => {
       watch: async () => undefined,
       dispose: async () => undefined,
       recover: async () => undefined,
+      settled: async () => undefined,
       close: async () => undefined,
     } as unknown as DockerOwnership;
     const session: DockerSession = {
@@ -2160,6 +2443,7 @@ describe('Docker ownership, recovery and pooling', () => {
         cleaned = Date.now();
       },
       recover: async () => undefined,
+      settled: async () => undefined,
       close: async () => undefined,
     } as unknown as DockerOwnership;
     const session: DockerSession = {
@@ -2352,6 +2636,84 @@ describe('Docker ownership, recovery and pooling', () => {
     await harness.ownership.close();
   });
 
+  it('waits for a running round and starts no round after it is closed', async () => {
+    const harness = await createHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached = false;
+    harness.daemon.sweepGate = async () => {
+      reached = true;
+      await gate;
+    };
+    const recovering = harness.ownership.recover();
+    await until(() => reached);
+    let settled = false;
+    const waiting = harness.ownership.settled().then(() => {
+      settled = true;
+    });
+    await harness.ownership.close();
+    // The round still runs: the wait is not over.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    release();
+    await recovering;
+    await waiting;
+    expect(settled).toBe(true);
+    // The closed manager arms no timer and starts no round.
+    expect(
+      [...harness.clock.timers.values()].some(
+        (timer) => timer.delay === 60_000,
+      ),
+    ).toBe(false);
+    const calls = harness.daemon.calls.length;
+    await harness.ownership.recover();
+    expect(harness.daemon.calls.length).toBe(calls);
+    await harness.ownership.settled();
+  });
+
+  it('waits for every round of the shutdown within one shared bound', async () => {
+    const clock = new FakeClock();
+    let finishStartup!: () => void;
+    const startup = new Promise<void>((resolve) => {
+      finishStartup = resolve;
+    });
+    // The round of the ownership never ends.
+    const ownership = new Promise<void>(() => undefined);
+    let left = false;
+    void settleWithin([startup, ownership], 5_000, clock).then(() => {
+      left = true;
+    });
+    // The startup recovery ends early: the shutdown still waits for the
+    // ownership round, and one timer bounds both waits.
+    finishStartup();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(left).toBe(false);
+    expect(clock.timers.size).toBe(1);
+    clock.advance(4_999);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(left).toBe(false);
+    clock.advance(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(left).toBe(true);
+  });
+
+  it('leaves the shutdown wait as soon as every round ended and clears its timer', async () => {
+    const clock = new FakeClock();
+    let left = false;
+    void settleWithin(
+      [Promise.resolve(), Promise.reject(new Error('synthetic')), undefined],
+      5_000,
+      clock,
+    ).then(() => {
+      left = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(left).toBe(true);
+    expect(clock.timers.size).toBe(0);
+  });
+
   it('refuses docker admission when the used flag cannot be written', async () => {
     const harness = await createHarness();
     // The file system refuses the durable flag of the agent.
@@ -2486,35 +2848,38 @@ describe('Docker ownership, recovery and pooling', () => {
     const held = await spawnPipeOwners(
       owners.map((owner) => pipeName('bridge', harness.installId, owner)),
     );
-    // The slow containers are listed before the orphan.
-    for (const [index, owner] of owners.entries())
-      harness.daemon.add(index.toString(16).padStart(64, '0'), {
+    try {
+      // The slow containers are listed before the orphan.
+      for (const [index, owner] of owners.entries())
+        harness.daemon.add(index.toString(16).padStart(64, '0'), {
+          'wmh.install': harness.installId,
+          'wmh.agent': harness.agentId,
+          'wmh.bridge': owner,
+          'wmh.client': randomUUID(),
+          'wmh.connector': 'connector-0',
+        });
+      // The eligible orphan of an absent owner is listed behind them.
+      const orphan = 'f'.repeat(64);
+      harness.daemon.add(orphan, {
         'wmh.install': harness.installId,
         'wmh.agent': harness.agentId,
-        'wmh.bridge': owner,
+        'wmh.bridge': randomUUID(),
         'wmh.client': randomUUID(),
         'wmh.connector': 'connector-0',
       });
-    // The eligible orphan of an absent owner is listed behind them.
-    const orphan = 'f'.repeat(64);
-    harness.daemon.add(orphan, {
-      'wmh.install': harness.installId,
-      'wmh.agent': harness.agentId,
-      'wmh.bridge': randomUUID(),
-      'wmh.client': randomUUID(),
-      'wmh.connector': 'connector-0',
-    });
-    // The first round spends its whole deadline on the slow owners.
-    await advanceUntilSettled(harness.clock, harness.ownership.recover());
-    // The orphan behind them was never examined.
-    expect(harness.daemon.containers.has(orphan)).toBe(true);
-    // The next round resumes after the last id the first one reached.
-    await advanceUntilSettled(harness.clock, harness.ownership.recover());
-    // The orphan is gone: the slow owners keep their containers.
-    expect(harness.daemon.containers.has(orphan)).toBe(false);
-    expect(harness.daemon.containers.size).toBe(16);
-    held.kill();
-    await harness.ownership.close();
+      // The first round spends its whole deadline on the slow owners.
+      await advanceUntilSettled(harness.clock, harness.ownership.recover());
+      // The orphan behind them was never examined.
+      expect(harness.daemon.containers.has(orphan)).toBe(true);
+      // The next round resumes after the last id the first one reached.
+      await advanceUntilSettled(harness.clock, harness.ownership.recover());
+      // The orphan is gone: the slow owners keep their containers.
+      expect(harness.daemon.containers.has(orphan)).toBe(false);
+      expect(harness.daemon.containers.size).toBe(16);
+    } finally {
+      held.kill();
+      await harness.ownership.close();
+    }
   });
 
   it('reaches a markerless orphan behind slow markers', async () => {
@@ -2525,53 +2890,56 @@ describe('Docker ownership, recovery and pooling', () => {
     const held = await spawnPipeOwners(
       owners.map((owner) => pipeName('bridge', harness.installId, owner)),
     );
-    // Every owner names a running marker of an existing container.
-    for (const [index, owner] of owners.entries()) {
-      const nonce = randomUUID();
-      const id = index.toString(16).padStart(64, '0');
-      await writeMarkerFile(
-        harness.directory,
-        harness.agentId,
-        owner,
-        nonce,
-        markerBody({
+    try {
+      // Every owner names a running marker of an existing container.
+      for (const [index, owner] of owners.entries()) {
+        const nonce = randomUUID();
+        const id = index.toString(16).padStart(64, '0');
+        await writeMarkerFile(
+          harness.directory,
+          harness.agentId,
+          owner,
           nonce,
-          agentId: harness.agentId,
-          bridgeId: owner,
-          containerId: id,
-        }),
-      );
-      harness.daemon.add(id, {
+          markerBody({
+            nonce,
+            agentId: harness.agentId,
+            bridgeId: owner,
+            containerId: id,
+          }),
+        );
+        harness.daemon.add(id, {
+          'wmh.install': harness.installId,
+          'wmh.agent': harness.agentId,
+          'wmh.bridge': owner,
+          'wmh.client': nonce,
+          'wmh.connector': 'connector-0',
+        });
+      }
+      // The eligible orphan of an absent owner is listed behind the slow
+      // markers.
+      const orphan = 'f'.repeat(64);
+      harness.daemon.add(orphan, {
         'wmh.install': harness.installId,
         'wmh.agent': harness.agentId,
-        'wmh.bridge': owner,
-        'wmh.client': nonce,
+        'wmh.bridge': randomUUID(),
+        'wmh.client': randomUUID(),
         'wmh.connector': 'connector-0',
       });
+      // The marker pass probes its sixteen slow owners at the same time, so
+      // the sweep reaches the orphan behind them.
+      await advanceUntilProbed(harness.clock, harness.ownership.recover());
+      await advanceUntilProbed(harness.clock, harness.ownership.recover());
+      // The orphan is gone: the slow owners keep their containers and their
+      // markers.
+      expect(harness.daemon.containers.has(orphan)).toBe(false);
+      expect(harness.daemon.containers.size).toBe(16);
+      expect(
+        await markerFiles(harness.directory, harness.agentId),
+      ).toHaveLength(16);
+    } finally {
+      held.kill();
+      await harness.ownership.close();
     }
-    // The eligible orphan of an absent owner is listed behind the slow
-    // markers.
-    const orphan = 'f'.repeat(64);
-    harness.daemon.add(orphan, {
-      'wmh.install': harness.installId,
-      'wmh.agent': harness.agentId,
-      'wmh.bridge': randomUUID(),
-      'wmh.client': randomUUID(),
-      'wmh.connector': 'connector-0',
-    });
-    // The marker pass probes its sixteen slow owners at the same time, so
-    // the sweep reaches the orphan behind them.
-    await advanceUntilProbed(harness.clock, harness.ownership.recover());
-    await advanceUntilProbed(harness.clock, harness.ownership.recover());
-    // The orphan is gone: the slow owners keep their containers and their
-    // markers.
-    expect(harness.daemon.containers.has(orphan)).toBe(false);
-    expect(harness.daemon.containers.size).toBe(16);
-    expect(await markerFiles(harness.directory, harness.agentId)).toHaveLength(
-      16,
-    );
-    held.kill();
-    await harness.ownership.close();
   });
 
   it('runs the label sweep on a round the marker pass cannot finish', async () => {
@@ -2582,62 +2950,65 @@ describe('Docker ownership, recovery and pooling', () => {
     const held = await spawnPipeOwner(
       pipeName('bridge', harness.installId, owner),
     );
-    // 16 running markers of existing containers. The inspection of every
-    // container costs two seconds of virtual time, so the marker pass
-    // cannot finish its batch inside the deadline of a round.
-    for (let index = 0; index < 16; index++) {
-      const nonce = randomUUID();
-      const id = (index + 1).toString(16).padStart(64, '0');
-      await writeMarkerFile(
-        harness.directory,
-        harness.agentId,
-        owner,
-        nonce,
-        markerBody({
+    try {
+      // 16 running markers of existing containers. The inspection of every
+      // container costs two seconds of virtual time, so the marker pass
+      // cannot finish its batch inside the deadline of a round.
+      for (let index = 0; index < 16; index++) {
+        const nonce = randomUUID();
+        const id = (index + 1).toString(16).padStart(64, '0');
+        await writeMarkerFile(
+          harness.directory,
+          harness.agentId,
+          owner,
           nonce,
-          agentId: harness.agentId,
-          bridgeId: owner,
-          containerId: id,
-        }),
-      );
-      harness.daemon.add(id, {
+          markerBody({
+            nonce,
+            agentId: harness.agentId,
+            bridgeId: owner,
+            containerId: id,
+          }),
+        );
+        harness.daemon.add(id, {
+          'wmh.install': harness.installId,
+          'wmh.agent': harness.agentId,
+          'wmh.bridge': owner,
+          'wmh.client': nonce,
+          'wmh.connector': 'connector-0',
+        });
+      }
+      // The eligible orphan of an absent owner has the lowest id, so the
+      // sweep reaches it before the slow containers.
+      const orphan = '0'.repeat(64);
+      harness.daemon.add(orphan, {
         'wmh.install': harness.installId,
         'wmh.agent': harness.agentId,
-        'wmh.bridge': owner,
-        'wmh.client': nonce,
+        'wmh.bridge': randomUUID(),
+        'wmh.client': randomUUID(),
         'wmh.connector': 'connector-0',
       });
+      // The inspection of every container but the orphan costs two seconds
+      // of virtual time.
+      harness.daemon.onInspect = (id) => {
+        if (id !== orphan) harness.clock.advance(2_000);
+      };
+      // The first round runs the marker pass, which never finishes its
+      // batch. The second round runs the label sweep first, so it reaches
+      // the orphan.
+      await advanceUntilProbed(harness.clock, harness.ownership.recover());
+      expect(harness.daemon.containers.has(orphan)).toBe(true);
+      await advanceUntilProbed(harness.clock, harness.ownership.recover());
+      // The orphan is gone: the slow owner keeps its containers and its
+      // markers.
+      expect(harness.daemon.containers.has(orphan)).toBe(false);
+      expect(harness.daemon.containers.size).toBe(16);
+      expect(
+        await markerFiles(harness.directory, harness.agentId),
+      ).toHaveLength(16);
+    } finally {
+      held.kill();
+      await harness.ownership.close();
     }
-    // The eligible orphan of an absent owner has the lowest id, so the
-    // sweep reaches it before the slow containers.
-    const orphan = '0'.repeat(64);
-    harness.daemon.add(orphan, {
-      'wmh.install': harness.installId,
-      'wmh.agent': harness.agentId,
-      'wmh.bridge': randomUUID(),
-      'wmh.client': randomUUID(),
-      'wmh.connector': 'connector-0',
-    });
-    // The inspection of every container but the orphan costs two seconds
-    // of virtual time.
-    harness.daemon.onInspect = (id) => {
-      if (id !== orphan) harness.clock.advance(2_000);
-    };
-    // The first round runs the marker pass, which never finishes its
-    // batch. The second round runs the label sweep first, so it reaches
-    // the orphan.
-    await advanceUntilProbed(harness.clock, harness.ownership.recover());
-    expect(harness.daemon.containers.has(orphan)).toBe(true);
-    await advanceUntilProbed(harness.clock, harness.ownership.recover());
-    // The orphan is gone: the slow owner keeps its containers and its
-    // markers.
-    expect(harness.daemon.containers.has(orphan)).toBe(false);
-    expect(harness.daemon.containers.size).toBe(16);
-    expect(await markerFiles(harness.directory, harness.agentId)).toHaveLength(
-      16,
-    );
-    held.kill();
-    await harness.ownership.close();
   });
 
   it('retries an item interrupted by the round deadline', async () => {
@@ -2648,41 +3019,44 @@ describe('Docker ownership, recovery and pooling', () => {
     const held = await spawnPipeOwners(
       owners.map((owner) => pipeName('bridge', harness.installId, owner)),
     );
-    // The slow containers are listed before the orphan.
-    for (const [index, owner] of owners.entries())
-      harness.daemon.add(index.toString(16).padStart(64, '0'), {
+    try {
+      // The slow containers are listed before the orphan.
+      for (const [index, owner] of owners.entries())
+        harness.daemon.add(index.toString(16).padStart(64, '0'), {
+          'wmh.install': harness.installId,
+          'wmh.agent': harness.agentId,
+          'wmh.bridge': owner,
+          'wmh.client': randomUUID(),
+          'wmh.connector': 'connector-0',
+        });
+      // The eligible orphan of an absent owner is listed behind them.
+      const orphan = 'f'.repeat(64);
+      harness.daemon.add(orphan, {
         'wmh.install': harness.installId,
         'wmh.agent': harness.agentId,
-        'wmh.bridge': owner,
+        'wmh.bridge': randomUUID(),
         'wmh.client': randomUUID(),
         'wmh.connector': 'connector-0',
       });
-    // The eligible orphan of an absent owner is listed behind them.
-    const orphan = 'f'.repeat(64);
-    harness.daemon.add(orphan, {
-      'wmh.install': harness.installId,
-      'wmh.agent': harness.agentId,
-      'wmh.bridge': randomUUID(),
-      'wmh.client': randomUUID(),
-      'wmh.connector': 'connector-0',
-    });
-    // The inspection of the orphan costs three seconds of virtual time.
-    harness.daemon.onInspect = (id) => {
-      if (id === orphan) harness.clock.advance(3_000);
-    };
-    // The first round runs into the deadline while the orphan is
-    // inspected: the orphan survives it.
-    await advanceUntilProbed(harness.clock, harness.ownership.recover());
-    expect(harness.daemon.containers.has(orphan)).toBe(true);
-    // The interrupted item is never passed: a later round starts at it
-    // again and removes it.
-    for (let round = 0; round < 2; round++)
+      // The inspection of the orphan costs three seconds of virtual time.
+      harness.daemon.onInspect = (id) => {
+        if (id === orphan) harness.clock.advance(3_000);
+      };
+      // The first round runs into the deadline while the orphan is
+      // inspected: the orphan survives it.
       await advanceUntilProbed(harness.clock, harness.ownership.recover());
-    expect(harness.daemon.containers.has(orphan)).toBe(false);
-    // The slow owners keep their containers.
-    expect(harness.daemon.containers.size).toBe(14);
-    held.kill();
-    await harness.ownership.close();
+      expect(harness.daemon.containers.has(orphan)).toBe(true);
+      // The interrupted item is never passed: a later round starts at it
+      // again and removes it.
+      for (let round = 0; round < 2; round++)
+        await advanceUntilProbed(harness.clock, harness.ownership.recover());
+      expect(harness.daemon.containers.has(orphan)).toBe(false);
+      // The slow owners keep their containers.
+      expect(harness.daemon.containers.size).toBe(14);
+    } finally {
+      held.kill();
+      await harness.ownership.close();
+    }
   });
 
   it('moves past an item that the round deadline always interrupts', async () => {

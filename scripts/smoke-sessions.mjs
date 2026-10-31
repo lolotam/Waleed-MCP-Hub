@@ -271,9 +271,10 @@ public static class WaleedSmokeHelper
         return "unknown";
     }
 
-    // Ends the process host of a tree. The server and the grandchild must run
-    // right before the end, checked in the same command; the clock starts
-    // right before the end and measures until each of them is gone.
+    // Ends the process host of a tree. The host, the server and the
+    // grandchild must run right before the end, checked in the same command;
+    // the clock starts right before the end and measures until each of them,
+    // the host included, is gone.
     static string KillHost(string tree, long budget)
     {
         Held host = Find(tree, "host");
@@ -285,10 +286,11 @@ public static class WaleedSmokeHelper
         if (WaitForSingleObject(grandchild.Handle, 0) != WAIT_TIMEOUT) return "not-ready";
         Stopwatch clock = Stopwatch.StartNew();
         if (!TerminateProcess(host.Handle, 1)) return "unknown";
+        long hostGone = WaitGone(host, budget, clock);
         long serverGone = WaitGone(server, budget, clock);
         long grandchildGone = WaitGone(grandchild, budget, clock);
-        if (serverGone < 0 || grandchildGone < 0) return "outlived";
-        return "killed " + serverGone + " " + grandchildGone;
+        if (hostGone < 0 || serverGone < 0 || grandchildGone < 0) return "outlived";
+        return "killed " + hostGone + " " + serverGone + " " + grandchildGone;
     }
 
     // The milliseconds of the clock when the process was gone, or -1 when
@@ -470,10 +472,26 @@ const waitGone = async (helper, tree, role, budget, since) => {
     throw new Error('A contained process outlived its budget.');
   return elapsed;
 };
-// The readiness of a case: the server and the grandchild of the tree run.
-const treeRunning = async (helper, tree) =>
-  (await helper.alive(tree, 'server')) === 'alive' &&
-  (await helper.alive(tree, 'grandchild')) === 'alive';
+// The roles of a native tree, each one held by the helper.
+const treeRoles = ['host', 'server', 'grandchild'];
+// The readiness of a case: the process host, the server and the grandchild
+// of the tree run.
+const treeRunning = async (helper, tree) => {
+  for (const role of treeRoles)
+    if ((await helper.alive(tree, role)) !== 'alive') return false;
+  return true;
+};
+// Waits until every process of the tree is gone under one deadline and
+// returns the milliseconds of each since the start of the deadline.
+const waitTreeGone = async (helper, tree, budget, since) => {
+  const measured = {};
+  for (const role of treeRoles)
+    measured[role] = await waitGone(helper, tree, role, budget, since);
+  return measured;
+};
+// The line of a tree that is gone: the slowest process and each of them.
+const describeGone = (measured) =>
+  `${Math.max(...treeRoles.map((role) => measured[role]))} ms (the process host in ${measured.host} ms, the server in ${measured.server} ms, the grandchild in ${measured.grandchild} ms)`;
 // Whether a child of this script still runs, read through its handle.
 const running = (child) => child.exitCode === null && child.signalCode === null;
 // The evidence of the peer: the three process ids of its tree. The file does
@@ -526,6 +544,7 @@ const watchTrees = (evidencePath, helper) => {
     trees.push(tree);
     const verdict = await helper.capture(tree);
     if (verdict === 'confirmed') {
+      tree.confirmed = true;
       if (trees.length === 1) resolveFirst(tree);
       return;
     }
@@ -549,6 +568,20 @@ const watchTrees = (evidencePath, helper) => {
     // The last look at the evidence: a peer that started a moment before the
     // case ended is still captured while its processes live.
     flush: capture,
+    // The first confirmed tree after the one given: the tree of the peer that
+    // replaced it. Nothing when none was confirmed within the budget.
+    next: async (previous, budget) => {
+      const giveUp = Date.now() + budget;
+      for (;;) {
+        if (failure) throw failure;
+        const tree = trees.find(
+          (item) => item.id > previous.id && item.confirmed,
+        );
+        if (tree) return tree;
+        if (stopped || Date.now() > giveUp) return undefined;
+        await delay(50);
+      }
+    },
     stop: () => {
       stopped = true;
     },
@@ -826,7 +859,13 @@ async function withCase(options, run) {
       assert.ok(tree !== undefined, 'The peer wrote no containment evidence.');
       return tree;
     };
-    outcome = await run({ bridge, capture, helper });
+    // The tree of the peer that replaced the given one.
+    const captureNext = async (previous) => {
+      const tree = await watcher.next(previous, 15000);
+      assert.ok(tree !== undefined, 'The peer wrote no containment evidence.');
+      return tree;
+    };
+    outcome = await run({ bridge, capture, captureNext, helper });
   } catch (error) {
     failure = error;
   }
@@ -898,26 +937,13 @@ const steps = [
             'The peer tree was not running before the bridge ended.',
           );
           // TerminateProcess on the bridge: the pipe of the process host ends.
+          // The host, the server and the grandchild share one deadline.
           const killedAt = Date.now();
           bridge.child.kill();
-          const server = await waitGone(
-            helper,
-            tree,
-            'server',
-            containment,
-            killedAt,
-          );
-          const grandchild = await waitGone(
-            helper,
-            tree,
-            'grandchild',
-            containment,
-            killedAt,
-          );
-          return { server, grandchild };
+          return waitTreeGone(helper, tree, containment, killedAt);
         },
       );
-      return `the native tree was gone in ${Math.max(measured.server, measured.grandchild)} ms`;
+      return `the native tree was gone in ${describeGone(measured)}`;
     },
   },
   {
@@ -940,8 +966,9 @@ const steps = [
           );
           const tree = await capture();
           // The contained process host, not the bridge. The helper checks
-          // that the server and the grandchild run, ends the host through its
-          // held handle and measures from the moment right before the end.
+          // that the host, the server and the grandchild run, ends the host
+          // through its held handle and measures from the moment right
+          // before the end until each of the three is gone.
           const answer = await helper.killHost(tree, containment);
           assert.ok(
             answer !== 'not-ready',
@@ -949,16 +976,19 @@ const steps = [
           );
           const parts = (answer ?? '').split(' ');
           assert.ok(
-            parts.length === 3 && parts[0] === 'killed',
+            parts.length === 1 + treeRoles.length && parts[0] === 'killed',
             'A contained process outlived its budget.',
           );
-          const server = Number(parts[1]);
-          const grandchild = Number(parts[2]);
+          const measured = Object.fromEntries(
+            treeRoles.map((role, index) => [role, Number(parts[index + 1])]),
+          );
           assert.ok(
-            Number.isInteger(server) &&
-              Number.isInteger(grandchild) &&
-              server <= containment &&
-              grandchild <= containment,
+            treeRoles.every(
+              (role) =>
+                Number.isInteger(measured[role]) &&
+                measured[role] >= 0 &&
+                measured[role] <= containment,
+            ),
             'A contained process outlived its budget.',
           );
           // The bridge lives on: its next call never reaches the dead peer.
@@ -968,10 +998,10 @@ const steps = [
             reply === '1' || reply === connectorUnavailable,
             'The bridge answered a count of the dead peer.',
           );
-          return { server, grandchild };
+          return measured;
         },
       );
-      return `the native tree was gone in ${Math.max(measured.server, measured.grandchild)} ms and the next count never reached the dead peer`;
+      return `the native tree was gone in ${describeGone(measured)} and the next count never reached the dead peer`;
     },
   },
   {
@@ -996,24 +1026,11 @@ const steps = [
           bridge.child.stdin.end();
           // One deadline for the bridge and for the whole native tree.
           const exit = await waitExit(bridge.child, containment, closingAt);
-          const server = await waitGone(
-            helper,
-            tree,
-            'server',
-            containment,
-            closingAt,
-          );
-          const grandchild = await waitGone(
-            helper,
-            tree,
-            'grandchild',
-            containment,
-            closingAt,
-          );
-          return { exit, server, grandchild };
+          const gone = await waitTreeGone(helper, tree, containment, closingAt);
+          return { exit, gone };
         },
       );
-      return `the bridge exited in ${measured.exit} ms and the native tree was gone in ${Math.max(measured.server, measured.grandchild)} ms`;
+      return `the bridge exited in ${measured.exit} ms and the native tree was gone in ${describeGone(measured.gone)}`;
     },
   },
   {
@@ -1021,9 +1038,38 @@ const steps = [
     run: async () => {
       const measured = await withCase(
         { idleMs: idleLimit },
-        async ({ bridge, capture, helper }) => {
+        async ({ bridge, capture, captureNext, helper }) => {
+          // The listing starts the peer. Its tree is captured before the count
+          // that starts the measured idle period, so however long the capture
+          // takes, it never eats into the measured period.
           const tools = await bridge.client.listTools();
+          const listedAt = Date.now();
           const name = tools.tools[0].name;
+          let tree = await capture();
+          // The readiness of the case: the tree runs before the idle period.
+          // The listing already armed the idle limit, so a runner that was
+          // slow to capture may meet a peer that expired on time. That is
+          // accepted once, only when the whole limit had passed since the
+          // listing before the check began, and only when the expired tree
+          // was gone within the limit and the containment budget. A second
+          // listing then starts a fresh peer whose tree must run.
+          const checkedAt = Date.now();
+          if (!(await treeRunning(helper, tree))) {
+            assert.ok(
+              checkedAt - listedAt >= idleLimit,
+              'The peer tree was not running before the idle limit expired.',
+            );
+            await waitTreeGone(helper, tree, idleLimit + containment, listedAt);
+            await bridge.client.listTools();
+            tree = await captureNext(tree);
+            assert.ok(
+              await treeRunning(helper, tree),
+              'The peer tree was not running before the idle limit expired.',
+            );
+          }
+          // The idle clock of the bridge starts no earlier than this count
+          // was sent and no later than its answer arrived.
+          const countedAt = Date.now();
           const first = await bridge.client.callTool({ name, arguments: {} });
           assert.ok(
             first.content[0].text === '1',
@@ -1031,33 +1077,25 @@ const steps = [
           );
           // One deadline for the whole expiry: the moment the count ended.
           const idleAt = Date.now();
-          const tree = await capture();
-          // The readiness of the case: the tree runs before the limit ends.
-          assert.ok(
-            await treeRunning(helper, tree),
-            'The peer tree was not running before the idle limit expired.',
-          );
           // The peer outlives half of the idle limit, so a death before the
-          // limit is never read as an expiry. The sample is taken half of
-          // the limit after the count, not after the wait that precedes it.
+          // limit is never read as an expiry. A runner too slow to sample in
+          // time may see the peer gone once the whole limit has passed since
+          // the count was sent: that expiry may be on time, so the sample
+          // proves nothing and only the deadline below decides.
           const waited = Date.now() - idleAt;
           if (waited < idleLimit / 2) await delay(idleLimit / 2 - waited);
+          const sample = await helper.alive(tree, 'server');
+          const sampledAfter = Date.now() - countedAt;
           assert.ok(
-            (await helper.alive(tree, 'server')) === 'alive',
+            sample === 'alive' ||
+              (sample === 'gone' && sampledAfter >= idleLimit),
             'The pooled peer died before the idle limit expired.',
           );
-          // The server and the grandchild share the deadline of the count.
-          const server = await waitGone(
+          // The process host, the server and the grandchild share the
+          // deadline of the count.
+          const gone = await waitTreeGone(
             helper,
             tree,
-            'server',
-            idleLimit + containment,
-            idleAt,
-          );
-          const grandchild = await waitGone(
-            helper,
-            tree,
-            'grandchild',
             idleLimit + containment,
             idleAt,
           );
@@ -1070,10 +1108,10 @@ const steps = [
             second.content[0].text === '1',
             'The idle expiry did not replace the peer.',
           );
-          return { server, grandchild };
+          return gone;
         },
       );
-      return `the idle tree was gone in ${Math.max(measured.server, measured.grandchild)} ms and the next call started a fresh peer`;
+      return `the idle tree was gone in ${describeGone(measured)} and the next call started a fresh peer`;
     },
   },
 ];

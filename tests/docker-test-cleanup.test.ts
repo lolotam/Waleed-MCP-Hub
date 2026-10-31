@@ -13,10 +13,12 @@ const foreign = 'b'.repeat(64);
 function recording(
   labels: Record<string, Record<string, string>>,
   listing: string[],
+  removalCode = 0,
 ) {
   const calls: string[][] = [];
   const cli: DockerCli = async (args) => {
     calls.push(args);
+    if (args[0] === 'rm') return { code: removalCode, stdout: '' };
     if (args[0] === 'ps') return { code: 0, stdout: listing.join('\n') };
     if (args[0] === 'inspect') {
       const id = args[args.length - 1] ?? '';
@@ -77,6 +79,28 @@ describe('the teardown of the real-daemon test', () => {
       agentId: 'opencode',
       nonce,
     });
+    expect(docker.removed()).toEqual([own]);
+  });
+
+  it('reports a removal that failed instead of passing in silence', async () => {
+    const docker = recording(
+      {
+        [own]: {
+          'wmh.install': installId,
+          'wmh.agent': 'opencode',
+          'wmh.client': nonce,
+        },
+      },
+      [own],
+      1,
+    );
+    await expect(
+      removeTestContainers(docker.cli, {
+        installId,
+        agentId: 'opencode',
+        nonce,
+      }),
+    ).rejects.toThrow(own);
     expect(docker.removed()).toEqual([own]);
   });
 });

@@ -104,9 +104,12 @@ agent as the bridge's own `tools/list_changed` (at most once per second).
 
 **Startup authorisation** (new peers only, inside the shared startup, before any
 secret is resolved and before any process or container starts): the same state
-checks as 2–6 below, then, for a managed package, a full cancellable
-`verifyPackage`. A modified package therefore causes no secret resolution and no
-launch. Every replacement launch gets its own startup authorisation.
+checks as 2–5 below (4 and 5 hold by construction, because the peer is built
+from that snapshot's definition), then, for a managed package, a full
+cancellable `verifyPackage`. A modified package therefore causes no secret
+resolution and no launch. The lease is resolved next, and a lease whose
+`notAfter` is 30 s away or less is refused before any process or container
+starts. Every replacement launch gets its own startup authorisation.
 
 **Dispatch validation** runs after the caller holds the entry exclusively, in
 this order, immediately before each SDK request (every `tools/list` page and the
@@ -124,7 +127,10 @@ this order, immediately before each SDK request (every `tools/list` page and the
 5. Credential stamp unchanged: for each bound reference id,
    `{ id, adapter, present, kind, ownerIds includes connector }`. Replacing a
    secret makes a new immutable id (D019), changing the bindings and the hash.
-6. `lease.notAfter` is more than 30 s away.
+6. `lease.notAfter` is more than 30 s away, and on an admission more than 30 s
+   plus the operation deadline away, so the lease timer never ends a call it
+   admitted. A shorter lease is refused, not replaced: a fresh peer would
+   resolve the same expiry.
 7. Final gate, synchronous and with no `await` between it and the SDK call: the
    entry's generation is unchanged, it is not invalidated or `disposing`, the
    operation signal is not aborted, and either
@@ -137,7 +143,9 @@ this order, immediately before each SDK request (every `tools/list` page and the
      reached after admission; the operation's original 20 s deadline still
      applies.
 
-   Then `validatedSeq` is set to the snapshot's sequence.
+   Then `validatedSeq` is set to the snapshot's sequence. Every other check is
+   evaluated first; an aborted operation signal by itself is abandonment, not a
+   failure, and the entry is released unchanged.
 
 **Boot mismatch** (snapshot `bootId` ≠ `entry.bootId`) is not a failure: it is
 the replacement path. Within the same request deadline the entry is retired
@@ -146,7 +154,8 @@ and validated, and the operation is dispatched once on it. A `tools/list` that
 sees a boot mismatch between pages discards that connector's partial pages and
 lists it once more on the fresh entry.
 
-Any other failure of 1–7: **security invalidation**. For `tools/call` the
+Any other failure of 1–7, except a caller cancellation or deadline before
+dispatch: **security invalidation**. For `tools/call` the
 existing checks stay: a call whose listed hash differs is refused with "Refresh
 the hub tool list"; any other failure returns the existing fixed "unavailable"
 text. For `tools/list`, a failure drops that connector from the result.
@@ -174,9 +183,13 @@ result is ever applied after a later snapshot. For each entry in `live`:
 - applies only if the entry's `validatedSeq` is lower than the snapshot's
   sequence (a snapshot read before the one that admitted or last validated an
   entry never touches it), and only to the entry captured at decision time;
-- a failed read (ledger blocked, state or boot record unreadable): invalidate
-  every entry that is not `busy`; a busy operation fails at its own next
-  validation, which takes a later snapshot;
+- a ledger whose only open entry is `prepared` (a hub write in progress, which
+  may last as long as its DPAPI or Docker step): keep every entry and decide on
+  the next read; every request still fails closed meanwhile, because its own
+  snapshot reads the same ledger;
+- a failed read (ledger `needs_review`, state or boot record unreadable):
+  invalidate every entry that is not `busy`; a busy operation fails at its own
+  next validation, which takes a later snapshot;
 - boot ID changed: idle entries close, busy ones retire after their operation;
 - connector removed, disabled, unapproved, changed hash or credential stamp:
   invalidate;
@@ -263,7 +276,9 @@ operations budget. Any breach closes the session.
   framer counts each dispatched event as one message, caps one event's data
   (all `data:` lines joined) at 1 MiB and the pending, undispatched buffer at
   1 MiB, and counts raw bytes. An incomplete event at an operation boundary
-  belongs to the between-operations budget. Breach → error the stream → death.
+  is charged in full to the window that opens there: the operation budget at
+  `beginOperation()`, the between-operations budget at `endOperation()`; the
+  session total counts it once. Breach → error the stream → death.
   Non-session mode keeps today's counters exactly.
 - **Requests**: per-operation/session/between counts replace the lifetime
   counter (`http.ts:50`); destination checks on every request unchanged.
@@ -285,7 +300,9 @@ operations budget. Any breach closes the session.
   are suppressed. A POST body still open at its operation's end is completed
   the same way. A POST slot is released only after upstream teardown finished.
   GET streams keep their `id:` fields. At most 4 POST slots (including automatic
-  protocol replies); a fifth request waits within its deadline.
+  protocol replies); a fifth request waits within its deadline. A request still
+  waiting for a slot when its operation ends fails with `cancelled`; it never
+  opens a POST between operations.
 - **Dispose**: Streamable HTTP `terminateSession()` (DELETE) bounded 5 s, then
   `client.close()` always. 405, error or timeout is ignored after local cleanup.
 
@@ -314,10 +331,13 @@ operations budget. Any breach closes the session.
   `wmh.install=<installId>`, `wmh.agent`, `wmh.bridge`, `wmh.client=<nonce>`,
   `wmh.connector`. A marker per container session at
   `owned-agent-containers/<agentId>/<bridgeId>/<nonce>.json` records
-  `{ nonce, connectorId, agentId, bridgeId, dockerEndpoint, daemonId, phase }`
-  (`daemonId` from `docker info`, endpoint as pinned by `docker-profile.ts`).
-  `phase` is `launching` (written before `docker run`) or `running` with the
-  immutable container ID read from `docker run --cidfile`.
+  `{ nonce, connectorId, agentId, bridgeId, dockerEndpoint, daemonId, phase,
+  containerId? }` (`daemonId` from `docker info`, endpoint as pinned by
+  `docker-profile.ts`). `phase` is `launching` (written before `docker run`, no
+  `containerId`), `running` (with the immutable container ID read from
+  `docker run --cidfile`) or `removing` (with the inspected immutable container
+  ID and the daemon identity, written before the removal); `running` and
+  `removing` require `containerId`.
 - **Recovery mutex**: recovery for an agent runs while holding
   `pipeName('recovery', installId, agentId)` (listen succeeds for exactly one
   process; released by the OS on death). No timestamps decide ownership.
@@ -370,8 +390,13 @@ operations budget. Any breach closes the session.
     do (bounded growth); the troubleshooting guide explains checking
     `docker ps -a --filter label=wmh.client=<nonce>` and deleting the marker by
     hand (explicit reconciliation).
+- **Artifacts**: a clean disposal removes its own `--cidfile`. After the passes,
+  a recovery round with a certain inventory removes the `--cidfile` of every
+  session whose marker is confirmed absent (this bridge's and absent bridges'),
+  and the empty folders of absent bridges; it never follows a link.
 - **Admission**: refused only while this agent has an uncertain-cleanup marker,
-  or while any legacy marker exists.
+  while it has more than 16 unacknowledged (`launching`) markers, or while any
+  legacy marker exists.
 - **Legacy markers** (pre-F03 `{ nonce, connectorId }` at the top level of
   `owned-agent-containers`): not auto-recovered (they carry no agent or bridge
   identity). They keep today's behaviour: Docker peers are refused while one

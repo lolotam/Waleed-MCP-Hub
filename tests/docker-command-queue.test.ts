@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { queuedRunner } from '../packages/hub-core/src/integrations/docker-transport.js';
+import {
+  laneRunner,
+  queuedRunner,
+} from '../packages/hub-core/src/integrations/docker-transport.js';
 import type {
   ProcessRequest,
   ProcessResult,
@@ -120,5 +123,39 @@ describe('the queue of the Docker short commands', () => {
     await inner.finishNext();
     await expect(first).resolves.toMatchObject({ outcome: 'exited' });
     await expect(next).resolves.toMatchObject({ outcome: 'exited' });
+  });
+
+  it('runs a short command while two image pulls are in flight', async () => {
+    const inner = controlledRunner(3);
+    const lanes = laneRunner(inner.runner, 2, 1);
+    const pull = (): ProcessRequest => ({
+      ...request(undefined, 600_000),
+      arguments: ['pull', 'synthetic-image:1.2.3'],
+    });
+    // Two pulls: the first takes the pull lane, the second waits for it.
+    const pulls = [lanes.run(pull()), lanes.run(pull())];
+    await settle();
+    expect(inner.started).toHaveLength(1);
+    // The removal of a disposal does not wait behind the pulls.
+    const removal = lanes.run({
+      ...request(undefined, 4000),
+      arguments: ['rm', '--force', 'a'.repeat(64)],
+    });
+    await settle();
+    expect(inner.started).toHaveLength(2);
+    expect(inner.started[1]?.arguments[0]).toBe('rm');
+    // The short commands still have a second slot of their own.
+    const inspection = lanes.run(request());
+    await settle();
+    expect(inner.started).toHaveLength(3);
+    for (let index = 0; index < 4; index++) await inner.finishNext();
+    for (const result of await Promise.all([removal, inspection, ...pulls]))
+      expect(result.outcome).toBe('exited');
+    expect(inner.started.map((item) => item.arguments[0])).toEqual([
+      'pull',
+      'rm',
+      'info',
+      'pull',
+    ]);
   });
 });

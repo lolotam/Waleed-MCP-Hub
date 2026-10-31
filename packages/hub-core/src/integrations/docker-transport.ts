@@ -80,6 +80,23 @@ export function queuedRunner(
   };
 }
 
+// The lanes of the short commands of one bridge: an image pull of the
+// pre-flight runs up to ten minutes, so it waits in a lane of its own. A
+// pull never takes the slot of a removal, an inspection or a recovery
+// round, and those always keep their own capacity.
+export function laneRunner(
+  runner: ProcessRunner,
+  shortSlots: number,
+  pullSlots: number,
+): ProcessRunner {
+  const short = queuedRunner(runner, shortSlots);
+  const pulls = queuedRunner(runner, pullSlots);
+  return {
+    run: (request) =>
+      (request.arguments[0] === 'pull' ? pulls : short).run(request),
+  };
+}
+
 export async function createDockerSession(
   directory: string,
   signal: AbortSignal,
@@ -91,16 +108,18 @@ export async function createDockerSession(
   }).find(['docker'], signal);
   if (!executable) throw new Error();
   // The short commands of the daemon run in their own runner: a container
-  // that stays alive never blocks a recovery. They queue for its two slots.
-  const commandRunner = queuedRunner(
+  // that stays alive never blocks a recovery. They queue for two slots of
+  // their own, and the image pulls queue for a third one.
+  const commandRunner = laneRunner(
     await createWindowsProcessRunner({
       allowedExecutables: [executable],
       workingDirectory: directory,
-      concurrency: 2,
+      concurrency: 3,
       // The image pull of the pre-flight is the longest command.
       maxTimeoutMs: 600_000,
     }),
     2,
+    1,
   );
   const command = dockerCommand(
     commandRunner,

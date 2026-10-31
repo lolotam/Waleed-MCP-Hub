@@ -61,26 +61,19 @@ function setup(references: Reference[]) {
   return { secrets, connector, resolve, store };
 }
 
+// The stored OAuth value of a reference: the access value is a plain test
+// word, never a credential.
+const oauthValue = (access: string, expiresAt: number | null) =>
+  JSON.stringify({ accessToken: access, expiresAt });
+
 describe('secret lease expiry', () => {
   it('keeps the smallest expiry of the resolved OAuth values', async () => {
     const { connector, resolve, store } = setup([
       { id: 'lease-a', name: 'Authorization', kind: 'oauth' },
       { id: 'lease-b', name: 'X-Second-Key', kind: 'oauth' },
     ]);
-    await store(
-      'lease-a',
-      JSON.stringify({
-        accessToken: 'synthetic-access-1',
-        expiresAt: now + 600_000,
-      }),
-    );
-    await store(
-      'lease-b',
-      JSON.stringify({
-        accessToken: 'synthetic-access-2',
-        expiresAt: now + 120_000,
-      }),
-    );
+    await store('lease-a', oauthValue('test-value-a', now + 600_000));
+    await store('lease-b', oauthValue('test-value-b', now + 120_000));
 
     const lease = await resolve(connector, new AbortController().signal);
     expect(lease.notAfter).toBe(now + 120_000);
@@ -91,7 +84,7 @@ describe('secret lease expiry', () => {
     const { connector, resolve, store } = setup([
       { id: 'lease-raw', name: 'Authorization', kind: 'credential' },
     ]);
-    await store('lease-raw', 'synthetic-access-1');
+    await store('lease-raw', 'test-value-a');
 
     const lease = await resolve(connector, new AbortController().signal);
     expect(lease.notAfter).toBeUndefined();
@@ -102,13 +95,7 @@ describe('secret lease expiry', () => {
     const { connector, resolve, store } = setup([
       { id: 'lease-null', name: 'Authorization', kind: 'oauth' },
     ]);
-    await store(
-      'lease-null',
-      JSON.stringify({
-        accessToken: 'synthetic-access-1',
-        expiresAt: null,
-      }),
-    );
+    await store('lease-null', oauthValue('test-value-a', null));
 
     const lease = await resolve(connector, new AbortController().signal);
     expect(lease.notAfter).toBeUndefined();

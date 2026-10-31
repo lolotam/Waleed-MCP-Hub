@@ -13,10 +13,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { RuntimeFault } from '../packages/hub-core/src/runtime/capabilities.js';
 import { definitionHash } from '@waleed/hub-core';
-import { sessionMcpHttpTransport } from '../packages/hub-core/src/adapters/mcp/http.js';
 import type { Connector, HubState } from '@waleed/contracts';
 import {
   createAgentBridge,
+  remoteSessionPeer,
   type AgentBridgeServer,
   type BridgeConnect,
   type BridgeSession,
@@ -78,7 +78,9 @@ function createFakeSession(options: {
   clock: FakeClock;
   state: HubState;
   bootId: () => string;
-  fail?: (read: number) => boolean;
+  // A read fails; 'pending' fails it on a ledger whose only open entry is a
+  // prepared mutation.
+  fail?: (read: number) => boolean | 'pending';
 }): FakeSession {
   let seq = 0;
   let tail: Promise<void> = Promise.resolve();
@@ -94,9 +96,14 @@ function createFakeSession(options: {
       await previous;
       try {
         session.reads += 1;
-        if (options.fail?.(session.reads)) {
+        const failure = options.fail?.(session.reads);
+        if (failure) {
           seq += 1;
-          inside?.({ seq, failed: true });
+          inside?.({
+            seq,
+            failed: true,
+            ...(failure === 'pending' ? { pending: true } : {}),
+          });
           throw new Error('synthetic registry failure');
         }
         seq += 1;
@@ -203,7 +210,7 @@ interface HarnessConfig {
   peer?: PeerConfig;
   clock?: FakeClock;
   bootId?: () => string;
-  fail?: (read: number) => boolean;
+  fail?: (read: number) => boolean | 'pending';
   notAfter?: (now: number) => number;
   // The connector whose peer disposal never settles on its own.
   hangDispose?: string;
@@ -235,44 +242,20 @@ async function createHarness(config: HarnessConfig = {}): Promise<Harness> {
   const peers: PeerHandle[] = [];
   const connect: BridgeConnect = async (connector, signal, died) => {
     connects.push(connector.id);
-    // A remote peer is a real HTTP session against the local fixture.
-    if (config.remote) {
-      const remote = connector as Extract<
-        Connector,
-        { executionMode: 'remote' }
-      >;
-      const http = sessionMcpHttpTransport(
-        remote.endpoint,
-        remote.transport,
+    // A remote peer is a real HTTP session against the local fixture. It is
+    // the production remote peer, built as the bridge builds it.
+    if (config.remote)
+      return remoteSessionPeer(
+        new Client(
+          { name: 'synthetic-remote-client', version: '1' },
+          { capabilities: {} },
+        ),
+        connector as Extract<Connector, { executionMode: 'remote' }>,
         signal,
         died ?? (() => undefined),
         undefined,
         config.remote.origin,
       );
-      const client = new Client(
-        { name: 'synthetic-remote-client', version: '1' },
-        { capabilities: {} },
-      );
-      client.onerror = () => undefined;
-      await client.connect(http.transport, { timeout: 10_000 });
-      return {
-        client,
-        async dispose() {
-          try {
-            await http.dispose();
-          } finally {
-            await client.close();
-          }
-        },
-        assertPublic() {},
-        beginOperation() {
-          http.beginOperation();
-        },
-        endOperation() {
-          http.endOperation();
-        },
-      };
-    }
     const hang = config.hangDispose === connector.id;
     const handle = await createPeer(config.peer);
     peers.push(handle);
@@ -345,9 +328,9 @@ const asManagedPackage = (state: HubState, id = 'connector-0') => {
 // The connector owns one credential reference.
 const withCredential = (state: HubState, id = 'connector-0') => {
   const connector = connectorOf(state, id);
-  connector.secretBindings = { PROVIDER_TOKEN: 'secret-1' };
+  connector.secretBindings = { SAMPLE_BINDING: 'reference-a' };
   state.secretReferences.push({
-    id: 'secret-1',
+    id: 'reference-a',
     adapter: 'windows',
     present: true,
     ownerIds: [connector.id],
@@ -518,7 +501,7 @@ describe('agent bridge session mode', () => {
   it('row 12: an expiring lease invalidates the peer without a registry change', async () => {
     let now = 1_700_000_000_000;
     const harness = await createHarness({
-      notAfter: () => now + 60_000,
+      notAfter: () => now + 120_000,
     });
     try {
       const tools = await harness.agent.listTools();
@@ -527,8 +510,8 @@ describe('agent bridge session mode', () => {
         await harness.agent.callTool({ name, arguments: {} }),
       ).toMatchObject({ content: [{ text: 'synthetic success' }] });
       // The lease ends in thirty seconds: the peer is invalidated.
-      now += 30_001;
-      harness.clock.advance(30_001);
+      now += 90_001;
+      harness.clock.advance(90_001);
       await wait();
       expect(harness.peers[0]?.disposed).toBe(1);
       expect(
@@ -1312,5 +1295,150 @@ describe('agent bridge session mode', () => {
     }
     // The pooled peer is disposed once, when the bridge closes.
     expect(harness.peers[0]?.disposed).toBe(1);
+  });
+
+  it('keeps a reused peer whose operation was cancelled during package verification', async () => {
+    const state = profileState(['native']);
+    asManagedPackage(state);
+    const harness = await createHarness({ state });
+    try {
+      const tools = await harness.agent.listTools();
+      const name = tools.tools[0]!.name;
+      const controller = new AbortController();
+      // The agent cancels while the reused package is verified: no request
+      // has reached the peer yet.
+      harness.session.verify = async (_connector, signal) => {
+        controller.abort();
+        await until(() => signal.aborted);
+        throw new RuntimeFault('cancelled');
+      };
+      await expect(
+        harness.agent.callTool({ name, arguments: {} }, CallToolResultSchema, {
+          signal: controller.signal,
+        }),
+      ).rejects.toBeDefined();
+      await wait();
+      expect(harness.peers[0]?.calls).toHaveLength(0);
+      expect(harness.peers[0]?.disposed).toBe(0);
+      // The same peer serves the next call.
+      harness.session.verify = async () => undefined;
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({ content: [{ text: 'synthetic success' }] });
+      expect(harness.connects).toHaveLength(1);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+    }
+  });
+
+  it('closes a reused peer whose package fails verification while the call is cancelled', async () => {
+    const state = profileState(['native']);
+    asManagedPackage(state);
+    const harness = await createHarness({ state });
+    try {
+      const tools = await harness.agent.listTools();
+      const name = tools.tools[0]!.name;
+      const controller = new AbortController();
+      // The package is modified: a cancellation at the same time never
+      // hides it.
+      harness.session.verify = async (_connector, signal) => {
+        controller.abort();
+        await until(() => signal.aborted);
+        throw new RuntimeFault('package_modified');
+      };
+      await expect(
+        harness.agent.callTool({ name, arguments: {} }, CallToolResultSchema, {
+          signal: controller.signal,
+        }),
+      ).rejects.toBeDefined();
+      await until(() => harness.peers[0]?.disposed === 1);
+      expect(harness.peers[0]?.calls).toHaveLength(0);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+    }
+  });
+
+  it('refuses a call whose lease would end before the call deadline', async () => {
+    const harness = await createHarness({
+      // Eighty seconds: enough for a listing, not for a sixty second call
+      // plus the thirty second margin.
+      notAfter: (now) => now + 80_000,
+    });
+    try {
+      const tools = await harness.agent.listTools();
+      expect(tools.tools).toHaveLength(1);
+      const name = tools.tools[0]!.name;
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({
+        isError: true,
+        content: [{ text: connectorUnavailable }],
+      });
+      expect(harness.peers[0]?.calls).toHaveLength(0);
+      expect(harness.peers[0]?.disposed).toBe(1);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+    }
+  });
+
+  it('closes a pooled peer older than the registry instead of keeping it for later listings', async () => {
+    const harness = await createHarness();
+    try {
+      expect((await harness.agent.listTools()).tools).toHaveLength(1);
+      // The definition changes before any reconciliation ran: the pooled
+      // peer still carries the old one.
+      const connector = connectorOf(harness.state);
+      connector.environmentLiterals = { MODE: 'changed' };
+      reapprove(connector);
+      await harness.agent.listTools();
+      await until(() => harness.peers[0]?.disposed === 1);
+      expect(harness.peers[0]?.lists).toHaveLength(1);
+      // The next listing starts a peer of the new definition.
+      expect((await harness.agent.listTools()).tools).toHaveLength(1);
+      expect(harness.connects).toHaveLength(2);
+      expect(harness.peers[1]?.disposed).toBe(0);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+    }
+  });
+
+  it('defers the reconciliation of a prepared mutation and still fails a needs-review ledger closed', async () => {
+    let failure: boolean | 'pending' = false;
+    const harness = await createHarness({ fail: () => failure });
+    try {
+      const tools = await harness.agent.listTools();
+      const name = tools.tools[0]!.name;
+      // An unrelated mutation is prepared: the idle peer stays.
+      failure = 'pending';
+      await harness.bridge.reconcile();
+      await wait();
+      expect(harness.peers[0]?.disposed).toBe(0);
+      // No request is dispatched while the ledger is blocked.
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({
+        isError: true,
+        content: [{ text: registryUnavailable }],
+      });
+      expect(harness.peers[0]?.calls).toHaveLength(0);
+      // The mutation committed: the peer serves again.
+      failure = false;
+      await harness.bridge.reconcile();
+      expect(
+        await harness.agent.callTool({ name, arguments: {} }),
+      ).toMatchObject({ content: [{ text: 'synthetic success' }] });
+      expect(harness.connects).toHaveLength(1);
+      // A ledger that needs review closes every idle peer.
+      failure = true;
+      await harness.bridge.reconcile();
+      await until(() => harness.peers[0]?.disposed === 1);
+    } finally {
+      await harness.agent.close();
+      await harness.bridge.close();
+    }
   });
 });

@@ -95,6 +95,9 @@ const DEFAULT_LIMITS: PoolLimits = {
   leaseMarginMs: 30_000,
 };
 
+// The longest delay a Node.js timer honours; a longer one fires at once.
+const maxTimerDelayMs = 2_147_483_647;
+
 type EntryState = EntryInfo['state'];
 type AbortReason = 'cancelled' | 'timed_out' | 'invalidated';
 
@@ -133,6 +136,9 @@ interface Operation<P> {
   detachCaller: () => void;
   entry: Entry<P> | undefined;
   fresh: boolean;
+  // The SDK requests of this operation that were dispatched and have not
+  // settled yet.
+  inFlight: number;
 }
 
 interface Waiter<P> {
@@ -196,6 +202,7 @@ export function createSessionPool<P>(
       detachCaller: () => undefined,
       entry: undefined,
       fresh: false,
+      inFlight: 0,
     };
     const onCaller = () => abortOperation(op, 'cancelled');
     if (signal.aborted) abortOperation(op, 'cancelled');
@@ -443,10 +450,7 @@ export function createSessionPool<P>(
         return;
       }
       entry.notAfter = started.notAfter;
-      entry.timers.lease = options.setTimer(
-        () => invalidateEntry(entry),
-        leaseAt - options.now(),
-      );
+      armLeaseTimer(entry, leaseAt);
     }
     if (entry.timers.startup !== undefined) {
       options.clearTimer(entry.timers.startup);
@@ -467,6 +471,24 @@ export function createSessionPool<P>(
     // A caller may not have queued yet; the idle timer bounds an unused peer.
     if (waiter) grant(entry, waiter);
     else armIdleTimer(entry);
+  }
+
+  // The lease timer never waits longer than the max life of an entry: a
+  // timer delay above 2^31-1 ms would fire at once, and a long-lived token
+  // must not end a healthy peer right after its start. A timer that fires
+  // before the lease is due arms the next step.
+  function armLeaseTimer(entry: Entry<P>, leaseAt: number) {
+    if (entry.disposal) return;
+    const delay = leaseAt - options.now();
+    if (delay <= 0) {
+      entry.timers.lease = undefined;
+      invalidateEntry(entry);
+      return;
+    }
+    entry.timers.lease = options.setTimer(
+      () => armLeaseTimer(entry, leaseAt),
+      Math.min(delay, limits.maxLifeMs, maxTimerDelayMs),
+    );
   }
 
   function armIdleTimer(entry: Entry<P>) {
@@ -576,13 +598,22 @@ export function createSessionPool<P>(
   async function obtainEntry(op: Operation<P>, key: string): Promise<Entry<P>> {
     for (;;) {
       if (closed) throw fault('dependency_unavailable');
+      // A joined entry was started by another operation: this one did not
+      // verify its package, even when an entry it started earlier was retired
+      // before it was served.
       const existing = serving.get(key);
-      if (existing) return existing;
+      if (existing) {
+        op.fresh = false;
+        return existing;
+      }
       await ensureCapacity(op);
       if (op.signal.aborted) throw operationFault(op);
       if (closed) throw fault('dependency_unavailable');
       const again = serving.get(key);
-      if (again) return again;
+      if (again) {
+        op.fresh = false;
+        return again;
+      }
       // Another operation may have taken the slot while the eviction waited.
       if (live.size >= limits.capacity) continue;
       const entry = createEntry(key);
@@ -658,7 +689,6 @@ export function createSessionPool<P>(
           allowed = false;
         else if (current.invalidated || current.state === 'disposing')
           allowed = false;
-        else if (op.signal.aborted) allowed = false;
         else if (admission) {
           if (
             serving.get(current.key) !== current ||
@@ -677,6 +707,9 @@ export function createSessionPool<P>(
           else invalidateEntry(current);
           throw fault('dependency_unavailable');
         }
+        // A cancellation or deadline before dispatch abandons the operation:
+        // no request reached the server, so the healthy peer stays.
+        if (op.signal.aborted) throw operationFault(op);
         current.validatedSeq = seq;
         if (admission) {
           state.admitted = true;
@@ -692,6 +725,7 @@ export function createSessionPool<P>(
           invalidateEntry(current);
         };
         op.signal.addEventListener('abort', forward, { once: true });
+        op.inFlight += 1;
         try {
           const result = await send(controller.signal);
           // A result produced after an invalidation is discarded.
@@ -708,6 +742,7 @@ export function createSessionPool<P>(
             ? error
             : fault('dependency_unavailable');
         } finally {
+          op.inFlight -= 1;
           op.signal.removeEventListener('abort', forward);
         }
       },
@@ -752,7 +787,10 @@ export function createSessionPool<P>(
           if (op.invalidated) throw fault('dependency_unavailable');
           return result;
         } catch (error) {
-          if (terminal(error) && op.entry) invalidateEntry(op.entry);
+          // Only a request in flight leaves the server's state unknown; a
+          // request that ended already invalidated the entry if it had to.
+          if (terminal(error) && op.entry && op.inFlight > 0)
+            invalidateEntry(op.entry);
           throw error;
         } finally {
           release(op, op.entry ?? entry);

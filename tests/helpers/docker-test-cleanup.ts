@@ -27,6 +27,9 @@ export async function removeTestContainers(
     `label=wmh.client=${owner.nonce}`,
   ]);
   if (listed.code !== 0) return;
+  // A removal that fails leaves a test container behind: the teardown
+  // reports it instead of passing in silence.
+  const failed: string[] = [];
   for (const id of listed.stdout.split(/\s+/).filter(Boolean)) {
     if (!containerId.test(id)) continue;
     const inspected = await cli([
@@ -48,6 +51,11 @@ export async function removeTestContainers(
       labels['wmh.client'] !== owner.nonce
     )
       continue;
-    await cli(['rm', '--force', id]);
+    const removed = await cli(['rm', '--force', id]);
+    if (removed.code !== 0) failed.push(id);
   }
+  if (failed.length > 0)
+    throw new Error(
+      `The teardown could not remove the test containers ${failed.join(', ')}.`,
+    );
 }

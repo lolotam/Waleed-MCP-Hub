@@ -6,6 +6,7 @@ import {
   readdir,
   readFile,
   rename,
+  rmdir,
   unlink,
 } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
@@ -42,6 +43,24 @@ const realClock: OwnershipClock = {
   clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+// The shutdown wait for the work that is still running: every wait shares
+// one bound, so the process leaves at the bound even when a wait never
+// ends. A wait that fails counts as finished: the shutdown never stalls on
+// an error.
+export function settleWithin(
+  waits: readonly (Promise<unknown> | undefined)[],
+  ms: number,
+  clock: OwnershipClock,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = clock.setTimer(resolve, ms);
+    void Promise.allSettled(waits).then(() => {
+      clock.clearTimer(timer);
+      resolve();
+    });
+  });
+}
+
 const lowerUuid =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const containerId = /^[a-f0-9]{64}$/;
@@ -71,6 +90,14 @@ const PROBE_CONCURRENCY = 16;
 // The largest valid listing of the label sweep: the Docker CLI caps its
 // output at 1 MiB, so 4 096 immutable ids fit in it.
 const MAX_LISTED_IDS = 4_096;
+// The number of bridge folders one round of the artifact purge examines.
+// The batch is probed at the same time, so its slow owners cost one probe
+// bound: the purge never holds the recovery mutex for long.
+const PURGE_BATCH_SIZE = 16;
+// The number of container id files one round of the artifact purge
+// examines, across every bridge folder of the round: a folder with many
+// files never holds the round past its share of the work.
+const PURGE_FILE_BUDGET = 64;
 // The poll interval of the container id file.
 const WATCH_INTERVAL_MS = 250;
 // The bound of the container id poll.
@@ -284,6 +311,11 @@ export interface DockerOwnership {
   dispose(launch: DockerLaunch, signal: AbortSignal): Promise<void>;
   // One recovery round of this agent.
   recover(): Promise<void>;
+  // The end of the recovery rounds that are running: it resolves once no
+  // round runs, and it never rejects. The shutdown bounds the wait.
+  settled(): Promise<void>;
+  // The end of the scheduling: no round starts and no timer is armed after
+  // it. A round that is running finishes within its own deadline.
   close(): Promise<void>;
 }
 
@@ -772,6 +804,134 @@ export function createDockerOwnership(
     }
   }
 
+  // The container id file of one session, below the folder of its bridge.
+  const cidfileOf = (owner: string, nonce: string) =>
+    join(root, agentId, owner, CID_FOLDER, `${nonce}.cid`);
+
+  // The removal of a container id file whose marker is gone: the file is
+  // never evidence of ownership, so a doubt only leaves it for a later
+  // round. A path that holds a link is never touched.
+  async function discardCidfile(path: string) {
+    try {
+      await assertNoLinks(path, true);
+      await unlink(path);
+    } catch {
+      // The file stays: a later purge removes it.
+    }
+  }
+
+  // The removal of a folder of a finished bridge: only an empty folder
+  // without a link goes, everything else stays.
+  async function removeEmptyFolder(path: string) {
+    try {
+      await assertNoLinks(path);
+      await rmdir(path);
+    } catch {
+      // A folder that is not empty, or that cannot be checked, stays.
+    }
+  }
+
+  // The purge of the artifacts of finished sessions: the container id file
+  // of a session whose marker is gone, and the folders of a bridge that
+  // probes absent once they are empty. It reads only the marker folder of
+  // this agent, it never removes a marker and it never follows a link. The
+  // folders of this bridge stay: its next launch writes into them.
+  //
+  // The purge walks the sorted bridge folders in passes. One round examines
+  // at most PURGE_BATCH_SIZE folders and PURGE_FILE_BUDGET files, and it
+  // stops at the deadline of the round. The cursors keep the place it
+  // reached: the last folder it finished, and the last file of the folder
+  // it was cut in. The next round resumes there, so a large folder never
+  // starts again from its first file. The purge answers false while its
+  // pass is unfinished: the recovery keeps a round scheduled for the rest.
+  let purgeCursor: string | undefined;
+  let purgeFileCursor: { owner: string; name: string } | undefined;
+  async function purgeArtifacts(
+    probes: RoundProbes,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (signal.aborted) return false;
+    const agentRoot = join(root, agentId);
+    const bridges = await readFolder(agentRoot);
+    // A missing or unreadable folder of the agent holds nothing to purge
+    // that this round could reach.
+    if (bridges.kind !== 'entries') return true;
+    const owners = bridges.entries
+      .filter((entry) => entry.isDirectory() && lowerUuid.test(entry.name))
+      .map((entry) => entry.name)
+      .sort();
+    // The batch of this round never wraps: the pass ends at the last folder
+    // and the next pass starts again at the first one.
+    const cursor = purgeCursor;
+    const batch = owners
+      .filter((owner) => cursor === undefined || owner > cursor)
+      .slice(0, PURGE_BATCH_SIZE);
+    if (batch.length === 0) {
+      purgeCursor = undefined;
+      purgeFileCursor = undefined;
+      return true;
+    }
+    // The other owners of the batch are probed at the same time: the slow
+    // owners cost one probe bound, not one bound each.
+    await probes.batch(batch.filter((owner) => owner !== bridgeId));
+    let budget = PURGE_FILE_BUDGET;
+    for (const owner of batch) {
+      // The deadline of the round expired: a later round continues here.
+      if (signal.aborted) return false;
+      const own = owner === bridgeId;
+      // Only this bridge and a bridge that probes absent own artifacts of
+      // finished sessions.
+      if (own || (await probes.of(owner)) === 'absent') {
+        const folder = join(agentRoot, owner);
+        const cidFolder = join(folder, CID_FOLDER);
+        const files = await readFolder(cidFolder);
+        // The folder was cut in a previous round: its files up to the file
+        // cursor are done.
+        const after =
+          purgeFileCursor?.owner === owner ? purgeFileCursor.name : undefined;
+        const names =
+          files.kind === 'entries'
+            ? files.entries
+                .filter((file) => file.isFile() && file.name.endsWith('.cid'))
+                .map((file) => file.name)
+                .filter((name) => after === undefined || name > after)
+                .sort()
+            : [];
+        for (const name of names) {
+          // The round ran out of its deadline or of its file budget: the
+          // file cursor keeps the place for the next round.
+          if (signal.aborted || budget === 0) return false;
+          budget -= 1;
+          const nonce = name.slice(0, -'.cid'.length);
+          // A launch of this bridge still owns its file, and a file with an
+          // unexpected name is left alone.
+          if (lowerUuid.test(nonce) && !(own && launches.has(nonce))) {
+            // Only a confirmed missing marker lets the file of its session go.
+            const marker = await markerExists(join(folder, `${nonce}.json`));
+            // An interrupted check leaves the file cursor before this file,
+            // so the next round checks it again.
+            if (signal.aborted) return false;
+            if (marker === 'absent')
+              await discardCidfile(cidfileOf(owner, nonce));
+          }
+          purgeFileCursor = { owner, name };
+        }
+        if (!own && !signal.aborted) {
+          await removeEmptyFolder(cidFolder);
+          await removeEmptyFolder(folder);
+        }
+        if (signal.aborted) return false;
+      }
+      // The folder is finished: the next round starts after it.
+      purgeCursor = owner;
+      purgeFileCursor = undefined;
+    }
+    // The pass is over once the batch reached the last folder.
+    const finished = batch[batch.length - 1] === owners[owners.length - 1];
+    if (finished) purgeCursor = undefined;
+    return finished;
+  }
+
   // The marker transitions of one nonce are serialized: a transition waits
   // for the previous one, and a failed write does not break the next one.
   function transition(
@@ -1117,6 +1277,9 @@ export function createDockerOwnership(
     signal: AbortSignal,
     failed: Set<string>,
   ): Promise<boolean> {
+    // An incomplete inventory is never read as "every marker": while the
+    // inventory of the agent is uncertain, the pass resolves nothing.
+    if (inventory.uncertain) return false;
     // The markers of the agent in a stable order: the continuation of the
     // round needs it.
     const entries = [...inventory.entries].sort((left, right) =>
@@ -1293,16 +1456,18 @@ export function createDockerOwnership(
 
   // The recovery obligation of the agent: it lasts as long as a marker of a
   // bridge that is not live, or of a nonce that belongs to no live entry of
-  // this bridge, exists. A round only cancels the timer when no obligation
+  // this bridge, exists, and as long as a pass of the round is unfinished:
+  // the marker pass, the label sweep or the artifact purge stopped before
+  // its end. A round only cancels the timer when no obligation
   // was registered since its snapshot: an obligation of a disposal or a
   // launch that ran while the round worked survives the round.
   async function armRecovery(
     inventory: MarkerInventory,
     probeOf: (bridgeId: string) => Promise<ProbeOutcome>,
     generation: number,
-    sweepComplete: boolean,
+    passesComplete: boolean,
   ) {
-    let obligation = inventory.uncertain || !sweepComplete;
+    let obligation = inventory.uncertain || !passesComplete;
     for (const entry of inventory.entries) {
       if (obligation) break;
       if (!entry.marker || !entry.bound) {
@@ -1334,7 +1499,26 @@ export function createDockerOwnership(
     }
   }
 
-  async function recover() {
+  // The rounds that are running: the shutdown waits for them, so a round is
+  // never cut while it removes a container or a marker.
+  const rounds = new Set<Promise<void>>();
+
+  function recover(): Promise<void> {
+    if (closed) return Promise.resolve();
+    const round = recoverRound();
+    rounds.add(round);
+    void round.finally(() => rounds.delete(round)).catch(() => undefined);
+    return round;
+  }
+
+  // The rounds are awaited again until none runs: a round that started
+  // while the previous ones finished is awaited too. Once the manager is
+  // closed no round starts, so the wait ends.
+  async function settled() {
+    while (rounds.size > 0) await Promise.allSettled([...rounds]);
+  }
+
+  async function recoverRound() {
     if (closed) return;
     const lock = await acquireRecovery(installId, agentId);
     // Another recoverer holds the mutex: this round is skipped and the next
@@ -1394,7 +1578,20 @@ export function createDockerOwnership(
             failed,
           );
         }
-        await armRecovery(inventory, probes.of, generation, markers && swept);
+        // The artifacts of finished sessions go once the passes are done. An
+        // uncertain inventory keeps everything, and it is an obligation of
+        // its own. A purge whose pass is unfinished is an obligation: the
+        // next round continues it. A purge that fails never fails the round:
+        // its files wait for the next pass.
+        const purged = inventory.uncertain
+          ? true
+          : await purgeArtifacts(probes, signal).catch(() => true);
+        await armRecovery(
+          inventory,
+          probes.of,
+          generation,
+          markers && swept && purged,
+        );
         // A removal that failed in this round is owed to the next one.
         if (failed.size > 0) scheduleRecovery();
       } finally {
@@ -1734,13 +1931,17 @@ export function createDockerOwnership(
         // launch state is released: the acknowledgement joined and the
         // disposal finished or handed the recovery its marker. Only a
         // marker that is really there is owed to the recovery: a clean
-        // disposal schedules nothing.
+        // disposal schedules nothing and removes the container id file of
+        // the session: its marker is gone, so nothing reads the file again.
         if ((await markerExists(launch.markerPath)) !== 'absent')
           scheduleRecovery();
+        else if (lowerUuid.test(launch.nonce))
+          await discardCidfile(cidfileOf(bridgeId, launch.nonce));
         releaseLaunch(launch.nonce);
       }
     },
     recover,
+    settled,
     async close() {
       closed = true;
       if (recoveryTimer !== undefined) {

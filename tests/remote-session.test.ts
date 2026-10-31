@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Agent, request as httpRequest } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {
   CallToolResultSchema,
@@ -446,6 +447,44 @@ describe('remote session mode', () => {
     }
   });
 
+  it('charges an incomplete event carried into an operation to the operation budget', async () => {
+    const opened = await open();
+    try {
+      opened.session.beginOperation();
+      await list(opened.client);
+      opened.session.endOperation();
+      // Between two operations the server starts a notification whose event
+      // stays incomplete: sixty kilobytes, under the between-operations
+      // allowance.
+      const head =
+        'data: {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"' +
+        'x'.repeat(60_000);
+      opened.fixture.push(head);
+      await read(opened, head.length);
+      expect(opened.deaths()).toBe(0);
+      // The operation begins with the incomplete event still retained.
+      opened.session.beginOperation();
+      // The event ends inside the operation and is dispatched.
+      const tail = 'x'.repeat(900_000) + '"}}\n\n';
+      opened.fixture.push(tail);
+      await until(() => opened.session.inspect().pendingBytes === 0);
+      expect(opened.deaths()).toBe(0);
+      // The next event fits the operation budget only if the carried bytes
+      // were never charged to the operation.
+      const next = 'data: ' + 'z'.repeat(100_000);
+      expect(tail.length + next.length).toBeLessThan(1024 * 1024);
+      expect(head.length + tail.length + next.length).toBeGreaterThan(
+        1024 * 1024,
+      );
+      opened.fixture.push(next);
+      await until(() => opened.deaths() > 0);
+      expect(opened.deaths()).toBe(1);
+    } finally {
+      await opened.client.close();
+      await opened.fixture.close();
+    }
+  });
+
   it('splits CR, LF and CRLF line ends like the SDK parser', () => {
     const { sink, events, lines } = framerRecords();
     const framer = new SseFramer(sink, false);
@@ -686,7 +725,7 @@ describe('remote session mode', () => {
     }
   });
 
-  it('admits a queued POST only after a slot frees', async () => {
+  it('fails a queued POST when its operation ends instead of sending it between operations', async () => {
     const opened = await open({ withholdPosts: true });
     let settled = 0;
     try {
@@ -706,25 +745,25 @@ describe('remote session mode', () => {
       ).length;
       // The fifth request waits for a slot that never frees: the peer sees
       // no other POST.
-      void call(opened.client, 30_000).catch(() => undefined);
+      const queued = call(opened.client, 5000);
       await until(() => opened.session.inspect().queued === 1);
       expect(opened.fixture.openPosts()).toBe(4);
+      // The end of the operation closes the open POSTs: the queued request
+      // fails before a slot frees, so it never opens a POST in the window
+      // between two operations.
+      opened.session.endOperation();
+      await expect(queued).rejects.toMatchObject({ reason: 'cancelled' });
+      await until(() => opened.fixture.closedPosts() >= 4);
+      expect(opened.session.inspect().queued).toBe(0);
+      expect(opened.session.inspect().posts).toBe(0);
       // The fifth request never reached the peer.
       expect(
         opened.fixture.seen.filter((event) => event.method === 'POST').length,
       ).toBe(posts);
-      // The end of the operation closes the open POSTs: the queued request
-      // is admitted with the slot that frees.
-      opened.session.endOperation();
-      await until(
-        () =>
-          opened.fixture.seen.filter((event) => event.method === 'POST')
-            .length ===
-          posts + 1,
-      );
       // The four requests that held the slots never reached the peer.
       expect(settled).toBe(0);
       expect(held).toHaveLength(4);
+      expect(opened.deaths()).toBe(0);
     } finally {
       await opened.client.close();
       await opened.fixture.close();
@@ -775,6 +814,70 @@ describe('remote session mode', () => {
     } finally {
       await opened.client.close();
       await opened.fixture.close();
+    }
+  });
+
+  it('drops a queued automatic reply at the end of an operation without killing the production peer', async () => {
+    const fixture = await mcpSessionFixture({ withholdPosts: true });
+    const client = new Client(
+      { name: 'synthetic-session-client', version: '1' },
+      { capabilities: {} },
+    );
+    const remote = {
+      ...syntheticConnector('connector-0', 'remote'),
+      endpoint: `${fixture.origin}/mcp`,
+      transport: 'streamable_http',
+    } as Extract<Connector, { executionMode: 'remote' }>;
+    let deaths = 0;
+    // The production wiring: the death of the peer is its `died` callback,
+    // and the client reports its own errors through the same path.
+    const peer = await remoteSessionPeer(
+      client,
+      remote,
+      new AbortController().signal,
+      () => {
+        deaths += 1;
+      },
+      undefined,
+      fixture.origin,
+    );
+    try {
+      // The replies the client sends on its own are recorded with the
+      // promise of their send.
+      const transport = client.transport!;
+      const send = transport.send.bind(transport);
+      const replies: Promise<void>[] = [];
+      transport.send = (message, options) => {
+        const sent = send(message, options);
+        if (!('method' in message)) replies.push(sent);
+        return sent;
+      };
+      // The notification stream of the session is open.
+      await until(() => fixture.seen.some((event) => event.method === 'GET'));
+      // Four tool requests hold the four slots.
+      const held = [0, 1, 2, 3].map(() =>
+        call(peer.client, 30_000).catch(() => undefined),
+      );
+      await until(() => fixture.openPosts() === 4);
+      // The server asks a question: the automatic reply waits for a slot.
+      fixture.push(
+        `event: message\ndata: ${JSON.stringify({
+          jsonrpc: '2.0',
+          id: 901,
+          method: 'ping',
+        })}\n\n`,
+      );
+      await until(() => replies.length === 1);
+      // The operation ends: the queued reply is dropped, never failed.
+      peer.endOperation?.();
+      await replies[0];
+      await until(() => fixture.closedPosts() >= 4);
+      await wait(0);
+      expect(deaths).toBe(0);
+      expect(held).toHaveLength(4);
+    } finally {
+      await peer.dispose();
+      await fixture.close();
     }
   });
 
@@ -1564,6 +1667,45 @@ describe('remote session mode', () => {
       });
       await expect(response.json()).rejects.toBeDefined();
     } finally {
+      await fixture.close();
+    }
+  });
+});
+
+describe('the session fixture', () => {
+  it('counts no open POST on a keep-alive socket after the POST finished', async () => {
+    const fixture = await mcpSessionFixture();
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    try {
+      const body = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+      });
+      const status = await new Promise<number>((resolve, reject) => {
+        const request = httpRequest(
+          `${fixture.origin}/mcp`,
+          {
+            method: 'POST',
+            agent,
+            headers: { 'content-type': 'application/json' },
+          },
+          (response) => {
+            response.resume();
+            response.once('end', () => resolve(response.statusCode ?? 0));
+          },
+        );
+        request.once('error', reject);
+        request.end(body);
+      });
+      expect(status).toBe(200);
+      // The keep-alive socket stays open, idle after its finished POST.
+      await until(() => fixture.openConnections() === 1);
+      expect(fixture.openPosts()).toBe(0);
+      expect(fixture.peakPosts()).toBe(1);
+      expect(fixture.closedPosts()).toBe(0);
+    } finally {
+      agent.destroy();
       await fixture.close();
     }
   });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -94,6 +94,28 @@ async function until(
       throw new Error('The condition did not hold in time.');
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+}
+
+// Stops a bridge of this test and waits for it to exit, within a bound: the
+// cleanup never races a bridge that still touches Docker or its marker
+// files. Only the children this test spawned are signalled.
+async function stopBridge(
+  child: ChildProcess | undefined,
+  timeoutMs = 10_000,
+): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise<void>((resolve) =>
+    child.once('close', () => resolve()),
+  );
+  child.kill();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    closed,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 // The fixture of the bridge, run through the sources of the hub.
@@ -207,14 +229,17 @@ describe.skipIf(!availability.available)(
             '--filter',
             `label=wmh.client=${nonce}`,
           ]);
+          // A failed listing proves nothing: its empty output is never read
+          // as "no container".
+          if (remaining.code !== 0) return false;
           if (remaining.stdout.trim() !== '') return false;
           // The marker of the session is deleted with its container.
           return (await markerFiles(directory, 'opencode')).length === 0;
         });
         expect(await markerFiles(directory, 'opencode')).toHaveLength(0);
       } finally {
-        child.kill();
-        replacement?.kill();
+        await stopBridge(child);
+        await stopBridge(replacement);
         await removeTestContainers(cli, {
           installId,
           agentId: 'opencode',

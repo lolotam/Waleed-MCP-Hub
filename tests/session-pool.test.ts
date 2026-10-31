@@ -892,4 +892,166 @@ describe('session pool', () => {
       reason: 'dependency_unavailable',
     });
   });
+
+  it('a lease far in the future never arms a timer beyond the Node.js limit', async () => {
+    const harness = createHarness({
+      // A long-lived token: thirty days.
+      notAfter: () => harness.clock.now() + 30 * 86_400_000,
+    });
+    await harness.pool.use('c1', signal(), 60_000, async (lease) =>
+      lease.request(1, true, async () => 'ok'),
+    );
+    await flush();
+    expect(
+      harness.clock.history.every((timer) => timer.delay <= 2_147_483_647),
+    ).toBe(true);
+    expect(harness.peers[0]?.disposed).toBe(0);
+    const again = await harness.pool.use(
+      'c1',
+      signal(),
+      60_000,
+      async (lease) => lease.request(2, true, async () => 'again'),
+    );
+    expect(again).toBe('again');
+    expect(harness.peers).toHaveLength(1);
+  });
+
+  it('the lease timer still ends the entry when it is armed in steps', async () => {
+    const harness = createHarness({
+      limits: { maxLifeMs: 10_000, idleMs: 3_600_000 },
+      notAfter: () => harness.clock.now() + 25_000 + 30_000,
+    });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The entry is busy past its max life, so only the lease ends it.
+    const busy = harness.pool.use('c1', signal(), 60_000, async (lease) => {
+      await lease.request(1, true, async () => 'ok');
+      await gate;
+      return 'done';
+    });
+    await flush();
+    harness.clock.advance(24_999, (delay) => delay === 60_000);
+    await flush();
+    expect(harness.peers[0]?.disposed).toBe(0);
+    harness.clock.advance(1, (delay) => delay === 60_000);
+    await flush();
+    expect(harness.peers[0]?.disposed).toBe(1);
+    release();
+    await expect(busy).rejects.toMatchObject({
+      reason: 'dependency_unavailable',
+    });
+  });
+
+  it('an operation that joins an entry another operation started is not fresh', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = createHarness({ beforeStart: async () => gate });
+    const fresh = new Map<string, boolean>();
+    const run = (name: string) =>
+      harness.pool.use('c1', signal(), 60_000, async (lease) => {
+        fresh.set(name, lease.fresh);
+        return lease.request(1, true, async () => name);
+      });
+    // The first operation starts an entry, which is retired before it is
+    // served; the second operation starts the replacement first.
+    const first = run('first');
+    await flush();
+    harness.pool.retire('c1');
+    const second = run('second');
+    release();
+    await expect(second).resolves.toBe('second');
+    await expect(first).resolves.toBe('first');
+    expect(fresh.get('second')).toBe(true);
+    expect(fresh.get('first')).toBe(false);
+  });
+
+  it('a cancellation before dispatch keeps the peer and sends nothing', async () => {
+    const harness = createHarness();
+    const controller = new AbortController();
+    const send = vi.fn(async () => 'never');
+    await expect(
+      harness.pool.use('c1', controller.signal, 60_000, async (lease) => {
+        controller.abort();
+        return lease.request(1, true, send);
+      }),
+    ).rejects.toMatchObject({ reason: 'cancelled' });
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+    expect(harness.peers[0]?.disposed).toBe(0);
+    const again = await harness.pool.use(
+      'c1',
+      signal(),
+      60_000,
+      async (lease) => lease.request(2, true, async () => 'again'),
+    );
+    expect(again).toBe('again');
+    expect(harness.peers).toHaveLength(1);
+  });
+
+  it('a deadline passing before dispatch keeps the peer and sends nothing', async () => {
+    const harness = createHarness();
+    const send = vi.fn(async () => 'never');
+    await expect(
+      harness.pool.use('c1', signal(), 1000, async (lease) => {
+        harness.clock.advance(1000);
+        return lease.request(1, true, send);
+      }),
+    ).rejects.toMatchObject({ reason: 'timed_out' });
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+    expect(harness.peers[0]?.disposed).toBe(0);
+    expect(harness.pool.size).toBe(1);
+  });
+
+  it('a cancelled operation that also fails a security check still invalidates', async () => {
+    const harness = createHarness();
+    const controller = new AbortController();
+    await expect(
+      harness.pool.use('c1', controller.signal, 60_000, async (lease) => {
+        await lease.request(1, true, async () => 'ok');
+        // The entry stops serving and the caller cancels: the refused
+        // admission wins over the abandonment.
+        harness.pool.retire('c1');
+        controller.abort();
+        return lease.request(2, true, async () => 'never');
+      }),
+    ).rejects.toMatchObject({ reason: 'dependency_unavailable' });
+    await flush();
+    expect(harness.peers[0]?.disposed).toBe(1);
+  });
+
+  it('a boot replacement with every slot taken frees the slot of its predecessor first', async () => {
+    const harness = createHarness({
+      limits: { capacity: 2 },
+      dispose: () => new Promise<void>((resolve) => setTimeout(resolve, 5)),
+    });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The other slot is busy and can never be evicted.
+    const other = harness.pool.use('c2', signal(), 60_000, async (lease) => {
+      await lease.request(1, true, async () => 'ok');
+      await gate;
+      return 'other';
+    });
+    await flush();
+    const result = await harness.pool.use(
+      'c1',
+      signal(),
+      60_000,
+      async (lease) => {
+        await lease.replace();
+        return lease.request(2, true, async () => 'replaced');
+      },
+    );
+    expect(result).toBe('replaced');
+    expect(harness.pool.size).toBe(2);
+    release();
+    await expect(other).resolves.toBe('other');
+  });
 });

@@ -89,28 +89,38 @@ describe('boot record', () => {
 
   it('refuses a record that is not a lower-case UUID', async () => {
     const directory = await createTempDir();
-    await writeFile(
-      bootPath(directory),
-      JSON.stringify({ bootId: 'not-a-uuid', startedAt: 1_700_000_000_000 }),
-    );
+    // A valid UUID in upper case: only its case keeps it from being a record.
+    const bootId = randomUUID();
+    const record = (id: string) =>
+      JSON.stringify({ bootId: id, startedAt: 1_700_000_000_000 });
+    await writeFile(bootPath(directory), record(bootId.toUpperCase()));
     await expect(readBootRecord(directory)).rejects.toMatchObject({
       code: 'unavailable',
+    });
+
+    await writeFile(bootPath(directory), record(bootId));
+    await expect(readBootRecord(directory)).resolves.toEqual({
+      bootId,
+      startedAt: 1_700_000_000_000,
     });
   });
 
   it('refuses a record over four kibibytes', async () => {
     const directory = await createTempDir();
-    await writeFile(
-      bootPath(directory),
-      JSON.stringify({
-        bootId: randomUUID(),
-        startedAt: 1_700_000_000_000,
-        padding: 'x'.repeat(4096),
-      }),
-    );
+    // A valid record followed by whitespace: only its size keeps it from
+    // being read. Four kibibytes exactly is still a record.
+    const record = { bootId: randomUUID(), startedAt: 1_700_000_000_000 };
+    const padded = (size: number) => {
+      const text = JSON.stringify(record);
+      return text + ' '.repeat(size - Buffer.byteLength(text));
+    };
+    await writeFile(bootPath(directory), padded(4097));
     await expect(readBootRecord(directory)).rejects.toMatchObject({
       code: 'unavailable',
     });
+
+    await writeFile(bootPath(directory), padded(4096));
+    await expect(readBootRecord(directory)).resolves.toEqual(record);
   });
 
   it('refuses a hardlinked record', async () => {
@@ -136,12 +146,41 @@ describe('boot record', () => {
     });
   });
 
-  it('refuses a link in place of the record', async () => {
+  it('refuses a link in place of the record', async ({ skip }) => {
     const directory = await createTempDir();
+    // The link names a valid record: only the link keeps it from being read.
+    // A junction can only name a folder, so the link is a file symbolic link.
+    const target = join(directory, 'target.json');
+    await writeFile(
+      target,
+      JSON.stringify({ bootId: randomUUID(), startedAt: 1_700_000_000_000 }),
+    );
+    try {
+      await symlink(target, bootPath(directory), 'file');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+      skip(
+        'Creating a file symbolic link needs Developer Mode or the symbolic link privilege on Windows.',
+      );
+    }
+    await expect(readBootRecord(directory)).rejects.toMatchObject({
+      code: 'unavailable',
+    });
+  });
+
+  it('refuses a record reached through a junction', async () => {
+    const directory = await createTempDir();
+    // The junction names a folder that holds a valid record: only the
+    // junction on the way to the record keeps it from being read.
     const target = join(directory, 'target');
     await mkdir(target);
-    await symlink(target, bootPath(directory), 'junction');
-    await expect(readBootRecord(directory)).rejects.toMatchObject({
+    await writeFile(
+      bootPath(target),
+      JSON.stringify({ bootId: randomUUID(), startedAt: 1_700_000_000_000 }),
+    );
+    const linked = join(directory, 'linked');
+    await symlink(target, linked, 'junction');
+    await expect(readBootRecord(linked)).rejects.toMatchObject({
       code: 'unavailable',
     });
   });

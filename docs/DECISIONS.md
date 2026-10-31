@@ -738,6 +738,18 @@ Rules that make reuse no weaker than one peer per call:
     (a reused peer's inside the operation deadline). A package near D024's
     limits (500 MiB, 50 000 files) on a slow disk can take longer; the
     connector then reports unavailable and nothing unverified is launched.
+12. **A hub write left `prepared`.** While the safety ledger's only open entry
+    is `prepared`, reconciliation keeps idle peers instead of closing them, so
+    an unrelated edit never ends every session. Every request still fails
+    closed on the same ledger. If the hub stops with a write `prepared`, idle
+    peers stay alive (serving nothing) until their 5-minute idle limit.
+13. **Recovery cut short by a shutdown.** A bridge that shuts down waits at
+    most 5 s for a running Docker recovery round, then exits. The markers keep
+    the unfinished work, and the next start completes it.
+14. **OAuth leases close to their expiry.** A call is admitted only if the
+    lease lasts longer than 30 s plus the operation deadline. In the last
+    minute and a half before an OAuth token expires, calls on that connector
+    are refused until the token is refreshed.
 
 **Implementation choices accepted in review.** Docker ownership (T6) differs
 from the first plan in these conservative ways:

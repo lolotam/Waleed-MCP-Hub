@@ -377,14 +377,16 @@ class SessionBudgets {
   // operations. Every window charges its own bytes.
   private identity = 0;
 
-  beginOperation() {
-    if (this.open) return;
+  // Opens the operation window: it reports whether a new window opened.
+  beginOperation(): boolean {
+    if (this.open) return false;
     this.open = true;
     this.identity += 1;
     this.operation.requests = 0;
     this.operation.bytes = 0;
     this.operation.received = 0;
     this.operation.sent = 0;
+    return true;
   }
 
   endOperation() {
@@ -443,11 +445,11 @@ class SessionBudgets {
     );
   }
 
-  // The bytes of an event that is still incomplete belong to the window
-  // between two operations.
-  countIdleBytes(count: number) {
-    this.idle.bytes += count;
-    return this.idle.bytes <= IDLE_BYTES;
+  // The bytes of an event that is still incomplete when a window opens: the
+  // new window charges them again, the whole session never does.
+  countCarriedBytes(count: number) {
+    this.counters.bytes += count;
+    return this.counters.bytes <= (this.open ? OPERATION_BYTES : IDLE_BYTES);
   }
 }
 
@@ -672,6 +674,10 @@ class RemoteHttpSession {
   private sent = 0;
   // The notification streams the peer refused.
   private refused = 0;
+  // The faults of the requests the end of an operation refused on purpose:
+  // the SDK reports them as transport errors, and they are never the death
+  // of the peer.
+  private readonly refusals = new WeakSet<object>();
 
   constructor(
     endpoint: string,
@@ -722,6 +728,13 @@ class RemoteHttpSession {
           await this.inner.send(message, options);
         } catch (error) {
           if (this.tearingDown) return;
+          // An automatic reply or a notification that the end of an
+          // operation refused on purpose is dropped: the SDK reports a failed
+          // reply through `onerror`, which is the death of the peer. A
+          // request still fails, so its caller learns it was cancelled.
+          const request = 'method' in message && 'id' in message;
+          if (!request && error instanceof Object && this.refusals.has(error))
+            return;
           throw error;
         }
       },
@@ -745,6 +758,7 @@ class RemoteHttpSession {
       // hub closed on purpose. An error that was seen before the teardown
       // began is still the death of the peer.
       if (this.tearingDown) return;
+      if (this.refusals.has(error)) return;
       this.signalDeath();
       wrapper.onerror?.(error);
     };
@@ -756,7 +770,23 @@ class RemoteHttpSession {
   }
 
   beginOperation() {
-    this.budgets.beginOperation();
+    if (!this.budgets.beginOperation()) return;
+    // An event that is still incomplete when the operation begins belongs
+    // to the operation as well: its retained bytes count against the
+    // operation budget, so a fragmented event never brings the allowance
+    // of the window between two operations into it for free.
+    this.chargePending();
+  }
+
+  // Every window charges the whole pending size of every incomplete event;
+  // only the same window is never charged twice.
+  private chargePending() {
+    const window = this.budgets.window;
+    for (const framer of [...this.framers]) {
+      if (framer.chargedWindow === window) continue;
+      framer.chargedWindow = window;
+      if (!this.budgets.countCarriedBytes(framer.pending)) this.breach();
+    }
   }
 
   // The numbers of the session: what the client holds and waits for. The
@@ -778,13 +808,16 @@ class RemoteHttpSession {
   endOperation() {
     this.budgets.endOperation();
     // An event that is still incomplete belongs to the window between two
-    // operations. Every window charges the whole pending size of every
-    // incomplete event; only the same window is never charged twice.
-    const window = this.budgets.window;
-    for (const framer of [...this.framers]) {
-      if (framer.chargedWindow === window) continue;
-      framer.chargedWindow = window;
-      if (!this.budgets.countIdleBytes(framer.pending)) this.breach();
+    // operations.
+    this.chargePending();
+    // A request that still waits for a slot belongs to the operation that
+    // ended: it fails before the open POSTs free their slots, so it never
+    // opens a POST in the window between two operations.
+    for (const waiter of this.waiting.splice(0)) {
+      waiter.detach();
+      const fault = new RuntimeFault('cancelled');
+      this.refusals.add(fault);
+      waiter.reject(fault);
     }
     // A POST body that is still open is completed the same way as a finished
     // one.
@@ -1034,8 +1067,8 @@ class RemoteHttpSession {
       // The queue of the requests that wait for a slot. A cancelled request
       // is not released here: a cancelled or a timed out request ends its
       // peer in the bridge, so the waiters are never cancelled one by one.
-      // They are released when a slot frees, when the operation ends or when
-      // the session dies.
+      // They are admitted when a slot frees, and they fail when the operation
+      // ends or when the session dies.
       this.waiting.push({
         resolve,
         reject,

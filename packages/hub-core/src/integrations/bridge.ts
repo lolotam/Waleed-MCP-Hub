@@ -50,6 +50,7 @@ import {
   createDockerRuntimeOnce,
   listenBridge,
   scanAgentMarkers,
+  settleWithin,
   startDockerRecovery,
   type BridgeListener,
   type DockerOwnership,
@@ -105,11 +106,35 @@ export interface BridgeSnapshot {
   bootId: string;
 }
 
+// A snapshot that could not be read. `pending` marks a ledger whose only
+// open entry is a mutation that is still prepared: its committed or aborted
+// result follows and changes the ledger again.
+export interface BridgeSnapshotFailure {
+  seq: number;
+  failed: true;
+  pending?: boolean;
+}
+
+// The ledger holds a journaled mutation that is only prepared.
+export class LedgerPending extends Error {}
+
+// Every snapshot is refused while the ledger holds an open mutation or one
+// that needs review. Only a mutation that is merely prepared is pending; a
+// review, like an unreadable ledger, is a plain failure.
+export function assertLedgerOpen(ledger: {
+  operations: readonly { phase: string }[];
+}) {
+  if (ledger.operations.some((item) => item.phase === 'needs_review'))
+    throw new Error();
+  if (ledger.operations.some((item) => item.phase === 'prepared'))
+    throw new LedgerPending();
+}
+
 export interface BridgeSession {
   // Serialised, numbered reads. `inside` runs synchronously inside the same
   // mutex right after the read (successful or failed), before the next read.
   snapshot(
-    inside?: (result: BridgeSnapshot | { seq: number; failed: true }) => void,
+    inside?: (result: BridgeSnapshot | BridgeSnapshotFailure) => void,
   ): Promise<BridgeSnapshot>;
   // The full, cancellable package verification of a managed connector.
   verify(connector: Connector, signal: AbortSignal): Promise<void>;
@@ -382,6 +407,15 @@ const peerAnswered = (error: unknown) =>
   error.code !== ErrorCode.RequestTimeout &&
   error.code !== ErrorCode.ConnectionClosed;
 
+// The caller's cancellation or the operation deadline cut the operation
+// short. Before dispatch no request reached the server, so the peer stays;
+// after dispatch the pool has already ended it. A failure of its own, such
+// as a modified package, is never read as an abandonment.
+const abandoned = (lease: OperationLease<PooledPeer>, error: unknown) =>
+  lease.signal.aborted &&
+  error instanceof RuntimeFault &&
+  (error.reason === 'cancelled' || error.reason === 'timed_out');
+
 // The credential stamp of a connector: the sorted, de-duplicated ids of its
 // secret and header bindings with the reference state that authorised them.
 // A missing reference is null; the stamp never carries a secret value.
@@ -558,19 +592,40 @@ function createSessionBridge(
 
   // The validation before one SDK request. A boot mismatch is not a failure:
   // the peer is replaced and the caller dispatches on the fresh one.
+  const readSnapshot = async () => {
+    try {
+      return await session.snapshot();
+    } catch {
+      throw new RegistryUnavailable();
+    }
+  };
+
   const dispatch = async <T>(
     connector: Connector,
     expectedHash: string,
     lease: OperationLease<PooledPeer>,
     admission: boolean,
+    // The deadline of the whole operation: an admitted operation must end
+    // before the lease of its peer does.
+    deadline: number,
     send: (peer: BridgePeer, signal: AbortSignal) => Promise<T>,
   ): Promise<{ replaced: false; value: T } | { replaced: true }> => {
     try {
       // The agent's tool belongs to the definition it listed; a peer of a
       // newer definition never serves it, even after a replacement. The
-      // serving peer's definition is immutable, so this is decided first and
-      // a stale caller never touches a healthy peer.
-      if (lease.peer.definitionHash !== expectedHash) throw new StaleTool();
+      // serving peer's definition is immutable, so a mismatch is decided
+      // before anything else, against the registry: a stale caller never
+      // touches a healthy peer, and a pooled peer older than the registry
+      // never serves again.
+      if (lease.peer.definitionHash !== expectedHash) {
+        const latest = (await readSnapshot()).state.connectors.find(
+          (item) => item.id === connector.id,
+        );
+        const currentHash = latest ? definitionHash(latest) : undefined;
+        if (currentHash !== lease.peer.definitionHash) lease.invalidate();
+        if (currentHash !== expectedHash) throw new StaleTool();
+        throw new PeerRefused();
+      }
       // 1. A reused managed package is verified once per operation.
       if (
         admission &&
@@ -580,12 +635,7 @@ function createSessionBridge(
       )
         await session.verify(connector, lease.signal);
       // 2. The registry snapshot.
-      let snapshot: BridgeSnapshot;
-      try {
-        snapshot = await session.snapshot();
-      } catch {
-        throw new RegistryUnavailable();
-      }
+      const snapshot = await readSnapshot();
       const pooled = lease.peer;
       const current = snapshot.state.connectors.find(
         (item) => item.id === connector.id,
@@ -597,9 +647,15 @@ function createSessionBridge(
         throw new PeerRefused();
       if (credentialStamp(current, snapshot.state) !== pooled.credentials)
         throw new PeerRefused();
+      // An admission also needs the lease to outlast the whole operation:
+      // the pool ends the peer thirty seconds before the lease does, and a
+      // call that is cut there may already have had its effect. A fresh
+      // peer would resolve the same stored value and the same expiry, so the
+      // peer is refused instead of replaced.
       if (
         pooled.peer.notAfter !== undefined &&
-        pooled.peer.notAfter - session.now() <= leaseMargin
+        pooled.peer.notAfter - session.now() <=
+          leaseMargin + (admission ? deadline : 0)
       )
         throw new PeerRefused();
       // 7. The hub restarted under this peer.
@@ -635,10 +691,15 @@ function createSessionBridge(
       lease.peer.peer.assertPublic(value);
       return { replaced: false, value };
     } catch (error) {
-      // Anything but a stale tool or a JSON-RPC error the peer answered ends
-      // the entry: a refused validation, an unreadable registry, a modified
-      // package, a protocol failure or an echoed credential.
-      if (!(error instanceof StaleTool) && !(error instanceof PeerAnswered))
+      // Anything but a stale tool, a JSON-RPC error the peer answered or an
+      // abandoned operation ends the entry: a refused validation, an
+      // unreadable registry, a modified package, a protocol failure or an
+      // echoed credential.
+      if (
+        !(error instanceof StaleTool) &&
+        !(error instanceof PeerAnswered) &&
+        !abandoned(lease, error)
+      )
         lease.invalidate();
       throw error;
     }
@@ -667,6 +728,7 @@ function createSessionBridge(
             expectedHash,
             lease,
             admission,
+            listTimeout,
             (peer, requestSignal) =>
               peer.client.request(
                 {
@@ -724,6 +786,7 @@ function createSessionBridge(
             expectedHash,
             lease,
             true,
+            callTimeout,
             (peer, requestSignal) =>
               peer.client.request(
                 {
@@ -759,9 +822,16 @@ function createSessionBridge(
       await session
         .snapshot((result) => {
           const failed = 'failed' in result;
+          const pending = failed && result.pending === true;
           pool.reconcile(result.seq, (entry, pooled) => {
-            // A failed read invalidates every idle entry; a busy one fails at
-            // its own next validation, which takes a later snapshot.
+            // A ledger whose only open entry is a prepared mutation defers
+            // the decision: its result changes the ledger again and the next
+            // reconciliation checks every connector on its own. No request is
+            // dispatched meanwhile, because every dispatch reads the same
+            // blocked ledger and fails closed.
+            if (pending) return 'keep';
+            // Any other failed read invalidates every idle entry; a busy one
+            // fails at its own next validation, which takes a later snapshot.
             if (failed) return entry.busy ? 'keep' : 'invalidate';
             if (!pooled) return 'invalidate';
             const snapshot = result as BridgeSnapshot;
@@ -925,6 +995,9 @@ export interface StartupRecoveryRetry {
   attempt(): Promise<void>;
   // The shutdown: the pending attempt is cancelled.
   stop(): void;
+  // Resolves when no attempt is running: the shutdown waits for it before
+  // it closes the ownership of the agent.
+  settled(): Promise<void>;
   // Whether an attempt is armed.
   readonly pending: boolean;
 }
@@ -935,6 +1008,8 @@ export function createStartupRecoveryRetry(
   const intervalMs = options.intervalMs ?? RECOVERY_RETRY_INTERVAL_MS;
   let timer: unknown;
   let stopped = false;
+  // The attempt that is running, if any.
+  let running: Promise<void> | undefined;
   function arm() {
     if (stopped || timer !== undefined) return;
     timer = options.setTimer(() => {
@@ -942,8 +1017,15 @@ export function createStartupRecoveryRetry(
       void attempt();
     }, intervalMs);
   }
-  async function attempt() {
-    if (stopped) return;
+  function attempt(): Promise<void> {
+    if (stopped) return Promise.resolve();
+    // One attempt runs at a time; a second caller joins it.
+    running ??= run().finally(() => {
+      running = undefined;
+    });
+    return running;
+  }
+  async function run() {
     try {
       await options.recover();
       // The round ran: the ownership manager owns the schedule from now on.
@@ -969,6 +1051,9 @@ export function createStartupRecoveryRetry(
         options.clearTimer(timer);
         timer = undefined;
       }
+    },
+    settled() {
+      return running ?? Promise.resolve();
     },
     get pending() {
       return timer !== undefined;
@@ -1001,6 +1086,8 @@ export interface BridgeStartupRecovery {
   attempt(): Promise<void>;
   // The shutdown: the pending retry is cancelled.
   stop(): void;
+  // Resolves when no attempt is running.
+  settled(): Promise<void>;
 }
 
 export function createBridgeStartupRecovery(
@@ -1026,7 +1113,7 @@ export function createBridgeStartupRecovery(
       ? {}
       : { intervalMs: options.intervalMs }),
   });
-  return { attempt: retry.attempt, stop: retry.stop };
+  return { attempt: retry.attempt, stop: retry.stop, settled: retry.settled };
 }
 
 export function createAgentBridge(
@@ -1305,17 +1392,25 @@ export function createAgentBridge(
   };
   return bridgeServer;
 }
+// The largest protected file the bridge reads, and the chunk it reads it in.
+const protectedLimit = 4 * 1024 * 1024;
+const protectedChunk = 64 * 1024;
+
 // Reads a protected file through the handle that was checked: the opened file
 // must be the very file the path named, so a file swapped in between the
-// check and the read is refused.
-async function readProtectedText(path: string) {
+// check and the read is refused. The handle is read in bounded chunks, so a
+// file that grows after the check is refused once it passes the limit, and
+// the path is checked again after the read, so a file swapped in during the
+// read is refused too. Every buffer is zeroed on every path.
+export async function readProtectedText(path: string) {
   await assertNoLinks(path);
   // The identities are compared as exact integers: a Windows file id does
   // not fit in a JavaScript number.
   const info = await lstat(path, { bigint: true });
-  if (!info.isFile() || info.nlink !== 1n || info.size > 4n * 1024n * 1024n)
+  if (!info.isFile() || info.nlink !== 1n || info.size > BigInt(protectedLimit))
     throw new Error();
   const file = await open(path, 'r');
+  const chunks: Buffer[] = [];
   let bytes: Buffer | undefined;
   try {
     const opened = await file.stat({ bigint: true });
@@ -1324,14 +1419,51 @@ async function readProtectedText(path: string) {
       opened.ino !== info.ino ||
       opened.dev !== info.dev ||
       opened.nlink !== 1n ||
-      opened.size > 4n * 1024n * 1024n
+      opened.size > BigInt(protectedLimit)
     )
       throw new Error();
-    bytes = await file.readFile();
-    if (bytes.length > 4 * 1024 * 1024) throw new Error();
+    // At most one byte more than the limit is ever read or allocated: a
+    // chunk is filled completely before the next one is allocated, so many
+    // short reads of a growing file never add up to more memory.
+    const views: Buffer[] = [];
+    let total = 0;
+    let done = false;
+    while (!done) {
+      const chunk = Buffer.alloc(
+        Math.min(protectedChunk, protectedLimit + 1 - total),
+      );
+      chunks.push(chunk);
+      let filled = 0;
+      while (filled < chunk.length) {
+        const { bytesRead } = await file.read(
+          chunk,
+          filled,
+          chunk.length - filled,
+          null,
+        );
+        if (bytesRead === 0) {
+          done = true;
+          break;
+        }
+        filled += bytesRead;
+      }
+      total += filled;
+      if (total > protectedLimit) throw new Error();
+      views.push(chunk.subarray(0, filled));
+    }
+    const after = await lstat(path, { bigint: true });
+    if (
+      !after.isFile() ||
+      after.ino !== opened.ino ||
+      after.dev !== opened.dev ||
+      after.nlink !== 1n
+    )
+      throw new Error();
+    bytes = Buffer.concat(views);
     return bytes.toString('utf8');
   } finally {
     bytes?.fill(0);
+    for (const chunk of chunks) chunk.fill(0);
     await file.close();
   }
 }
@@ -1349,13 +1481,9 @@ export async function runAgentBridge(
   const safetyPath = join(directory, 'safety.json');
   const bootPath = join(directory, 'boot.json');
   const read = async () => {
-    const ledger = SafetyStateSchema.parse(await readProtectedJson(safetyPath));
-    if (
-      ledger.operations.some(
-        (item) => item.phase === 'prepared' || item.phase === 'needs_review',
-      )
-    )
-      throw new Error();
+    assertLedgerOpen(
+      SafetyStateSchema.parse(await readProtectedJson(safetyPath)),
+    );
     const state = StateSchema.parse(await readProtectedJson(registry));
     if (!state.integrations?.some((item) => item.agentId === agentId))
       throw new Error();
@@ -1364,13 +1492,7 @@ export async function runAgentBridge(
   // The ledger as raw text: two reads of the same file must be identical.
   const readLedger = async () => {
     const text = await readProtectedText(safetyPath);
-    const ledger = SafetyStateSchema.parse(JSON.parse(text));
-    if (
-      ledger.operations.some(
-        (item) => item.phase === 'prepared' || item.phase === 'needs_review',
-      )
-    )
-      throw new Error();
+    assertLedgerOpen(SafetyStateSchema.parse(JSON.parse(text)));
     return text;
   };
   // One stable snapshot: the ledger, the registry, the boot record and the
@@ -1391,7 +1513,7 @@ export async function runAgentBridge(
   let sequence = 0;
   let tail: Promise<void> = Promise.resolve();
   const takeSnapshot = async (
-    inside?: (result: BridgeSnapshot | { seq: number; failed: true }) => void,
+    inside?: (result: BridgeSnapshot | BridgeSnapshotFailure) => void,
   ): Promise<BridgeSnapshot> => {
     const previous = tail;
     let release!: () => void;
@@ -1405,9 +1527,13 @@ export async function runAgentBridge(
         const read = await readStable();
         sequence += 1;
         snapshot = { seq: sequence, state: read.state, bootId: read.bootId };
-      } catch {
+      } catch (error) {
         sequence += 1;
-        inside?.({ seq: sequence, failed: true });
+        inside?.({
+          seq: sequence,
+          failed: true,
+          ...(error instanceof LedgerPending ? { pending: true } : {}),
+        });
         throw new RegistryUnavailable();
       }
       inside?.(snapshot);
@@ -1637,9 +1763,20 @@ export async function runAgentBridge(
     unwatchFile(registry, changed);
     unwatchFile(safetyPath, changed);
     unwatchFile(bootPath, changed);
-    void server
-      .close()
-      .then(() => dockerState?.ownership.close())
+    // The ownership schedules no new round from here on. The startup
+    // recovery and the ownership round that are running finish before the
+    // process leaves, both within one shutdown budget: the bridge never
+    // exits under a round that removes a container or a marker, and a round
+    // cut by the budget leaves its markers to the next start.
+    const ownership = dockerState?.ownership;
+    void ownership?.close();
+    const recovered = settleWithin(
+      [startupRecovery.settled(), ownership?.settled()],
+      poolCloseDeadline,
+      session,
+    );
+    void Promise.all([server.close(), recovered])
+      .then(() => ownership?.close())
       .then(
         () => {
           process.exit(code);

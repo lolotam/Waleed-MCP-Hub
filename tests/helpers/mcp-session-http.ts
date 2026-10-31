@@ -61,7 +61,8 @@ export interface SessionFixture {
   handler: (event: SessionEvent) => void | Promise<void>;
   // The open sockets of the server.
   openConnections(): number;
-  // The open POST sockets: the connection of every POST that waits.
+  // The open POST responses: every POST that is not finished and whose
+  // connection is still open.
   openPosts(): number;
   // The open POST responses: the connection of every POST that waits.
   postConnections(): ServerResponse[];
@@ -69,7 +70,7 @@ export interface SessionFixture {
   peakPosts(): number;
   // The closed sockets of the server.
   closedConnections(): number;
-  // The POST sockets the client closed.
+  // The POST responses the client closed before they finished.
   closedPosts(): number;
   // The POST bodies that were withheld: they are answered on demand.
   answerWithheld(): void;
@@ -129,25 +130,33 @@ export async function mcpSessionFixture(
   const seen: SessionEvent[] = [];
   const open = new Map<ServerResponse, string>();
   const sockets = new Set<Socket>();
-  // The method of the request every open socket carries. The POSTs are
-  // counted by their sockets, not by their responses: a socket is closed
-  // when the connection ends.
-  const socketMethods = new Map<Socket, string>();
+  // The POST responses that are still open. A response is added when its
+  // request arrives and removed once, when it finishes or its connection
+  // closes: an idle keep-alive socket after a finished POST holds no POST.
+  const activePosts = new Set<ServerResponse>();
   const withheld: SessionEvent[] = [];
   let peak = 0;
   let peakPost = 0;
   let closed = 0;
   let closedPost = 0;
-  const postSockets = () =>
-    [...socketMethods.values()].filter((method) => method === 'POST').length;
   const server = createServer((request, response) => {
     const method = request.method ?? 'GET';
     open.set(response, method);
-    socketMethods.set(request.socket, method);
-    peakPost = Math.max(peakPost, postSockets());
     response.once('close', () => {
       open.delete(response);
     });
+    if (method === 'POST') {
+      activePosts.add(response);
+      peakPost = Math.max(peakPost, activePosts.size);
+      const settle = () => {
+        if (!activePosts.delete(response)) return;
+        // A response that closed before it finished was closed by the
+        // client: the client ended the POST connection itself.
+        if (!response.writableFinished) closedPost += 1;
+      };
+      response.once('finish', settle);
+      response.once('close', settle);
+    }
     const chunks: Buffer[] = [];
     request.on('data', (chunk: Buffer) => chunks.push(chunk));
     request.once('end', () => {
@@ -192,8 +201,6 @@ export async function mcpSessionFixture(
     socket.once('close', () => {
       sockets.delete(socket);
       closed += 1;
-      if (socketMethods.get(socket) === 'POST') closedPost += 1;
-      socketMethods.delete(socket);
     });
   });
   const address = server.address();
@@ -303,7 +310,7 @@ export async function mcpSessionFixture(
       answer(event);
     },
     openConnections: () => sockets.size,
-    openPosts: () => postSockets(),
+    openPosts: () => activePosts.size,
     postConnections: () =>
       [...open.entries()]
         .filter(([, method]) => method === 'POST')
