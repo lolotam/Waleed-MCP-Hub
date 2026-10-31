@@ -422,18 +422,25 @@ export async function reconcilePackages(
         throw error;
       }
     }
+    const assertTrees = async (): Promise<void> => {
+      await assertRoot();
+      if (jobs !== null) await sameFolder(jobsDir, jobs);
+    };
     for (const entry of jobEntries) {
       if (!UUID.test(entry.name)) continue;
       const folder = join(jobsDir, entry.name);
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
       if (isActive(entry.name)) continue;
-      await assertRoot();
-      if (jobs !== null) await sameFolder(jobsDir, jobs);
+      await assertTrees();
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);
     }
+    // An entry that is gone because a folder was replaced is skipped above
+    // as missing, so the pass reports success only when both folders are
+    // still the ones it listed. Every removal was checked before it ran.
+    await assertTrees();
     return { deleted: [...deleted], retained: [...retained] };
   });
 }
