@@ -1,10 +1,11 @@
 // Builds and verifies vendor/npm-12.2.1-patched.tgz: the official npm 12.2.1
-// tarball with its bundled undici and ip-address replaced by the first releases
-// that fix their open advisories. Bundled dependencies cannot be overridden or
-// audit-fixed, and no npm release bundles the fixed versions yet, so the hub
-// ships this recomposed tarball. Every input is pinned by sha512; `verify`
-// proves the vendored file holds exactly the official npm files plus the two
-// official replacement packages, and nothing else.
+// tarball with the bundled packages that have open advisories replaced by the
+// first releases that fix them, plus the new dependencies those releases need.
+// Bundled dependencies cannot be overridden or audit-fixed, and no npm release
+// bundles the fixed versions yet, so the hub ships this recomposed tarball.
+// Every input is pinned by sha512; `verify` proves the vendored file holds
+// exactly the official npm files plus the official replacement and addition
+// packages, and nothing else.
 //
 //   node scripts/npm-bundle.mjs build    write the vendored tarball
 //   node scripts/npm-bundle.mjs verify   check the vendored tarball (CI)
@@ -24,8 +25,10 @@ const npmSource = {
     'sha512-bKCmFRVT/BB+YPEYbZwQ1XUI3N5t4xKSpU1MxOjo7z3iWzKBJ0ZXRC1xFdEN+TC7N5TdywaBzf2dMXGJq/e2PQ==',
 };
 // GHSA-4qv8-2p9j-2685, GHSA-xjj6-f33q-929c, GHSA-2m5v-pch6-74hx,
-// GHSA-qrxm-fqhp-jwvm, GHSA-9fm3-97px-rjf6 (undici <= 6.29.0) and
-// GHSA-rxp7-6hxx-x8q5 (ip-address <= 10.7.3).
+// GHSA-qrxm-fqhp-jwvm, GHSA-9fm3-97px-rjf6 (undici <= 6.29.0),
+// GHSA-rxp7-6hxx-x8q5 (ip-address <= 10.7.3), GHSA-g3hv-75wg-m249
+// (minimatch < 11.0.1) and GHSA-3g3m-2fjr-6pw4 (glob <= 14.0.1, which also
+// needs path-scurry 3).
 const replacements = [
   {
     name: 'undici',
@@ -39,6 +42,34 @@ const replacements = [
     integrity:
       'sha512-DWBMKyeM25D70nrIiTkgQth59/G+naKOTep6huF9j+GmeK3DMD60Zvxg5d5qQnz+38AHgou6ean2LECX+lrKDg==',
   },
+  {
+    name: 'minimatch',
+    version: '11.0.3',
+    integrity:
+      'sha512-iny/40PEGkNJQ5/Pv6z3nm6FbRAby32GeZRjCUJk2WnNDbgPSTcdI+DDvLqsgBdD4cD5sMtMheqPPnehCCa8Nw==',
+  },
+  {
+    name: 'glob',
+    version: '14.0.3',
+    integrity:
+      'sha512-A1vjIwC3qpdCso45Iw127gnp7sPhqgY8lUQhDrArIs+GbmfaaVPFuoyy7WyLT9EPZCRZ7j7aLdwUhQmHWesEow==',
+  },
+  {
+    name: 'path-scurry',
+    version: '3.0.0',
+    integrity:
+      'sha512-1pTbQqH1wIwMi/eleQ5leFTTCkzFsPcgXNjwOA8YGGW/W4/kHT3dssE7Z6NH+zuqNLOzOB0uaD61yl7cAcVhgg==',
+  },
+];
+// A dependency of minimatch 11 that npm 12.2.1 does not bundle; it has no
+// dependencies of its own.
+const additions = [
+  {
+    name: '@isaacs/nonrecursive-glob-match',
+    version: '1.0.3',
+    integrity:
+      'sha512-SI7kyKHq4XXDRozw+r9GlRZkia1ZkFrpLW98r2IC2Bpr8YkFGE3fvjzmxCG0x78A++69HmDNrDvSMYBZmHGpKA==',
+  },
 ];
 // The fixed timestamp npm itself writes into published tarballs.
 const MTIME = 499162500;
@@ -48,7 +79,8 @@ const sha512 = (buffer) =>
   `sha512-${createHash('sha512').update(buffer).digest('base64')}`;
 
 async function download({ name, version, integrity }) {
-  const url = `${registry}/${name}/-/${name}-${version}.tgz`;
+  // A scoped package's tarball is named after its bare name.
+  const url = `${registry}/${name}/-/${name.split('/').pop()}-${version}.tgz`;
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
   const buffer = Buffer.from(await response.arrayBuffer());
@@ -224,22 +256,34 @@ function tarStream(entries) {
   return Buffer.concat(blocks);
 }
 
-// The official npm files, minus the two bundled packages, plus the official
-// replacement packages under the same folders.
+// The official npm files, minus the replaced bundled packages, plus the
+// official replacement packages under the same folders and the official
+// addition packages under folders npm does not use.
 async function expectedEntries() {
   const entries = readTarball(await download(npmSource));
+  const place = async (pkg, folder) => {
+    const source = readTarball(await download(pkg));
+    for (const [path, entry] of source) {
+      if (!path.startsWith('package/'))
+        throw new Error(`${pkg.name}: entry outside package/`);
+      entries.set(folder + path.slice('package/'.length), entry);
+    }
+  };
+  const bundles = (folder) =>
+    [...entries.keys()].some((path) => path.startsWith(folder));
   for (const replacement of replacements) {
     const folder = `package/node_modules/${replacement.name}/`;
-    if (![...entries.keys()].some((path) => path.startsWith(folder)))
+    if (!bundles(folder))
       throw new Error(`npm does not bundle ${replacement.name}`);
     for (const path of [...entries.keys()])
       if (path.startsWith(folder)) entries.delete(path);
-    const source = readTarball(await download(replacement));
-    for (const [path, entry] of source) {
-      if (!path.startsWith('package/'))
-        throw new Error(`${replacement.name}: entry outside package/`);
-      entries.set(folder + path.slice('package/'.length), entry);
-    }
+    await place(replacement, folder);
+  }
+  for (const addition of additions) {
+    const folder = `package/node_modules/${addition.name}/`;
+    if (bundles(folder))
+      throw new Error(`npm already bundles ${addition.name}`);
+    await place(addition, folder);
   }
   return entries;
 }
@@ -311,7 +355,10 @@ if (command === 'build') {
     process.exit(1);
   }
   console.log(
-    `npm bundle verified: npm ${npmSource.version} with ${replacements
+    `npm bundle verified: npm ${npmSource.version} with ${[
+      ...replacements,
+      ...additions,
+    ]
       .map(({ name, version }) => `${name} ${version}`)
       .join(', ')}.`,
   );
