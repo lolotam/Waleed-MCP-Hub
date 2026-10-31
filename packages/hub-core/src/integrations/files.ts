@@ -11,6 +11,7 @@ const conflict = () =>
     'conflict',
     'Agent file changed, is unsafe or cannot be protected. Refresh the scan; inspect recovery before retrying.',
   );
+const maxAgentFile = 1024n * 1024n;
 export interface AgentFiles {
   read(path: string): Promise<string | null>;
   replace(path: string, before: string | null, after: string): Promise<void>;
@@ -68,17 +69,19 @@ export function agentFiles(
     permit(path);
     await assertNoLinks(path, true);
     try {
-      const info = await lstat(path);
-      if (!info.isFile() || info.nlink !== 1 || info.size > 1024 * 1024)
+      // File ids are compared as exact integers: a Windows file id does not
+      // fit in a JavaScript number, so two different files could look equal.
+      const info = await lstat(path, { bigint: true });
+      if (!info.isFile() || info.nlink !== 1n || info.size > maxAgentFile)
         throw conflict();
       const file = await open(path, 'r');
       let bytes: Buffer | undefined;
       try {
-        const opened = await file.stat();
+        const opened = await file.stat({ bigint: true });
         if (
           opened.ino !== info.ino ||
           opened.dev !== info.dev ||
-          opened.size > 1024 * 1024
+          opened.size > maxAgentFile
         )
           throw conflict();
         bytes = await file.readFile();
