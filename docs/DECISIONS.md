@@ -814,7 +814,8 @@ Residuals:
   (fails closed) until the user resolves it.
 - Disconnecting Grok while Claude Code or Cursor stays integrated lets Grok fall
   back to their hub entry. The connecting-agents guide documents
-  `grok mcp disable waleed-mcp-hub` and the `[compat.*] mcps = false` switches;
+  `grok mcp disable waleed-mcp-hub` and the `mcps = false` keys under the
+  `[compat.claude]` and `[compat.cursor]` tables of the same `config.toml`;
   the hub does not write Grok's compat or disabled-server settings.
 - Both installed builds share `~/.grok`; one integration covers both.
 

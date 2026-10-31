@@ -60,19 +60,30 @@ connectors menu of a new chat.
 Grok also loads MCP servers from Claude Code's `~/.claude.json` and Cursor's
 `~/.cursor/mcp.json`. Before Grok is integrated, it can therefore run the hub
 entry written for Claude Code or Cursor, and the hub counts that traffic as
-theirs. Integrating Grok writes its own `waleed-mcp-hub` entry into
-`~/.grok/config.toml`, which wins over those entries for the same name, so Grok
-then runs the hub as Grok.
+theirs. Integrating Grok writes its own `waleed-mcp-hub` entry into Grok's
+`config.toml` (in `GROK_HOME` if you set it, otherwise `~/.grok`), which wins over
+those entries for the same name, so Grok then runs the hub as Grok.
 
 **Disconnect** removes only Grok's own entry. If Claude Code or Cursor is still
 integrated, Grok falls back to their hub entry and keeps using the hub, while the
-hub shows Grok as not integrated. To stop that, after disconnecting run
-`grok mcp disable waleed-mcp-hub` (it adds the name to Grok's
-`disabled_mcp_servers`; undo with `grok mcp enable waleed-mcp-hub` before
-integrating again), or turn off Grok's scanning of those files with
-`[compat.claude] mcps = false` and `[compat.cursor] mcps = false` in
-`~/.grok/config.toml`. Run `grok mcp disable` only after disconnecting: with the
-hub entry present it edits that entry, and the hub then reports a conflict.
+hub shows Grok as not integrated. To stop that, do one of these after
+disconnecting:
+
+- Run `grok mcp disable waleed-mcp-hub`. It adds the name to Grok's
+  `disabled_mcp_servers`; run `grok mcp enable waleed-mcp-hub` before you
+  integrate Grok again. Don't run it while the hub entry is present: it then
+  edits that entry, and the hub reports a conflict.
+- Stop Grok reading MCP servers from Claude Code and Cursor. In the same
+  `config.toml` the hub edits, set `mcps = false` under each table, adding the
+  table if it is not there yet (a table header may appear only once per file):
+
+  ```toml
+  [compat.claude]
+  mcps = false
+
+  [compat.cursor]
+  mcps = false
+  ```
 
 Grok's `GROK_CONFIG`/`GROK_CONFIG_PATH` overlays and an administrator's
 `requirements.toml` can still hide or deny the entry; `grok mcp doctor
