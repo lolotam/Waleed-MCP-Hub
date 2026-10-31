@@ -106,7 +106,9 @@ it('refuses an owned package file whose path names another file id above 2^53', 
   directory = await mkdtemp(join(tmpdir(), 'wmh-owned-ids-'));
   ids.target = join(directory, 'owned.json');
   await writeFile(ids.target, 'x');
-  await expect(readOwnedFile(ids.target, 1024)).resolves.toBeNull();
+  await expect(readOwnedFile(ids.target, 1024)).rejects.toMatchObject({
+    code: 'conflict',
+  });
   ids.opened = ids.named;
   expect((await readOwnedFile(ids.target, 1024))?.toString()).toBe('x');
   ids.opened = 2n ** 53n + 1n;
