@@ -103,12 +103,10 @@ export async function readOwnedFile(
     // The path must still name the file the handle points to: a link that
     // took its place in the meantime is refused, even though the handle
     // followed it.
-    // No part of the path may have become a link since the open.
-    try {
-      await assertNoLinks(path);
-    } catch {
-      return null;
-    }
+    // No part of the path may have become a link since the open. A link is
+    // refused with an error, never reported as a missing file: callers such
+    // as reconciliation read "missing" as "no live job owns this marker".
+    await assertNoLinks(path);
     const pathInfo = await lstat(path, { bigint: true });
     if (pathInfo.isSymbolicLink()) return null;
     if (pathInfo.dev !== info.dev || pathInfo.ino !== info.ino) return null;

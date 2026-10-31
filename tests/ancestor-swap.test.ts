@@ -2,11 +2,13 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   mkdir,
   mkdtemp,
+  readFile,
   rename,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,8 +36,16 @@ const { agentFiles } =
   await import('../packages/hub-core/src/integrations/files.js');
 const { managedFiles } =
   await import('../packages/hub-core/src/adapters/managed-files.js');
-const { readOwnedFile } =
-  await import('../packages/hub-core/src/packages/store.js');
+const {
+  createPackageLock,
+  markerPath,
+  packagesRoot,
+  readMarker,
+  readOwnedFile,
+  reconcilePackages,
+  writeMarker,
+} = await import('../packages/hub-core/src/packages/store.js');
+const { emptyState } = await import('../packages/hub-core/src/state.js');
 
 let directory = '';
 afterEach(async () => {
@@ -95,5 +105,35 @@ it('refuses an owned package file whose parent folder became a link before the o
   await writeFile(join(foreign, 'marker.json'), 'foreign');
   hook.path = path;
   hook.beforeOpen = swapParent(parent, foreign);
-  await expect(readOwnedFile(path, 1024)).resolves.toBeNull();
+  await expect(readOwnedFile(path, 1024)).rejects.toMatchObject({
+    code: 'conflict',
+  });
+});
+
+it('keeps an install marker when its folder became a link during reconciliation', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-swap-reconcile-'));
+  const packagesDir = packagesRoot(directory);
+  await mkdir(packagesDir, { recursive: true });
+  const installId = randomUUID();
+  const jobId = randomUUID();
+  await writeMarker(packagesDir, installId, jobId);
+  const foreign = join(directory, 'foreign');
+  await mkdir(foreign);
+  await writeFile(join(foreign, installId + '.installing'), randomUUID());
+  hook.path = markerPath(packagesDir, installId);
+  hook.beforeOpen = swapParent(packagesDir, foreign);
+  await expect(
+    reconcilePackages({
+      packagesDir,
+      readState: async () => emptyState(),
+      activeJobs: () => new Set([jobId]),
+      lock: createPackageLock(),
+    }),
+  ).rejects.toMatchObject({ code: 'conflict' });
+  await expect(readMarker(packagesDir + '-moved', installId)).resolves.toBe(
+    jobId,
+  );
+  await expect(
+    readFile(join(foreign, installId + '.installing'), 'utf8'),
+  ).resolves.toBeTruthy();
 });

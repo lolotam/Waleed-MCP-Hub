@@ -760,7 +760,16 @@ Rules that make reuse no weaker than one peer per call:
     (on Windows also to a network path, which can start a network sign-in)
     before the read is refused. Node has no per-component no-follow open.
     Same threat model as D024 residual 2; the files live in the user's own
-    profile folder.
+    profile folder. The same limit applies to `managedFiles().read`,
+    `agentFiles().read` and `readOwnedFile` (2026-10-31). Each one re-checks
+    every folder of the path after the open and compares the path's file id
+    with the handle's as exact integers. That re-check is a series of separate
+    `lstat` calls, not one atomic walk. A process that swaps a folder back and
+    forth between those calls can still pass it. Closing this needs an open
+    that refuses links folder by folder, which Node does not offer: `openat`
+    with `O_NOFOLLOW` on POSIX, or a native Windows helper with reparse-point
+    protection. A link found by the re-check is an error, never a missing
+    file, so reconciliation never removes a marker because of one.
 
 **Implementation choices accepted in review.** Docker ownership (T6) differs
 from the first plan in these conservative ways:
