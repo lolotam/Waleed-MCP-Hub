@@ -1,4 +1,12 @@
-import { mkdtemp, readdir, readFile, writeFile, rm } from 'node:fs/promises';
+import {
+  link,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  writeFile,
+  rm,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -62,6 +70,28 @@ describe('atomic JSON state', () => {
     await store.close();
     await expect(openStateStore(directory)).rejects.toThrow();
     expect((await readdir(directory)).includes('writer.lock')).toBe(false);
+  });
+  it('refuses a hard-linked state file at open and after a swap', async () => {
+    const directory = await temporary();
+    const store = await open(directory);
+    await store.write(0, { ...emptyState(), revision: 1 });
+    // A second name for the state file appears while the hub runs.
+    const statePath = join(directory, 'state.json');
+    const other = join(await temporary(), 'other.json');
+    await link(statePath, other);
+    await expect(store.read()).rejects.toMatchObject({ code: 'conflict' });
+    await store.close();
+    await expect(openStateStore(directory)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    // Without the second name the same file opens again.
+    await rm(other);
+    const reopened = await open(directory);
+    expect((await reopened.read()).revision).toBe(1);
+    // A file swapped in with the same content but as a hard link is refused.
+    await rename(statePath, join(directory, 'moved.json'));
+    await link(join(directory, 'moved.json'), statePath);
+    await expect(reopened.read()).rejects.toMatchObject({ code: 'conflict' });
   });
   it('allows only one overlapping write and validates versions before committing', async () => {
     const directory = await temporary();

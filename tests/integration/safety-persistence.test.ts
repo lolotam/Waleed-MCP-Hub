@@ -1,4 +1,5 @@
 import {
+  link,
   mkdtemp,
   readFile,
   writeFile,
@@ -93,6 +94,14 @@ describe('persistent safety ledger', () => {
       code: 'conflict',
     });
     expect(await readFile(join(path, 'safety.json'), 'utf8')).toBe(external);
+  });
+  it('refuses a hard-linked safety file without reading it', async () => {
+    const path = await temporary();
+    await writeFile(join(path, 'safety.json'), '{}');
+    await link(join(path, 'safety.json'), join(await temporary(), 'other'));
+    await expect(openSafetyLedger(path)).rejects.toMatchObject({
+      code: 'conflict',
+    });
   });
   it('rejects a junction/symlink runtime directory', async () => {
     const parent = await temporary();
