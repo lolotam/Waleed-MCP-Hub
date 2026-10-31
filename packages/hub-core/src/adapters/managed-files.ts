@@ -6,6 +6,7 @@ import {
   rename,
   unlink,
   link,
+  type FileHandle,
 } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { isAbsolute, join, parse, relative, sep } from 'node:path';
@@ -20,6 +21,77 @@ export const checkedReadFlags =
   process.platform === 'win32'
     ? fsConstants.O_RDONLY
     : fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW;
+const code = (error: unknown): string | undefined =>
+  (error as NodeJS.ErrnoException | undefined)?.code;
+// Reads a regular file the hub owns through one handle: the checks and the
+// read see the same file, so nothing can swap it in between. A link, a
+// hard-linked file, a file over the cap or one that grows while it is read is
+// refused.
+export async function readOwnedFile(
+  path: string,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  // Only a path that does not exist is reported as missing (null). Anything
+  // else that is refused (a folder, a link, a hard link, an oversized file,
+  // a file that changed or vanished) is an error: callers such as
+  // reconciliation read "missing" as "no live job owns this marker".
+  const refused = () =>
+    new HubError('conflict', 'Owned file changed or is unsafe.');
+  let handle: FileHandle;
+  try {
+    handle = await open(path, checkedReadFlags);
+  } catch (error) {
+    const reason = code(error);
+    if (reason === 'ENOENT') {
+      // A link whose target is missing also opens as ENOENT on Windows: the
+      // path is missing only when no existing part of it is a link.
+      await assertNoLinks(path, true);
+      return null;
+    }
+    if (reason === 'EISDIR' || reason === 'ELOOP') throw refused();
+    throw error;
+  }
+  try {
+    // File ids are compared as exact integers: a Windows file id does not fit
+    // in a JavaScript number, so two different files could look equal.
+    const info = await handle.stat({ bigint: true });
+    if (!info.isFile() || info.nlink !== 1n || info.size > BigInt(maxBytes))
+      throw refused();
+    // The path must still name the file the handle points to: a link that
+    // took its place in the meantime is refused, even though the handle
+    // followed it.
+    // No part of the path may have become a link since the open.
+    await assertNoLinks(path);
+    const pathInfo = await lstat(path, { bigint: true });
+    if (
+      pathInfo.isSymbolicLink() ||
+      pathInfo.dev !== info.dev ||
+      pathInfo.ino !== info.ino
+    )
+      throw refused();
+    // The read never asks for more than one byte beyond the cap, so a file
+    // that grew while it was read is refused instead of being cut short.
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1));
+    while (size <= maxBytes) {
+      const wanted = Math.min(chunk.length, maxBytes + 1 - size);
+      const { bytesRead } = await handle.read(chunk, 0, wanted, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+      chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
+    }
+    if (size > maxBytes) throw refused();
+    return Buffer.concat(chunks);
+  } catch (error) {
+    // The file existed when it was opened: one that vanished from its path
+    // since then is refused, never reported as missing.
+    if (code(error) === 'ENOENT') throw refused();
+    throw error;
+  } finally {
+    await handle.close();
+  }
+}
 export type FileScope = 'catalog' | 'runtime';
 export interface ManagedFiles {
   path(scope: FileScope, name: string): string;

@@ -60,7 +60,14 @@ export async function addManualMcp(
           const map = (source as Record<string, unknown>)[field];
           if (map && typeof map === 'object')
             for (const key of Object.keys(map))
-              (map as Record<string, unknown>)[key] = '';
+              // Only the value of an own key is cleared, defined in place:
+              // a key such as __proto__ can never reach the prototype.
+              Object.defineProperty(map, key, {
+                value: '',
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              });
         }
   };
   let saved = false;

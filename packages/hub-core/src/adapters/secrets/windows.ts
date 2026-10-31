@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
+import { mkdir, open, unlink } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertNoLinks } from '../managed-files.js';
+import { assertNoLinks, readOwnedFile } from '../managed-files.js';
 import { createWindowsProcessRunner } from '../native/process-runner.js';
 import { HubError } from '../../errors.js';
 import {
@@ -76,10 +76,13 @@ export async function windowsSecretStore(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw unavailable();
   }
-  const scopeInfo = await lstat(scopePath);
-  if (!scopeInfo.isFile() || scopeInfo.nlink !== 1 || scopeInfo.size > 256)
+  // Checked and read through one handle, so it cannot be swapped between
+  // the check and the read.
+  const scopeBytes = await readOwnedFile(scopePath, 256).catch(() => {
     throw unavailable();
-  const scope: unknown = JSON.parse(await readFile(scopePath, 'utf8'));
+  });
+  if (scopeBytes === null) throw unavailable();
+  const scope: unknown = JSON.parse(scopeBytes.toString('utf8'));
   if (
     !scope ||
     typeof scope !== 'object' ||
@@ -99,14 +102,10 @@ export async function windowsSecretStore(
       .digest();
   async function encrypted(id: string) {
     const path = pathFor(id);
-    await assertNoLinks(path, true);
+    // Missing is null; a link, a hard link or an oversized file is refused.
     try {
-      const info = await lstat(path);
-      if (!info.isFile() || info.nlink !== 1 || info.size > 32 * 1024)
-        throw unavailable();
-      return await readFile(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      return await readOwnedFile(path, 32 * 1024);
+    } catch {
       throw unavailable();
     }
   }

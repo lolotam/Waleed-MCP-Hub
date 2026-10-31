@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { SafetyStateSchema } from '@waleed/contracts';
 import { HubError } from '../errors.js';
+import { readOwnedFile } from './managed-files.js';
 import { createSafetyLedger, emptySafetyState } from '../safety.js';
 
 const MAX_BYTES = 512 * 1024;
@@ -29,38 +30,18 @@ export async function openSafetyLedger(
   const path = join(directory, 'safety.json');
   let fingerprint: string | null = null;
   async function load(): Promise<string | null> {
+    // Checked and read through one handle: a link, a hard link or a file
+    // that is or grows over the cap is refused, and nothing can swap the
+    // file between the check and the read.
     try {
-      if ((await lstat(path)).isSymbolicLink())
+      const bytes = await readOwnedFile(path, MAX_BYTES);
+      return bytes === null ? null : bytes.toString('utf8');
+    } catch (error) {
+      if (error instanceof HubError && error.code === 'conflict')
         throw new HubError(
           'conflict',
-          'Safety file cannot be a symbolic link.',
+          'Safety file must be a regular file within its supported size.',
         );
-      const file = await open(path, 'r');
-      try {
-        // Fixed-size reads bound memory even if an external writer grows the file.
-        const buffer = Buffer.alloc(MAX_BYTES + 1);
-        let offset = 0;
-        while (offset < buffer.length) {
-          const { bytesRead } = await file.read(
-            buffer,
-            offset,
-            buffer.length - offset,
-            offset,
-          );
-          if (!bytesRead) break;
-          offset += bytesRead;
-        }
-        if (offset > MAX_BYTES)
-          throw new HubError(
-            'invalid',
-            'Safety file exceeds its supported size.',
-          );
-        return buffer.subarray(0, offset).toString('utf8');
-      } finally {
-        await file.close();
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
   }

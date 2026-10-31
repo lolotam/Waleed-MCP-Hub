@@ -1,7 +1,6 @@
-import { readFile, lstat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { ConnectorSchema, StateSchema, SafetyStateSchema } from '@waleed/contracts';
-import { assertNoLinks } from '../adapters/managed-files.js';
+import { assertNoLinks, readOwnedFile } from '../adapters/managed-files.js';
 import { approved, definitionHash, hashBytes } from './registry.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
 import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
@@ -19,16 +18,17 @@ export async function runNativeLauncher(manifestUrl: URL, expectedHash: string) 
   try {
     if (!process.versions.node.startsWith('24.')) throw new Error();
     if (manifestUrl.protocol !== 'file:' || !/^[a-f0-9]{64}$/.test(expectedHash)) throw new Error();
-    const path = fileURLToPath(manifestUrl); await assertNoLinks(path);
-    if ((await lstat(path)).size > 1024 * 1024) throw new Error();
-    const raw = await readFile(path, 'utf8'); if (hashBytes(raw) !== expectedHash) throw new Error();
+    const path = fileURLToPath(manifestUrl);
+    // Each file is checked and read through one handle, so it cannot be
+    // swapped between the check and the read.
+    const read = async (file: string, maxBytes: number) => { const bytes = await readOwnedFile(file, maxBytes); if (bytes === null) throw new Error(); return bytes.toString('utf8'); };
+    const raw = await read(path, 1024 * 1024); if (hashBytes(raw) !== expectedHash) throw new Error();
     const manifest = JSON.parse(raw) as { version?: unknown; registryPath?: unknown; profileId?: unknown; connector?: unknown };
     if (manifest.version !== 1 || typeof manifest.registryPath !== 'string' || typeof manifest.profileId !== 'string') throw new Error();
-    const saved = ConnectorSchema.parse(manifest.connector); await assertNoLinks(manifest.registryPath);
-    if ((await lstat(manifest.registryPath)).size > 16 * 1024 * 1024) throw new Error();
-    const state = StateSchema.parse(JSON.parse(await readFile(manifest.registryPath, 'utf8')));
-    const safetyPath = join(dirname(manifest.registryPath), 'safety.json'); await assertNoLinks(safetyPath);
-    if ((await lstat(safetyPath)).size > 1024 * 1024 || SafetyStateSchema.parse(JSON.parse(await readFile(safetyPath, 'utf8'))).operations.some((operation) => operation.phase === 'prepared' || operation.phase === 'needs_review')) throw new Error();
+    const saved = ConnectorSchema.parse(manifest.connector);
+    const state = StateSchema.parse(JSON.parse(await read(manifest.registryPath, 16 * 1024 * 1024)));
+    const safetyPath = join(dirname(manifest.registryPath), 'safety.json');
+    if (SafetyStateSchema.parse(JSON.parse(await read(safetyPath, 1024 * 1024))).operations.some((operation) => operation.phase === 'prepared' || operation.phase === 'needs_review')) throw new Error();
     const current = state.connectors.find((connector) => connector.id === saved.id);
     const profile = state.profiles.find((profile) => profile.id === manifest.profileId);
     if (!current || current.executionMode !== 'native' || !current.enabled || !profile || profile.enabled === false || !profile.connectorIds.includes(current.id) || !approved(current) || current.revision !== saved.revision || definitionHash(current) !== definitionHash(saved) || Object.keys(current.headerBindings).length) throw new Error();
