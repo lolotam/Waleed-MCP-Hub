@@ -152,7 +152,10 @@ const verifyInstall = async (
   try {
     await assertNoLinks(installFolder, true);
     const lockPath = join(installFolder, 'package-lock.json');
-    const lockBytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES);
+    // A refused file keeps the fault code of a missing one.
+    const lockBytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES).catch(
+      () => null,
+    );
     if (!lockBytes) throw new PackageFault('integrity_mismatch');
     if (createHash('sha256').update(lockBytes).digest('hex') !== lockHash)
       throw new PackageFault('integrity_mismatch');
@@ -162,7 +165,7 @@ const verifyInstall = async (
     const manifestBytes = await readOwnedFile(
       manifestPath,
       MAX_PACKAGE_JSON_BYTES,
-    );
+    ).catch(() => null);
     if (!manifestBytes) throw new PackageFault('install_failed');
     const installed = asRecord(JSON.parse(manifestBytes.toString('utf8')));
     if (!installed) throw new PackageFault('install_failed');

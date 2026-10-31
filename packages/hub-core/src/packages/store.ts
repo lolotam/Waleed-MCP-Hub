@@ -83,15 +83,19 @@ export async function readOwnedFile(
   path: string,
   maxBytes: number,
 ): Promise<Buffer | null> {
+  // Only a path that does not exist is reported as missing (null). Anything
+  // else that is refused (a folder, a link, a hard link, an oversized file,
+  // a file that changed or vanished) is an error: callers such as
+  // reconciliation read "missing" as "no live job owns this marker".
+  const refused = () =>
+    new HubError('conflict', 'Owned file changed or is unsafe.');
   let handle: FileHandle;
   try {
     handle = await open(path, checkedReadFlags);
   } catch (error) {
-    // A folder or a link that cannot be followed is not a regular file: it
-    // is refused, not an error.
     const reason = code(error);
-    if (reason === 'ENOENT' || reason === 'EISDIR' || reason === 'ELOOP')
-      return null;
+    if (reason === 'ENOENT') return null;
+    if (reason === 'EISDIR' || reason === 'ELOOP') throw refused();
     throw error;
   }
   try {
@@ -99,14 +103,11 @@ export async function readOwnedFile(
     // in a JavaScript number, so two different files could look equal.
     const info = await handle.stat({ bigint: true });
     if (!info.isFile() || info.nlink !== 1n || info.size > BigInt(maxBytes))
-      return null;
+      throw refused();
     // The path must still name the file the handle points to: a link that
     // took its place in the meantime is refused, even though the handle
     // followed it.
-    // No part of the path may have become a link since the open. A link or a
-    // different file is refused with an error, never reported as a missing
-    // file: callers such as reconciliation read "missing" as "no live job
-    // owns this marker".
+    // No part of the path may have become a link since the open.
     await assertNoLinks(path);
     const pathInfo = await lstat(path, { bigint: true });
     if (
@@ -114,7 +115,7 @@ export async function readOwnedFile(
       pathInfo.dev !== info.dev ||
       pathInfo.ino !== info.ino
     )
-      throw new HubError('conflict', 'Owned file changed or is unsafe.');
+      throw refused();
     // The read never asks for more than one byte beyond the cap, so a file
     // that grew while it was read is refused instead of being cut short.
     const chunks: Buffer[] = [];
@@ -127,13 +128,12 @@ export async function readOwnedFile(
       size += bytesRead;
       chunks.push(Buffer.from(chunk.subarray(0, bytesRead)));
     }
-    if (size > maxBytes) return null;
+    if (size > maxBytes) throw refused();
     return Buffer.concat(chunks);
   } catch (error) {
     // The file existed when it was opened: one that vanished from its path
     // since then is refused, never reported as missing.
-    if (code(error) === 'ENOENT')
-      throw new HubError('conflict', 'Owned file changed or is unsafe.');
+    if (code(error) === 'ENOENT') throw refused();
     throw error;
   } finally {
     await handle.close();

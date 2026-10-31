@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import {
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -180,4 +181,77 @@ it('keeps an active install when its marker vanishes after the open', async () =
   await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
     'installing',
   );
+});
+
+// A marker that exists but is refused (a hard link, a folder, a link) must
+// never read as missing: reconciliation would then remove an active install.
+const activeInstall = async (prefix: string) => {
+  directory = await mkdtemp(join(tmpdir(), prefix));
+  const packagesDir = packagesRoot(directory);
+  await mkdir(packagesDir, { recursive: true });
+  const installId = randomUUID();
+  const jobId = randomUUID();
+  const folder = join(packagesDir, installId);
+  await mkdir(folder);
+  await writeFile(join(folder, 'file.txt'), 'installing');
+  const reconcile = () =>
+    reconcilePackages({
+      packagesDir,
+      readState: async () => emptyState(),
+      activeJobs: () => new Set([jobId]),
+      lock: createPackageLock(),
+    });
+  return { packagesDir, installId, jobId, folder, reconcile };
+};
+
+it('keeps an active install whose marker is a hard link', async () => {
+  const { packagesDir, installId, jobId, folder, reconcile } =
+    await activeInstall('wmh-refused-hardlink-');
+  await writeMarker(packagesDir, installId, jobId);
+  await link(markerPath(packagesDir, installId), join(directory, 'extra'));
+  await expect(reconcile()).rejects.toMatchObject({ code: 'conflict' });
+  await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
+    'installing',
+  );
+});
+
+it('keeps an active install whose marker is a folder', async () => {
+  const { packagesDir, installId, folder, reconcile } = await activeInstall(
+    'wmh-refused-folder-',
+  );
+  await mkdir(markerPath(packagesDir, installId));
+  await expect(reconcile()).rejects.toMatchObject({ code: 'conflict' });
+  await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
+    'installing',
+  );
+});
+
+it('keeps an active install whose marker is a link', async (context) => {
+  const { packagesDir, installId, jobId, folder, reconcile } =
+    await activeInstall('wmh-refused-link-');
+  const target = join(directory, 'target.installing');
+  await writeFile(target, jobId);
+  try {
+    await symlink(target, markerPath(packagesDir, installId), 'file');
+  } catch (error) {
+    // Windows needs Developer Mode or elevation for a file link.
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') context.skip();
+    throw error;
+  }
+  await expect(reconcile()).rejects.toMatchObject({ code: 'conflict' });
+  await expect(readFile(join(folder, 'file.txt'), 'utf8')).resolves.toBe(
+    'installing',
+  );
+});
+
+it('refuses an owned file over its size cap with an error', async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-refused-size-'));
+  const path = join(directory, 'big.json');
+  await writeFile(path, 'x'.repeat(2048));
+  await expect(readOwnedFile(path, 1024)).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  await expect(
+    readOwnedFile(join(directory, 'none.json'), 1024),
+  ).resolves.toBeNull();
 });

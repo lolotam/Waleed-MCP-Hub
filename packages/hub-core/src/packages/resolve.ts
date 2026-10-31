@@ -502,7 +502,10 @@ export const resolvePackage = async (
 
     // The frozen lock.
     const lockPath = join(paths.project, 'package-lock.json');
-    const lockBytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES);
+    // A refused file keeps the fault code of a missing one.
+    const lockBytes = await readOwnedFile(lockPath, MAX_LOCK_BYTES).catch(
+      () => null,
+    );
     if (!lockBytes) throw new PackageFault('install_failed');
     let lock: unknown;
     try {
