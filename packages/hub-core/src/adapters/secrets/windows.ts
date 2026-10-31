@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { assertNoLinks } from '../managed-files.js';
 import { createWindowsProcessRunner } from '../native/process-runner.js';
 import { HubError } from '../../errors.js';
+import { coalesceReads } from './coalesce.js';
 import {
   assertSecretId,
   assertSecretValue,
@@ -48,7 +49,8 @@ export async function windowsSecretStore(
       stdin: JSON.stringify(input),
       signal,
       timeoutMs: 10_000,
-      outputLimitBytes: 64 * 1024,
+      // One batch answers up to the 32 KiB input limit of plain runs.
+      outputLimitBytes: 1024 * 1024,
     });
     if (result.outcome !== 'exited' || result.exitCode !== 0)
       throw unavailable();
@@ -97,6 +99,36 @@ export async function windowsSecretStore(
     createHash('sha256')
       .update(`WaleedMcpHub/credentials/v1/${context}/${id}`)
       .digest();
+  // One unprotect run answers every read queued meanwhile: one line per
+  // item, empty for an item DPAPI refused.
+  const unprotectMany = (
+    items: Array<{ cipher: Buffer; entropy: Buffer }>,
+  ) => ({
+    action: 'unprotect_many',
+    items: items.map((item) => ({
+      data: item.cipher.toString('base64'),
+      entropy: item.entropy.toString('base64'),
+    })),
+  });
+  const readBatched = coalesceReads<{ cipher: Buffer; entropy: Buffer }>(
+    async (items) => {
+      const output = await invoke(
+        unprotectMany(items),
+        AbortSignal.timeout(10_000),
+      );
+      const lines = output.split('\n');
+      if (lines.length !== items.length) throw unavailable();
+      return lines.map((line) =>
+        /^[a-zA-Z0-9+/=]+$/.test(line)
+          ? Buffer.from(line, 'base64')
+          : undefined,
+      );
+    },
+    // Plain runs accept at most 32 KiB of input; dpapi.ps1 at most 64 items.
+    (items) =>
+      items.length <= 64 &&
+      Buffer.byteLength(JSON.stringify(unprotectMany(items))) <= 31 * 1024,
+  );
   async function encrypted(id: string) {
     const path = pathFor(id);
     await assertNoLinks(path, true);
@@ -159,16 +191,12 @@ export async function windowsSecretStore(
       if (!cipher) throw unavailable();
       const entropy = entropyFor(id);
       try {
-        const raw = await invoke(
-          {
-            action: 'unprotect',
-            data: cipher.toString('base64'),
-            entropy: entropy.toString('base64'),
-          },
-          signal,
-        );
-        if (!/^[a-zA-Z0-9+/=]+$/.test(raw)) throw unavailable();
-        const result = Buffer.from(raw, 'base64');
+        let result: Buffer;
+        try {
+          result = await readBatched({ cipher, entropy }, signal);
+        } catch {
+          throw unavailable();
+        }
         try {
           assertSecretValue(result);
           if (signal.aborted) throw unavailable();

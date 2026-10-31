@@ -37,34 +37,6 @@ export interface SecretLease {
   notAfter?: number;
   dispose(): void;
 }
-// Parallel connector startup must queue private reads rather than overflow the
-// bounded Windows credential runner. Cancellation is checked again after waiting;
-// a failed resolution always releases the queue for the next connector.
-export function serializeBindingResolver(
-  resolveLease: (
-    connector: Connector,
-    signal: AbortSignal,
-  ) => Promise<SecretLease>,
-) {
-  let tail = Promise.resolve();
-  return async (
-    connector: Connector,
-    signal: AbortSignal,
-  ): Promise<SecretLease> => {
-    const previous = tail;
-    let release!: () => void;
-    tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      signal.throwIfAborted();
-      return await resolveLease(connector, signal);
-    } finally {
-      release();
-    }
-  };
-}
 export function createBindingResolver(
   backends: SecretBackends,
   readState: () => Promise<HubState>,

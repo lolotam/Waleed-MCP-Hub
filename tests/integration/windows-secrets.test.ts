@@ -76,6 +76,42 @@ describe.skipIf(process.platform !== 'win32')(
       ).rejects.toBeDefined();
       expect(await vault.has(id, AbortSignal.timeout(1000))).toBe(true);
     }, 30_000);
+    it('answers concurrent reads together and fails only the tampered credential among them', async () => {
+      const ids = [1, 2, 3].map(
+        (n) => `wmh-secret-12345678-1234-1234-1234-12345678900${n}`,
+      );
+      for (const [index, item] of ids.entries())
+        await vault.put(
+          item,
+          Buffer.from(`SYNTHETIC-batched-${index}`),
+          AbortSignal.timeout(15_000),
+        );
+      const tampered = await readFile(
+        join(directory, 'vault', `${ids[2]}.dpapi`),
+      );
+      tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 1;
+      await writeFile(join(directory, 'vault', `${ids[2]}.dpapi`), tampered);
+      const readOnly = await windowsSecretStore(join(directory, 'vault'), true);
+      const results = await Promise.allSettled(
+        [id, ...ids].map((item) =>
+          readOnly.read!(item, AbortSignal.timeout(20_000)),
+        ),
+      );
+      const values = results.map((result) =>
+        result.status === 'fulfilled' ? result.value.toString() : 'rejected',
+      );
+      results.forEach(
+        (result) => result.status === 'fulfilled' && result.value.fill(0),
+      );
+      expect(values).toEqual([
+        privateValue.toString(),
+        'SYNTHETIC-batched-0',
+        'SYNTHETIC-batched-1',
+        'rejected',
+      ]);
+      for (const item of ids)
+        await vault.delete(item, AbortSignal.timeout(1000));
+    }, 60_000);
     it('rejects traversal/foreign identifiers, duplicate writes and junction roots', async () => {
       await expect(
         vault.read!('../outside', AbortSignal.timeout(1000)),

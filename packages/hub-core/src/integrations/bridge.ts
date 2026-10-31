@@ -31,11 +31,7 @@ import {
   assertSafePathText,
 } from '../adapters/managed-files.js';
 import { windowsSecretStore } from '../adapters/secrets/windows.js';
-import {
-  createBindingResolver,
-  serializeBindingResolver,
-  type SecretLease,
-} from '../auth/bindings.js';
+import { createBindingResolver, type SecretLease } from '../auth/bindings.js';
 import {
   safeMcpHttpTransport,
   sessionMcpHttpTransport,
@@ -1770,15 +1766,15 @@ export async function runAgentBridge(
     },
   };
   let backend: ReturnType<typeof windowsSecretStore> | undefined;
-  const resolveBindings = serializeBindingResolver(
-    async (connector, signal) => {
-      backend ??= windowsSecretStore(join(directory, 'credentials'), true);
-      return createBindingResolver({ windows: await backend }, read)(
-        connector,
-        signal,
-      );
-    },
-  );
+  // Parallel peer startups resolve their credentials at once: the protected
+  // store answers the reads that arrive together with one process.
+  const resolveBindings = async (connector: Connector, signal: AbortSignal) => {
+    backend ??= windowsSecretStore(join(directory, 'credentials'), true);
+    return createBindingResolver({ windows: await backend }, read)(
+      connector,
+      signal,
+    );
+  };
   // The Docker runtime of this bridge: the installation id of install.json,
   // the liveness listener of this bridge and the ownership of its agent. A
   // bridge that cannot read the install record refuses Docker peers; every
