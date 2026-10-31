@@ -244,22 +244,28 @@ describe.skipIf(!availability.available)(
         bodyFailed = true;
         throw error;
       } finally {
-        try {
-          await stopBridge(child);
-          await stopBridge(replacement);
-          await removeTestContainers(cli, {
-            installId,
-            agentId: 'opencode',
-            nonce,
-          });
-        } catch (error) {
-          teardownError = error;
-          // A failed test keeps its own error; the teardown failure is still
-          // shown, since it can leave a container behind.
-          if (bodyFailed) console.error(error);
-        } finally {
-          // The data directory goes even when the teardown failed.
-          await rm(directory, { recursive: true, force: true, maxRetries: 4 });
+        // Every step runs, even after one failed, so the containers and the
+        // data directory always go. A failed test keeps its own error and a
+        // teardown failure is then only printed, since it can leave a
+        // container behind; otherwise the first teardown failure is thrown.
+        const steps = [
+          () => stopBridge(child),
+          () => stopBridge(replacement),
+          () =>
+            removeTestContainers(cli, {
+              installId,
+              agentId: 'opencode',
+              nonce,
+            }),
+          () => rm(directory, { recursive: true, force: true, maxRetries: 4 }),
+        ];
+        for (const step of steps) {
+          try {
+            await step();
+          } catch (error) {
+            if (bodyFailed) console.error(error);
+            else teardownError ??= error;
+          }
         }
       }
       // Reached only when the test itself passed.
