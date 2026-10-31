@@ -773,8 +773,13 @@ Rules that make reuse no weaker than one peer per call:
     Reconciliation also records the packages folder's device and inode
     before it lists the folder, and checks them again before every removal.
     If the folder was replaced or became a link, the pass stops with
-    `conflict` and removes nothing more. The same race window applies
-    between that check and the removal itself.
+    `conflict` and removes nothing more. The jobs folder is held to the same
+    rule: a link there is refused, its identity is checked before every
+    removal, and `removeTree` refuses a link anywhere above the entry it
+    removes. Only a packages folder that is missing before the pass starts
+    counts as nothing to do; one that vanishes after it was identified is a
+    conflict. The same race window applies between each check and the
+    removal itself.
 
 **Implementation choices accepted in review.** Docker ownership (T6) differs
 from the first plan in these conservative ways:

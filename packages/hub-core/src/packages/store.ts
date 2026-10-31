@@ -10,7 +10,7 @@ import {
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { HubState } from '@waleed/contracts';
 import { HubError } from '../errors.js';
 import { assertNoLinks, checkedReadFlags } from '../adapters/managed-files.js';
@@ -243,6 +243,9 @@ export async function removeTree(
   if (!target.toLowerCase().startsWith(prefix.toLowerCase()))
     throw invalid('The path is outside the packages folder.');
   await assertNoLinks(root, true);
+  // A folder between the packages folder and the entry (such as the jobs
+  // folder) that is a link is refused as well.
+  await assertNoLinks(dirname(target), true);
   return removeEntryTree(target);
 }
 
@@ -308,33 +311,43 @@ export async function reconcilePackages(
     // identified before the listing and checked again before every removal:
     // a folder that was replaced or turned into a link ends the pass, so
     // nothing is removed from a tree the listing did not come from.
-    const rootId = async (): Promise<string> => {
-      await assertNoLinks(options.packagesDir);
-      const info = await lstat(options.packagesDir, { bigint: true });
-      if (!info.isDirectory())
-        throw new HubError('conflict', 'Owned file changed or is unsafe.');
+    const refused = () =>
+      new HubError('conflict', 'Owned file changed or is unsafe.');
+    const folderId = async (path: string): Promise<string> => {
+      await assertNoLinks(path);
+      const info = await lstat(path, { bigint: true });
+      if (!info.isDirectory()) throw refused();
       return `${info.dev}:${info.ino}`;
     };
+    const sameFolder = async (path: string, id: string): Promise<void> => {
+      let now: string;
+      try {
+        now = await folderId(path);
+      } catch {
+        now = '';
+      }
+      if (now !== id) throw refused();
+    };
+    // Only a packages folder that is missing before the pass starts means
+    // there is nothing to reconcile. Once it has been identified, any failure
+    // to list it is a conflict.
     let root: string;
-    let entries: Dirent[];
     try {
-      root = await rootId();
-      entries = await readdir(options.packagesDir, { withFileTypes: true });
+      root = await folderId(options.packagesDir);
     } catch (error) {
       if (code(error) === 'ENOENT')
         return { deleted: [...deleted], retained: [...retained] };
       throw error;
     }
-    const assertRoot = async (): Promise<void> => {
-      let now: string;
-      try {
-        now = await rootId();
-      } catch {
-        now = '';
-      }
-      if (now !== root)
-        throw new HubError('conflict', 'Owned file changed or is unsafe.');
-    };
+    const assertRoot = () => sameFolder(options.packagesDir, root);
+    let entries: Dirent[];
+    try {
+      entries = await readdir(options.packagesDir, { withFileTypes: true });
+    } catch (error) {
+      await assertRoot();
+      if (code(error) === 'ENOENT') throw refused();
+      throw error;
+    }
     // A marker that exists but is refused (a link, a hard link, a folder, an
     // oversized or malformed file, one that changed while read) keeps its
     // marker and its folder for this pass; the other entries are still
@@ -385,22 +398,38 @@ export async function reconcilePackages(
         deleted.add(entry.name);
       else retained.add(entry.name);
     }
+    // The jobs folder gets the same treatment as the packages folder: a
+    // link is refused, and its identity is checked before every removal.
+    const jobsDir = join(options.packagesDir, JOBS_FOLDER);
     await assertRoot();
-    let jobEntries: Dirent[] = [];
+    let jobs: string | null;
     try {
-      jobEntries = await readdir(join(options.packagesDir, JOBS_FOLDER), {
-        withFileTypes: true,
-      });
+      jobs = await folderId(jobsDir);
     } catch (error) {
       if (code(error) !== 'ENOENT') throw error;
+      await assertRoot();
+      jobs = null;
+    }
+    let jobEntries: Dirent[] = [];
+    if (jobs !== null) {
+      const jobsId = jobs;
+      try {
+        jobEntries = await readdir(jobsDir, { withFileTypes: true });
+      } catch (error) {
+        await assertRoot();
+        await sameFolder(jobsDir, jobsId);
+        if (code(error) === 'ENOENT') throw refused();
+        throw error;
+      }
     }
     for (const entry of jobEntries) {
       if (!UUID.test(entry.name)) continue;
-      const folder = join(options.packagesDir, JOBS_FOLDER, entry.name);
+      const folder = join(jobsDir, entry.name);
       const info = await lstatOrNull(folder);
       if (!info || !info.isDirectory() || info.isSymbolicLink()) continue;
       if (isActive(entry.name)) continue;
       await assertRoot();
+      if (jobs !== null) await sameFolder(jobsDir, jobs);
       if (await removeTree(folder, options.packagesDir))
         deleted.add(entry.name);
       else retained.add(entry.name);

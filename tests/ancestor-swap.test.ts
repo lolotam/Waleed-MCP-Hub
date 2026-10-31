@@ -20,6 +20,10 @@ const hook = vi.hoisted(() => ({
   path: '',
   beforeOpen: undefined as undefined | (() => Promise<void>),
   afterOpen: undefined as undefined | (() => Promise<void>),
+  // The same, around the listing of the armed folder.
+  listPath: '',
+  beforeList: undefined as undefined | (() => Promise<void>),
+  afterList: undefined as undefined | (() => Promise<void>),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -38,7 +42,26 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     }
     return handle;
   }) as typeof actual.open;
-  return { ...actual, open, default: { ...actual, open } };
+  const readdir = (async (...args: Parameters<typeof actual.readdir>) => {
+    if (args[0] === hook.listPath && hook.beforeList) {
+      const run = hook.beforeList;
+      hook.beforeList = undefined;
+      await run();
+    }
+    const entries = await actual.readdir(...args);
+    if (args[0] === hook.listPath && hook.afterList) {
+      const run = hook.afterList;
+      hook.afterList = undefined;
+      await run();
+    }
+    return entries;
+  }) as typeof actual.readdir;
+  return {
+    ...actual,
+    open,
+    readdir,
+    default: { ...actual, open, readdir },
+  };
 });
 
 const { agentFiles } =
@@ -63,6 +86,9 @@ afterEach(async () => {
   hook.path = '';
   hook.beforeOpen = undefined;
   hook.afterOpen = undefined;
+  hook.listPath = '';
+  hook.beforeList = undefined;
+  hook.afterList = undefined;
   if (directory) await rm(directory, { recursive: true, force: true });
   directory = '';
 });
@@ -370,4 +396,79 @@ it('removes nothing from a packages folder that was replaced during reconciliati
   await expect(
     readFile(join(packagesDir, staleId, 'file.txt'), 'utf8'),
   ).resolves.toBe('replacement');
+});
+
+// A packages folder with one stale job folder in its jobs folder.
+const staleJob = async (prefix: string) => {
+  directory = await mkdtemp(join(tmpdir(), prefix));
+  const packagesDir = packagesRoot(directory);
+  const jobsDir = join(packagesDir, '.jobs');
+  const jobId = randomUUID();
+  await mkdir(join(jobsDir, jobId), { recursive: true });
+  // Outside the packages folder: a folder with the same name and a file.
+  const foreign = join(directory, 'foreign');
+  await mkdir(join(foreign, jobId), { recursive: true });
+  await writeFile(join(foreign, jobId, 'file.txt'), 'foreign');
+  const foreignKept = () =>
+    expect(readFile(join(foreign, jobId, 'file.txt'), 'utf8')).resolves.toBe(
+      'foreign',
+    );
+  return { packagesDir, jobsDir, jobId, foreign, foreignKept };
+};
+
+it('refuses a jobs folder that is a link', async () => {
+  const { packagesDir, jobsDir, foreign, foreignKept } =
+    await staleJob('wmh-jobs-link-');
+  await rm(jobsDir, { recursive: true });
+  await symlink(foreign, jobsDir, 'junction');
+  await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  await foreignKept();
+});
+
+it('removes nothing from a jobs folder that became a link after it was listed', async () => {
+  const { packagesDir, jobsDir, foreign, foreignKept } =
+    await staleJob('wmh-jobs-swap-');
+  hook.listPath = jobsDir;
+  hook.afterList = swapParent(jobsDir, foreign);
+  await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  await foreignKept();
+});
+
+it('reports a conflict when the jobs folder vanishes before it is listed', async () => {
+  const { packagesDir, jobsDir } = await staleJob('wmh-jobs-vanish-');
+  hook.listPath = jobsDir;
+  hook.beforeList = async () => {
+    await rename(jobsDir, jobsDir + '-moved');
+  };
+  await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
+    code: 'conflict',
+  });
+});
+
+it('reports a conflict when the packages folder vanishes before it is listed', async () => {
+  const { packagesDir } = await staleJob('wmh-root-vanish-');
+  hook.listPath = packagesDir;
+  hook.beforeList = async () => {
+    await rename(packagesDir, packagesDir + '-moved');
+  };
+  await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
+    code: 'conflict',
+  });
+  // A packages folder that is missing from the start is still no work.
+  await expect(reconcileWith(join(directory, 'none'), [])).resolves.toEqual({
+    deleted: [],
+    retained: [],
+  });
+});
+
+it('deletes a stale job folder when nothing changed', async () => {
+  const { packagesDir, jobsDir, jobId } = await staleJob('wmh-jobs-plain-');
+  await expect(reconcileWith(packagesDir, [])).resolves.toMatchObject({
+    deleted: [jobId],
+  });
+  await expect(readFile(join(jobsDir, jobId), 'utf8')).rejects.toBeTruthy();
 });
