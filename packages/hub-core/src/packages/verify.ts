@@ -44,9 +44,17 @@ const cancelled = () => new RuntimeFault('cancelled');
 const throwIfAborted = (signal?: AbortSignal): void => {
   if (signal?.aborted) throw cancelled();
 };
-async function digest(path: string, signal?: AbortSignal): Promise<string> {
+async function digest(
+  path: string,
+  size: number,
+  signal?: AbortSignal,
+): Promise<string> {
   const hash = createHash('sha256');
-  const stream = createReadStream(path);
+  // A small file gets a small read buffer: most installed files are a few KiB,
+  // and a fixed 64 KiB buffer per file dominated the verification time.
+  const stream = createReadStream(path, {
+    highWaterMark: Math.min(Math.max(size, 1), 64 * 1024),
+  });
   if (!signal) {
     for await (const chunk of stream) hash.update(chunk);
     return hash.digest('hex');
@@ -66,38 +74,88 @@ async function digest(path: string, signal?: AbortSignal): Promise<string> {
   }
 }
 
-// The installed-file manifest: one line per regular file, sorted, hashed
-// together. A link, a hardlinked file or anything that is not a plain file or
-// folder fails the walk.
-export async function buildManifest(
+interface InstalledFile {
+  path: string;
+  relative: string;
+  size: number;
+}
+// Up to this many files are hashed at once. One at a time left a seven-peer
+// catalog waiting about 5 s per 13k-file install.
+const HASH_CONCURRENCY = 8;
+
+// Lists every installed file. A link, a hardlinked file or anything that is not
+// a plain file or folder fails the walk, and the caps are checked for the whole
+// tree before any file is read.
+async function listInstalledFiles(
   installDir: string,
   signal?: AbortSignal,
-): Promise<PackageManifest> {
-  const lines: string[] = [];
+): Promise<{ files: InstalledFile[]; bytes: number }> {
+  const files: InstalledFile[] = [];
   let bytes = 0;
   const walk = async (directory: string, prefix: string): Promise<void> => {
     throwIfAborted(signal);
-    for (const entry of await readdir(directory)) {
-      throwIfAborted(signal);
+    const entries = await readdir(directory);
+    const infos = await Promise.all(
+      entries.map((entry) => lstat(join(directory, entry))),
+    );
+    throwIfAborted(signal);
+    for (const [index, entry] of entries.entries()) {
       const path = join(directory, entry);
       const relative = prefix ? `${prefix}/${entry}` : entry;
-      const info = await lstat(path);
+      const info = infos[index]!;
       if (info.isSymbolicLink()) throw modified();
       if (info.isDirectory()) {
         await walk(path, relative);
         continue;
       }
       if (!info.isFile() || info.nlink > 1) throw modified();
-      // The caps are checked before hashing, so an oversized file is never read.
       bytes += info.size;
-      if (lines.length >= MAX_FILES || bytes > MAX_BYTES) throw modified();
-      lines.push(`${relative}\0${info.size}\0${await digest(path, signal)}`);
-      throwIfAborted(signal);
+      if (files.length >= MAX_FILES || bytes > MAX_BYTES) throw modified();
+      files.push({ path, relative, size: info.size });
     }
   };
+  await walk(installDir, '');
+  return { files, bytes };
+}
+
+// Every file is hashed even when a worker fails, so no stream outlives the
+// call; the first failure is then reported.
+async function manifestLines(
+  files: InstalledFile[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const lines = new Array<string>(files.length);
+  let next = 0,
+    failure: { error: unknown } | undefined;
+  const worker = async () => {
+    while (!failure && next < files.length) {
+      const index = next++;
+      const file = files[index]!;
+      try {
+        throwIfAborted(signal);
+        lines[index] =
+          `${file.relative}\0${file.size}\0${await digest(file.path, file.size, signal)}`;
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: HASH_CONCURRENCY }, worker));
+  if (failure) throw failure.error;
+  throwIfAborted(signal);
+  return lines;
+}
+
+// The installed-file manifest: one line per regular file, sorted, hashed
+// together.
+export async function buildManifest(
+  installDir: string,
+  signal?: AbortSignal,
+): Promise<PackageManifest> {
   const root = await lstat(installDir);
   if (!root.isDirectory() || root.isSymbolicLink()) throw modified();
-  await walk(installDir, '');
+  const { files, bytes } = await listInstalledFiles(installDir, signal);
+  const lines = await manifestLines(files, signal);
   lines.sort();
   return {
     hash: createHash('sha256').update(lines.join('\n')).digest('hex'),

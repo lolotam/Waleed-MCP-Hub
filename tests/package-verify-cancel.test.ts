@@ -21,6 +21,7 @@ type NativeConnector = Extract<Connector, { executionMode: 'native' }>;
 const plan = vi.hoisted(() => ({
   opened: 0,
   closed: 0,
+  peak: 0,
   abortOnOpen: undefined as undefined | number,
   abortOnPath: undefined as undefined | string,
   controller: undefined as undefined | AbortController,
@@ -36,6 +37,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ) => {
       const stream = actual.createReadStream(path, options);
       plan.opened += 1;
+      plan.peak = Math.max(plan.peak, plan.opened - plan.closed);
       stream.on('close', () => {
         plan.closed += 1;
       });
@@ -52,6 +54,7 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   plan.opened = 0;
   plan.closed = 0;
+  plan.peak = 0;
   plan.abortOnOpen = undefined;
   plan.abortOnPath = undefined;
   plan.controller = undefined;
@@ -196,6 +199,45 @@ describe('cancellable package verification', () => {
     await expect(
       verifyPackageFiles(connector, packagesDir, controller.signal),
     ).resolves.toBeUndefined();
+    expect(plan.closed).toBe(plan.opened);
+  });
+});
+
+describe('package manifest walk', () => {
+  const sha256 = (value: string) =>
+    createHash('sha256').update(value).digest('hex');
+
+  it('hashes the documented manifest of nested, empty and non-ASCII files', async () => {
+    const tree = await createTempDir();
+    await mkdir(join(tree, 'nested', 'deeper'), { recursive: true });
+    await mkdir(join(tree, 'نص'));
+    await writeFile(join(tree, 'a.txt'), 'alpha');
+    await writeFile(join(tree, 'nested', 'deeper', 'b.js'), '');
+    await writeFile(join(tree, 'نص', 'ج.txt'), 'مرحبا');
+    const lines = [
+      `a.txt\0${5}\0${sha256('alpha')}`,
+      `nested/deeper/b.js\0${0}\0${sha256('')}`,
+      `نص/ج.txt\0${Buffer.byteLength('مرحبا')}\0${sha256('مرحبا')}`,
+    ].sort();
+
+    await expect(buildManifest(tree)).resolves.toEqual({
+      hash: sha256(lines.join('\n')),
+      files: 3,
+      bytes: 5 + Buffer.byteLength('مرحبا'),
+    });
+  });
+
+  // Regression 2026-10-31: hashing one file at a time took ~5.5 s per
+  // 13,584-file ssh-mcp install, so seven peers made the first agent
+  // tools/list take 21-30 s and Claude Code timed out.
+  it('hashes install files concurrently and closes every stream', async () => {
+    const tree = await createTempDir();
+    for (let index = 0; index < 24; index++)
+      await writeFile(join(tree, `file-${index}.txt`), `content ${index}`);
+
+    await buildManifest(tree);
+
+    expect(plan.peak).toBeGreaterThan(1);
     expect(plan.closed).toBe(plan.opened);
   });
 });
