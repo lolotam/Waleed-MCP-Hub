@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   rm,
   symlink,
@@ -490,7 +491,8 @@ it('reports a conflict when the jobs folder is replaced by a link to an empty fo
 });
 
 it('reports a conflict when the packages folder is replaced by an empty folder after it was listed', async () => {
-  const { packagesDir } = await activeInstall('wmh-root-empty-');
+  const { packagesDir, installId } = await activeInstall('wmh-root-empty-');
+  const before = (await readdir(packagesDir)).sort();
   hook.listPath = packagesDir;
   hook.afterList = async () => {
     await rename(packagesDir, packagesDir + '-moved');
@@ -499,4 +501,9 @@ it('reports a conflict when the packages folder is replaced by an empty folder a
   await expect(reconcileWith(packagesDir, [])).rejects.toMatchObject({
     code: 'conflict',
   });
+  // The listed folders were moved with the old packages folder and are kept.
+  expect((await readdir(packagesDir + '-moved')).sort()).toEqual(before);
+  await expect(
+    readFile(join(packagesDir + '-moved', installId, 'file.txt'), 'utf8'),
+  ).resolves.toBe('installing');
 });
