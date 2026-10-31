@@ -99,7 +99,7 @@ try {
     approveExecution: true,
   });
   const scanned = await hub.integrations.scan();
-  assert.equal(scanned.agents.length, 9);
+  assert.equal(scanned.agents.length, 10);
   for (const agent of scanned.agents) {
     assert.equal(agent.status, 'not_integrated');
     const receipt = await hub.integrations.integrate(agent.agentId, {
@@ -220,7 +220,7 @@ try {
   }
   success = true;
   console.info(
-    'Compiled nine-scope private backup/integrate/disconnect and DPAPI-backed independent bridge passed. Discovery invoked no tools; one explicit synthetic call succeeded; a pooled native connector answered 1, 2 and 3 over one persistent process; disabled routing was rejected. No real agent/pilot was changed.',
+    'Compiled ten-scope private backup/integrate/disconnect and DPAPI-backed independent bridge passed. Discovery invoked no tools; one explicit synthetic call succeeded; a pooled native connector answered 1, 2 and 3 over one persistent process; disabled routing was rejected. No real agent/pilot was changed.',
   );
 } finally {
   await hub.close();

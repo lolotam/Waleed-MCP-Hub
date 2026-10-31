@@ -66,6 +66,7 @@ async function main() {
       'OPENCODE_CONFIG',
       'CLAUDE_CONFIG_DIR',
       'KIMI_CODE_HOME',
+      'GROK_HOME',
       'DOCKER_CONFIG',
       'DOCKER_CONTEXT',
       'DOCKER_HOST',

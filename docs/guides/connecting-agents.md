@@ -35,6 +35,7 @@ actually connected is only visible inside the agent.
 | Antigravity    | `~/.gemini/antigravity/mcp_config.json`                             | Restart                                              |
 | Kimi Code      | `~/.kimi-code/mcp.json` (or `KIMI_CODE_HOME`)                       | New session; check `/mcp`                            |
 | Kilo Code CLI  | `~/.config/kilo/kilo.json` (or the only `kilo.jsonc`/`config.json`) | Restart                                              |
+| Grok CLI       | `~/.grok/config.toml` (or `GROK_HOME`)                              | New session; check `/mcps` or `grok mcp list`        |
 
 ## Claude Desktop
 
@@ -53,6 +54,19 @@ Edit Config**. The folder that opens is the real one.
 After integrating, quit Claude Desktop from the tray icon (closing the window is not
 enough) and reopen it. The server appears under **Settings → Developer** and in the
 connectors menu of a new chat.
+
+## Grok CLI
+
+Grok also loads MCP servers from Claude Code's `~/.claude.json` and Cursor's
+`~/.cursor/mcp.json`. Before Grok is integrated, it can therefore run the hub
+entry written for Claude Code or Cursor, and the hub counts that traffic as
+theirs. Integrating Grok writes its own `waleed-mcp-hub` entry into
+`~/.grok/config.toml`, which wins over those entries for the same name, so Grok
+then runs the hub as Grok.
+
+Grok's `GROK_CONFIG`/`GROK_CONFIG_PATH` overlays and an administrator's
+`requirements.toml` can still hide or deny the entry; `grok mcp doctor
+waleed-mcp-hub` shows whether Grok loaded it.
 
 ## Tool names inside agents
 

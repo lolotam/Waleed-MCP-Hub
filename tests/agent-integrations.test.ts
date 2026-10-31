@@ -174,6 +174,23 @@ describe('comment-preserving managed agent entries', () => {
       await hub.close();
     },
   );
+  it('keeps every supported agent integrated at the same time', async () => {
+    const { hub } = setup();
+    const scanned = await hub.integrations.scan();
+    expect(scanned.agents.map((agent) => agent.agentId).sort()).toEqual(
+      targets.map((target) => target.id).sort(),
+    );
+    for (const agent of scanned.agents) {
+      const receipt = await hub.integrations.integrate(agent.agentId, {
+        expectedRevision: (await hub.inventory()).revision,
+        fingerprint: agent.fingerprint,
+        confirmConfigurationChange: true,
+      });
+      expect(receipt.agent.status).toBe('integrated');
+    }
+    expect((await hub.inventory()).integrations).toHaveLength(targets.length);
+    await hub.close();
+  });
   it('rejects duplicate keys, invalid parent shapes, foreign entries and forged ownership', () => {
     for (const text of [
       '{"mcpServers":{},"mcpServers":{}}',
@@ -267,9 +284,57 @@ describe('comment-preserving managed agent entries', () => {
       'Code\\User\\mcp.json',
     );
     expect(targets.find((item) => item.id === 'kilo')?.format).toBe('kilo');
+    expect(targets.find((item) => item.id === 'grok')).toMatchObject({
+      paths: ['C:\\Synthetic\\.grok\\config.toml'],
+      format: 'codex',
+      aliases: ['grok'],
+    });
+    expect(
+      windowsAgentTargets('C:\\Synthetic', {
+        GROK_HOME: 'D:\\GrokHome',
+      }).find((item) => item.id === 'grok')?.paths,
+    ).toEqual(['D:\\GrokHome\\config.toml']);
     const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
     const document = editAgentDocument('{}', 'opencode', entry);
     expect(hashData(managedEntry(document, 'opencode'))).toBe(hashData(entry));
     expect(hashBytes(document)).toHaveLength(64);
+  });
+  it('adds the Grok entry to a Grok config.toml and keeps every other setting', () => {
+    // The shape of a real Grok config.toml: tables, an array of tables, keys.
+    const grok = [
+      '[cli]',
+      'installer = "internal"',
+      '',
+      '[[marketplace.sources]]',
+      'name = "xAI Official"',
+      'git = "https://github.com/xai-org/plugin-marketplace.git"',
+      '',
+      '[ui]',
+      'yolo = false',
+      'permission_mode = "always-approve"',
+      '',
+    ].join('\n');
+    const entry = agentEntry(
+      'codex',
+      'C:\\Node24\\node.exe',
+      'C:\\Hub\\bridge.js',
+      'C:\\Runtime\\state.json',
+      'grok',
+    );
+    const document = editAgentDocument(grok, 'codex', entry);
+    // Only the marked block is appended; the settings above stay as written.
+    expect(document.startsWith(grok)).toBe(true);
+    expect(managedEntry(document, 'codex')).toEqual({
+      command: 'C:\\Node24\\node.exe',
+      args: ['C:\\Hub\\bridge.js', 'C:\\Runtime\\state.json', 'grok'],
+      startup_timeout_sec: 30,
+    });
+    const removed = editAgentDocument(
+      document,
+      'codex',
+      undefined,
+      hashData(managedEntry(document, 'codex')),
+    );
+    expect(removed).toBe(grok);
   });
 });

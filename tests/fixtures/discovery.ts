@@ -10,6 +10,7 @@ export const settings: DiscoverySettings = {
   environment: {
     USERPROFILE: 'C:\\Synthetic',
     CODEX_HOME: 'C:\\Synthetic\\codex',
+    GROK_HOME: 'C:\\Synthetic\\grok',
     PATH: 'C:\\Synthetic\\bin',
     SYNTHETIC_PRIVATE_KEY: 'not-forwarded',
   },

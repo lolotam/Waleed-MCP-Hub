@@ -786,6 +786,34 @@ build. `runAgentBridge` takes an optional idle limit for this test only; the
 `bridge` command never passes it and no file or environment value can set it.
 The real-daemon Docker test runs locally and is skipped in CI.
 
+## D026 — Grok CLI integration (2026-10-31)
+
+Grok CLI is a hub integration target (`grok`). Its user configuration is
+`GROK_HOME/config.toml`, defaulting to `~/.grok/config.toml`, and MCP servers live
+under `[mcp_servers.<name>]` with `command`, `args` and `startup_timeout_sec`.
+This is the same TOML shape as Codex, so the target reuses the Codex format: one
+marked block, comments and other settings preserved, removal restores the file
+byte for byte. Discovery reads the same file as TOML data and never starts Grok.
+
+Verified against both installed builds (1.0.46 on `PATH`, 1.0.70 under
+`~/.grok/bin`): with a temporary `GROK_HOME`, `grok mcp list --json` reads the
+hub-generated table back as `waleed-mcp-hub`, user scope, the bridge arguments
+ending in `grok`, and a 30-second start-up timeout.
+
+Grok also loads MCP servers from Claude Code's `~/.claude.json` and Cursor's
+`~/.cursor/mcp.json`. Its own `config.toml` wins over those for the same server
+name, so once Grok is integrated it runs the bridge as `grok`; before that, it may
+run the Claude Code or Cursor hub entry and be counted as that agent.
+
+Residuals:
+
+- `GROK_CONFIG`/`GROK_CONFIG_PATH` overlays and a `requirements.toml` deny list
+  can still hide or deny the entry. The hub does not read or edit them.
+- If a Grok command rewrites `config.toml` and drops the hub's marker comments,
+  the hub sees a foreign `waleed-mcp-hub` table and refuses to edit or remove it
+  (fails closed) until the user resolves it.
+- Both installed builds share `~/.grok`; one integration covers both.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint

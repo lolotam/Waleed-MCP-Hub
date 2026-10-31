@@ -158,5 +158,19 @@ export function windowsAgentTargets(
       packageName: '@kilocode/cli',
       reconnect: restart,
     },
+    {
+      // Grok reads MCP servers from its own config.toml, in the same TOML
+      // shape as Codex. It also reads Claude Code's and Cursor's files; its
+      // own entry wins over theirs for the same server name.
+      id: 'grok',
+      name: 'Grok CLI',
+      paths: [
+        win32.join(env.GROK_HOME || win32.join(home, '.grok'), 'config.toml'),
+      ],
+      format: 'codex',
+      aliases: ['grok'],
+      reconnect:
+        'Start a new Grok session and check /mcps or `grok mcp list`. This entry takes precedence over the hub entries Grok also reads from Claude Code and Cursor.',
+    },
   ];
 }

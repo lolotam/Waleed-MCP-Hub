@@ -122,7 +122,8 @@ Updated: 2026-10-30
 - P3 adoption preview remains metadata-only, not an approved executable definition
   or a claim of complete source/profile equivalence. It is not silently fed into P4.
 - Native/wrapper version metadata may be unknown. P7 documents current Kilo/Kimi
-  user scopes; Grok and effective project/account/plugin precedence remain unverified.
+  user scopes and D026 adds Grok's user `config.toml`; effective
+  project/account/plugin precedence remains unverified.
 - No distributed transaction or automated repair across Docker/files/agent/secret
   stores. P5 tests compensate known Docker/file states only; uncertainty blocks.
 - No verified live Docker image MCP execution or real Chrome launch. Synthetic
@@ -203,8 +204,8 @@ requests; nothing is deployed.
   on the first attempt for this final build, within the unchanged readiness bound.
   Start its `scripts/start-desktop.bat`; no real window/shortcut is claimed verified.
 
-- The integration contract has nine requested targets, separate from P3's eight
-  legacy discovery observations. VS Code uses current user `mcp.json` / `servers`,
+- The integration contract has the nine requested targets plus Grok (D026),
+  separate from P3's eight legacy discovery observations. VS Code uses current user `mcp.json` / `servers`,
   not legacy `settings.json`. Kimi uses `.kimi-code/mcp.json` / `KIMI_CODE_HOME`;
   Kilo uses `.config/kilo/kilo.json` / `mcp`. Ambiguous layers and custom
   `CLAUDE_CONFIG_DIR` fail closed; legacy Kimi is not edited.
@@ -213,7 +214,7 @@ requests; nothing is deployed.
   ownership without rewriting unchanged files; reconnect/trust may still be needed.
 - Manual save uses P6 one-way storage. A partial credential/approval/sync failure
   returns `partially_saved` and its saved connector ID, never a retry-as-new prompt.
-- Compiled `test:windows-integrations` passes nine disposable file scopes, private
+- Compiled `test:windows-integrations` passes ten disposable file scopes, private
   backups/read-back/disconnect and an independent DPAPI-backed native MCP bridge:
   zero tool calls during listing, one explicit synthetic call, environment isolation
   and rejection after disabling. No real config/pilot was changed.
