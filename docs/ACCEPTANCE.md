@@ -24,7 +24,7 @@ Unchecked boxes are planned verification, not completed work.
 - [x] Remote Docker contexts and unsupported gateway schemas fail closed; stopped Docker is degraded.
 - [x] Adoption preview is sanitized, revision-labelled, snapshot-only, and cannot apply changes.
 - [x] Explicit real-environment verification found unchanged inspected file contents and pilot snapshot.
-- [ ] Remaining native versions and Grok/Kilo/Kimi config scopes verified without unsafe fallback.
+- [ ] Remaining native versions and Kilo/Kimi config scopes verified without unsafe fallback (Grok user scope: D026).
 
 ### Verified P4 safe import baseline (no save/apply)
 
@@ -144,6 +144,7 @@ synthetic OAuth fixture, metadata-only Docker check, or same-user wrong-scope te
 The following original broad agent gates intentionally remain unchecked: the nine
 requested configuration adapters are not evidence of full live eight-CLI support.
 Grok was not one of the nine requested P7 targets; Claude Desktop and VS Code were.
+D026 later adds Grok as a tenth configuration target.
 
 For each checked agent: verify discovery, exact scope/schema, preservation,
 preview/apply/read-back, real MCP discovery, reconnect guidance, and scoped rollback.

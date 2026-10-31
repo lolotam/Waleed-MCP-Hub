@@ -141,7 +141,16 @@ export async function discoverAgents(
           format: 'jsonc',
           shape: 'mcpServers',
         });
-      // Grok/Kilo/Kimi config scope is deliberately pending, not a guessed legacy
+      else if (agent.agentId === 'grok')
+        files.push({
+          path: win32.join(
+            env.GROK_HOME || win32.join(home, '.grok'),
+            'config.toml',
+          ),
+          format: 'toml',
+          shape: 'codex',
+        });
+      // Kilo/Kimi discovery scope is deliberately pending, not a guessed legacy
       // schema. P7 must verify their current version-specific native interface.
       for (const file of files) {
         const read = await ports.read(file.path, signal);

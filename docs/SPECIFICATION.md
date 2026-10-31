@@ -70,7 +70,7 @@ These facts describe the existing installation, not completed new-app features.
 | Kilo Code    | `kilo`         | 7.8.18               | Not changed                                       |
 | Kimi Code    | `kimi`         | 2.3.2                | Not changed                                       |
 | Codex        | `codex`        | 0.164.0              | Both pilot entries; existing `node_repl` retained |
-| Grok         | `grok`         | 1.0.46               | Not changed                                       |
+| Grok         | `grok`         | 1.0.46 / 1.0.70      | Hub target since D026                             |
 | Claude Code  | `claude`       | 2.1.311              | Has account/plugin connectors; preserve them      |
 | Cursor Agent | `cursor-agent` | 2026.10.01-e373342   | Not changed                                       |
 
@@ -450,6 +450,10 @@ unrelated settings; otherwise use a validated format-aware merge.
 - Installed MCP-add commands were inspected; global path, overwrite semantics,
   and read-back behavior still require fixture and real-version verification.
 - Do not mark these adapters ready until preservation and rollback tests pass.
+- Grok (D026): the hub writes its marked `[mcp_servers.waleed-mcp-hub]` table to
+  `GROK_HOME/config.toml` (default `~/.grok/config.toml`), in the Codex TOML
+  shape. Grok 1.0.46 and 1.0.70 both read the generated table back through
+  `grok mcp list --json`.
 
 ### 10.4 Claude Code
 

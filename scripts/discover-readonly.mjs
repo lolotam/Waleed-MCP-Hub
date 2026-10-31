@@ -22,6 +22,7 @@ const environment = Object.fromEntries(
     'PROGRAMFILES',
     'PROGRAMW6432',
     'CODEX_HOME',
+    'GROK_HOME',
     'XDG_CONFIG_HOME',
     'OPENCODE_CONFIG',
     'CLAUDE_CONFIG_DIR',

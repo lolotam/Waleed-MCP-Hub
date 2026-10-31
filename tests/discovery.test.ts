@@ -72,6 +72,9 @@ describe('read-only environment discovery', () => {
     expect(fixture.reads).toContain(
       win32.join(settings.environment.CODEX_HOME!, 'config.toml'),
     );
+    expect(fixture.reads).toContain(
+      win32.join(settings.environment.GROK_HOME!, 'config.toml'),
+    );
     expect(
       fixture.reads.some((path) => /(?:credentials|auth)\.json$/i.test(path)),
     ).toBe(false);

@@ -21,6 +21,7 @@ export const IntegrationAgentIdSchema = z.enum([
   'cursor',
   'kimi',
   'kilo',
+  'grok',
 ]);
 export const IntegrationRecordSchema = z.strictObject({
   agentId: IntegrationAgentIdSchema,

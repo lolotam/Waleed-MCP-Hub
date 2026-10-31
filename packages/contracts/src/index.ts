@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { IntegrationRecordSchema, PortBindingsSchema } from './integrations.js';
+import {
+  IntegrationAgentIdSchema,
+  IntegrationRecordSchema,
+  PortBindingsSchema,
+} from './integrations.js';
 import { PackageProvenanceSchema } from './packages.js';
 import {
   LifecycleKindSchema,
@@ -418,7 +422,11 @@ export const StateSchema = z
     activity: z.array(AuditEventSchema).max(200),
     materializations: z.array(MaterializationSchema).max(256).optional(),
     agentBindings: z.array(AgentBindingSchema).max(2048).optional(),
-    integrations: z.array(IntegrationRecordSchema).max(9).optional(),
+    // At most one record per supported agent.
+    integrations: z
+      .array(IntegrationRecordSchema)
+      .max(IntegrationAgentIdSchema.options.length)
+      .optional(),
   })
   .superRefine((state, ctx) => {
     for (const items of [

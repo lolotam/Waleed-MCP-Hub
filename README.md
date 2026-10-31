@@ -96,8 +96,8 @@ OAuth are separate explicit actions. Explicit
 
 Versions come from installed package manifests where safely available; native or
 wrapper versions without safe metadata remain unknown. P7 supports documented current
-Kilo/Kimi user scopes; Grok and effective project/account/plugin precedence remain
-unverified, not guessed.
+Kilo/Kimi user scopes, and D026 adds Grok's user `config.toml`; effective
+project/account/plugin precedence remains unverified, not guessed.
 OpenCode/Codex user-file pointers can match while runtime compatibility and actual
 MCP verification are still pending. Postora authentication is not fixed by a scan.
 
@@ -242,6 +242,7 @@ Unknown/conflicted scopes require review, never overwrite-by-force.
 | Cursor            | `~/.cursor/mcp.json`                                                             | `mcpServers`  |
 | Current Kimi Code | `~/.kimi-code/mcp.json` (`KIMI_CODE_HOME` supported)                             | `mcpServers`  |
 | Kilo CLI          | `~/.config/kilo/kilo.json` (sole `kilo.jsonc`/`config.json` supported)           | `mcp`         |
+| Grok CLI          | `~/.grok/config.toml` (`GROK_HOME` supported)                                    | `mcp_servers` |
 
 VS Code uses its documented current `mcp.json`, **not** legacy `settings.json →
 mcp.servers`. Legacy Kimi `~/.kimi` is not modified. Multiple supported files and
@@ -321,7 +322,7 @@ smoke test with owned cleanup. Browser tests
 need Chromium (`npm exec playwright -- install chromium` if not already installed).
 They use isolated runtime directories and do not read personal configs or contact
 MCP providers. Screenshots at 1440/1024/768/390 px are saved in ignored `test-results/`.
-`test:windows-integrations` uses nine disposable Windows configs and a synthetic
+`test:windows-integrations` uses ten disposable Windows configs and a synthetic
 DPAPI-backed independent client; it does not edit real agent settings. The portable
 check copies outside the workspace, uses bundled Node with empty PATH and checks
 session/UI/shutdown, not real Edge/shortcut execution.

@@ -35,6 +35,7 @@ actually connected is only visible inside the agent.
 | Antigravity    | `~/.gemini/antigravity/mcp_config.json`                             | Restart                                              |
 | Kimi Code      | `~/.kimi-code/mcp.json` (or `KIMI_CODE_HOME`)                       | New session; check `/mcp`                            |
 | Kilo Code CLI  | `~/.config/kilo/kilo.json` (or the only `kilo.jsonc`/`config.json`) | Restart                                              |
+| Grok CLI       | `~/.grok/config.toml` (or `GROK_HOME`)                              | New session; check `/mcps` or `grok mcp list`        |
 
 ## Claude Desktop
 
@@ -53,6 +54,40 @@ Edit Config**. The folder that opens is the real one.
 After integrating, quit Claude Desktop from the tray icon (closing the window is not
 enough) and reopen it. The server appears under **Settings → Developer** and in the
 connectors menu of a new chat.
+
+## Grok CLI
+
+Grok also loads MCP servers from Claude Code's `~/.claude.json` and Cursor's
+`~/.cursor/mcp.json`. Before Grok is integrated, it can therefore run the hub
+entry written for Claude Code or Cursor, and the hub counts that traffic as
+theirs. Integrating Grok writes its own `waleed-mcp-hub` entry into Grok's
+`config.toml` (in `GROK_HOME` if you set it, otherwise `~/.grok`), which wins over
+those entries for the same name, so Grok then runs the hub as Grok.
+
+**Disconnect** removes only Grok's own entry. If Claude Code or Cursor is still
+integrated, Grok falls back to their hub entry and keeps using the hub, while the
+hub shows Grok as not integrated. To stop that, do one of these after
+disconnecting:
+
+- Run `grok mcp disable waleed-mcp-hub`. It adds the name to Grok's
+  `disabled_mcp_servers`; run `grok mcp enable waleed-mcp-hub` before you
+  integrate Grok again. Don't run it while the hub entry is present: it then
+  edits that entry, and the hub reports a conflict.
+- Stop Grok reading MCP servers from Claude Code and Cursor. In the same
+  `config.toml` the hub edits, set `mcps = false` under each table, adding the
+  table if it is not there yet (a table header may appear only once per file):
+
+  ```toml
+  [compat.claude]
+  mcps = false
+
+  [compat.cursor]
+  mcps = false
+  ```
+
+Grok's `GROK_CONFIG`/`GROK_CONFIG_PATH` overlays and an administrator's
+`requirements.toml` can still hide or deny the entry; `grok mcp doctor
+waleed-mcp-hub` shows whether Grok loaded it.
 
 ## Tool names inside agents
 
