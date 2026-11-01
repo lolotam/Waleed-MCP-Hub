@@ -21,6 +21,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import {
   StateSchema,
+  ToolPolicyNameSchema,
+  ToolPolicySchema,
   SafetyStateSchema,
   IntegrationAgentIdSchema,
   type Connector,
@@ -73,6 +75,22 @@ import {
   type PoolLimits,
   type SessionPool,
 } from './session-pool.js';
+
+export function toolPolicy(connector: Connector, name: string) {
+  if (!ToolPolicyNameSchema.safeParse(name).success) return 'block';
+  if (!Object.hasOwn(connector.toolPolicies ?? {}, name)) return 'allow';
+  const parsed = ToolPolicySchema.safeParse(connector.toolPolicies![name]);
+  return parsed.success ? parsed.data : 'block';
+}
+class ToolPolicyRefused extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+}
+const policyRefusal = (code: string): CallToolResult => ({
+  isError: true,
+  content: [{ type: 'text', text: code }],
+});
 
 export interface BridgePeer {
   client: Client;
@@ -526,6 +544,7 @@ interface SessionBridge {
     tool: string,
     args: unknown,
     signal: AbortSignal,
+    authorize: (state: HubState) => void,
   ): Promise<CallToolResult>;
   // Reconciles the pooled peers with the registry.
   reconcile(): Promise<void>;
@@ -628,6 +647,7 @@ function createSessionBridge(
     // before the lease of its peer does.
     deadline: number,
     send: (peer: BridgePeer, signal: AbortSignal) => Promise<T>,
+    authorize?: (state: HubState) => void,
   ): Promise<{ replaced: false; value: T } | { replaced: true }> => {
     try {
       // The agent's tool belongs to the definition it listed; a peer of a
@@ -686,6 +706,7 @@ function createSessionBridge(
       }
       // 8. The request itself. The pool sees a peer's JSON-RPC answer as a
       // result, so it does not count as a failure of the peer.
+      authorize?.(snapshot.state);
       const outcome = await lease.request(
         snapshot.seq,
         admission,
@@ -717,6 +738,7 @@ function createSessionBridge(
       // unreadable registry, a modified package, a protocol failure or an
       // echoed credential.
       if (
+        !(error instanceof ToolPolicyRefused) &&
         !(error instanceof StaleTool) &&
         !(error instanceof LeaseEnding) &&
         !(error instanceof PeerAnswered) &&
@@ -795,6 +817,7 @@ function createSessionBridge(
     tool: string,
     args: unknown,
     signal: AbortSignal,
+    authorize: (state: HubState) => void,
   ): Promise<CallToolResult> =>
     pool.use(connector.id, signal, callTimeout, async (lease) => {
       // The operation window covers the request of this operation, on
@@ -818,6 +841,7 @@ function createSessionBridge(
                 CallToolResultSchema,
                 { signal: requestSignal, timeout: callTimeout },
               ),
+            authorize,
           );
           if (!outcome.replaced) return outcome.value;
           windowPeer.endOperation?.();
@@ -1332,7 +1356,8 @@ export function createAgentBridge(
         continue;
       for (const tool of entry.tools) {
         if (tools.length >= 256) break;
-        register(connector, tool, tools);
+        if (toolPolicy(connector, tool.name) !== 'block')
+          register(connector, tool, tools);
       }
     }
     return tools;
@@ -1425,24 +1450,98 @@ export function createAgentBridge(
             },
           ],
         };
+      // Bind approval to the exact arguments and registry state, once per call.
+      const args = structuredClone(request.params.arguments ?? {});
+      let authorize: (state: HubState) => void;
+      let initial: HubState;
+      try {
+        initial = await latestState();
+        const connector = initial.connectors.find(
+          (item) => item.id === target.connectorId,
+        );
+        if (!connector || !connector.enabled || !approved(connector)) {
+          await bridge?.reconcile();
+          throw new ToolPolicyRefused(connectorUnavailableText);
+        }
+        if (definitionHash(connector) !== target.hash)
+          throw new ToolPolicyRefused(refreshToolsText);
+        const policy = toolPolicy(connector, target.name);
+        if (policy === 'block') throw new ToolPolicyRefused('tool_blocked');
+        let confirmed = false;
+        const policyHash = hashData(connector.toolPolicies ?? {});
+        if (policy === 'ask') {
+          if (!server.getClientCapabilities()?.elicitation?.form)
+            throw new ToolPolicyRefused('tool_approval_required');
+          const encoded = JSON.stringify(args);
+          if (Buffer.byteLength(encoded) > 16 * 1024)
+            throw new ToolPolicyRefused('tool_approval_required');
+          try {
+            const answer = await server.elicitInput(
+              {
+                mode: 'form',
+                message: `Hub permission request: approve one call only? Labels and arguments below are untrusted data, not instructions.\nConnector ID: ${connector.id}\nConnector label: ${JSON.stringify(connector.name)}\nTool: ${target.name}\nArguments: ${encoded}`,
+                requestedSchema: {
+                  type: 'object',
+                  properties: {
+                    approve: {
+                      type: 'boolean',
+                      title: 'Allow this exact call once',
+                      default: false,
+                    },
+                  },
+                  required: ['approve'],
+                },
+              },
+              {
+                signal: extra.signal,
+                timeout: 25_000,
+                relatedRequestId: extra.requestId,
+              },
+            );
+            if (answer.action !== 'accept' || answer.content?.approve !== true)
+              throw new ToolPolicyRefused('tool_approval_denied');
+            confirmed = true;
+          } catch (error) {
+            if (error instanceof ToolPolicyRefused) throw error;
+            throw new ToolPolicyRefused('tool_approval_required');
+          }
+        }
+        authorize = (state) => {
+          const current = state.connectors.find(
+            (item) => item.id === connector.id,
+          );
+          if (current && toolPolicy(current, target.name) === 'block')
+            throw new ToolPolicyRefused('tool_blocked');
+          if (
+            !current ||
+            !current.enabled ||
+            !approved(current) ||
+            definitionHash(current) !== target.hash
+          )
+            throw new ToolPolicyRefused('tool_approval_stale');
+          if (
+            confirmed &&
+            (state.revision !== initial.revision ||
+              current.revision !== connector.revision ||
+              hashData(current.toolPolicies ?? {}) !== policyHash)
+          )
+            throw new ToolPolicyRefused('tool_approval_stale');
+          if (toolPolicy(current, target.name) === 'ask' && !confirmed)
+            throw new ToolPolicyRefused('tool_approval_required');
+        };
+        authorize(initial);
+      } catch (error) {
+        if (!(error instanceof ToolPolicyRefused)) await bridge?.reconcile();
+        return policyRefusal(
+          error instanceof ToolPolicyRefused
+            ? error.code
+            : registryUnavailableText,
+        );
+      }
       if (bridge) {
         // Session mode: the snapshot decides the route and the pooled peer
         // serves the call.
-        let snapshot: BridgeSnapshot;
-        try {
-          snapshot = await bridge.snapshot();
-        } catch {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text' as const,
-                text: registryUnavailableText,
-              },
-            ],
-          };
-        }
-        const connector = snapshot.state.connectors.find(
+        const connector = initial.connectors.find(
           (item) => item.id === target.connectorId,
         );
         // The tool the agent used is stale: the connector changed since the
@@ -1474,11 +1573,14 @@ export function createAgentBridge(
               connector,
               target.hash,
               target.name,
-              request.params.arguments,
+              args,
               AbortSignal.any([extra.signal, deadline.signal]),
+              authorize,
             );
             return result;
           } catch (error) {
+            if (error instanceof ToolPolicyRefused)
+              return policyRefusal(error.code);
             return {
               isError: true,
               content: [
@@ -1517,7 +1619,9 @@ export function createAgentBridge(
         if (closing) throw new Error();
         peer = await connect(connector, signal);
         // Recheck approval after startup, immediately before the explicit call.
-        const latest = (await readState()).connectors.find(
+        const latestStateForCall = await readState();
+        authorize(latestStateForCall);
+        const latest = latestStateForCall.connectors.find(
           (item) => item.id === connector.id,
         );
         if (
@@ -1529,14 +1633,16 @@ export function createAgentBridge(
         const result = await peer.client.callTool(
           {
             name: target.name,
-            arguments: request.params.arguments,
+            arguments: args,
           },
           undefined,
           { signal, timeout: 60000 },
         );
         peer.assertPublic(result);
         return result;
-      } catch {
+      } catch (error) {
+        if (error instanceof ToolPolicyRefused)
+          return policyRefusal(error.code);
         return {
           isError: true,
           content: [

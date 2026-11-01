@@ -91,8 +91,9 @@ No agent/connector command, gateway, image pull, package install, or upstream to
 is launched by environment discovery. Adoption and startup registration remain
 disabled/unimplemented. Agent integration is a separate explicit action.
 Protected credential writes and supported
-OAuth are separate explicit actions. Explicit
-**Test capabilities** is a different action that can start an approved connector.
+OAuth are separate explicit actions. Opening the connector list automatically
+discovers capabilities for enabled, approved definitions. **Test capabilities**
+remains available for explicit retries.
 
 Versions come from installed package manifests where safely available; native or
 wrapper versions without safe metadata remain unknown. P7 supports documented current
@@ -145,8 +146,9 @@ or secret, updates Docker/agent files, approves execution, or fixes upstream aut
    separate registry preview. Private import values stay memory-only; save a
    value-free definition, then enter credentials in **Authentication**.
 2. Review the exact executable/image/endpoint and **Approve execution**. Edits and
-   toggles invalidate approval; approval never starts the connector.
-3. **Test capabilities** performs real MCP initialize and tools/resources/prompts
+   toggles invalidate approval. While the connector list is open, approval makes
+   enabled connectors eligible for automatic capability discovery.
+3. Automatic discovery (or **Test capabilities** for a retry) performs real MCP initialize and tools/resources/prompts
    listing, never `tools/call`, resource reads or prompt execution. Results show
    timestamps, protocol, verification level and per-connector failure status.
 4. Create a profile and **Edit membership** using connector IDs. **Apply profile**
@@ -435,3 +437,14 @@ external operational state; they cannot safely all be moved into the source tree
 
 Never copy real API keys, SSH passwords, personal configuration inventories,
 OAuth credentials, logs, or backups into version control.
+
+### Per-tool permissions
+
+Open a connector and expand **Tools & Permissions**. **Full permission** is the
+default; **Always ask** requires one-time MCP form elicitation approval for the
+exact arguments; clients without that capability are refused. **Closed** hides
+the tool from the managed bridge catalog and rejects stale calls. Calls recheck
+permissions after startup and queue waits. A CLI may impose additional approvals.
+Permission changes preserve execution approval and capability observations.
+Restricted tools cannot be exported as direct profile snapshots; dematerialize
+existing snapshots first and use the managed agent bridge.

@@ -1360,3 +1360,40 @@ dialog h2 {
     grid-template-columns: 1fr;
   }
 }
+
+.tool-policy-list {
+  list-style: none;
+  padding: 0;
+}
+.tool-policy-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-block: 8px;
+  border-block-end: 1px solid var(--border);
+}
+.tool-policy-list label {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 16px;
+  justify-content: space-between;
+}
+.tool-policy-list code {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.tool-policy-list select {
+  min-width: 100px;
+  min-height: 44px;
+}
+
+@media (max-width: 560px) {
+  .tool-policy-list label {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+}

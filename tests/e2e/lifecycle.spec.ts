@@ -91,7 +91,7 @@ async function approve(page: Page, id: string) {
   await applyDialog(page);
 }
 
-test('save, approve, real MCP check, profile membership/materialization, disable and remove remain distinct', async ({
+test('save, approve, automatic real MCP discovery, profile membership/materialization, disable and remove remain distinct', async ({
   page,
 }) => {
   const errors: string[] = [];
@@ -211,6 +211,42 @@ test('save, approve, real MCP check, profile membership/materialization, disable
   expect(report.managedFiles).toBe(0);
   expect(report.dockerProfiles).toBe(0);
   expect(errors).toEqual([]);
+});
+
+test('automatically shows tools after approval and reload, and persists all three tool permissions', async ({
+  page,
+}) => {
+  await save(page, {
+    id: 'fixture',
+    name: 'Fixture remote',
+    url: 'https://example.test/mcp',
+  });
+  await approve(page, 'fixture');
+  let row = page.getByTestId('connector-fixture');
+  await expect(row.getByText(/connected · MCP discovery only/)).toBeVisible();
+  await row.getByText('Tools & Permissions', { exact: false }).click();
+  const policy = row.getByLabel('Policy for fixture_first', { exact: true });
+  await expect(policy).toHaveValue('allow');
+  for (const value of ['ask', 'block', 'allow']) {
+    await policy.selectOption(value);
+    await expect(row.getByRole('status')).toContainText('Permissions saved.');
+    await expect(policy).toBeEnabled();
+    await expect(policy).toHaveValue(value);
+  }
+  await policy.selectOption('block');
+  await expect(row.getByRole('status')).toContainText('Permissions saved.');
+  await page.reload();
+  row = page.getByTestId('connector-fixture');
+  await expand(row);
+  await expect(row.getByText(/connected · MCP discovery only/)).toBeVisible();
+  await row.getByText('Tools & Permissions', { exact: false }).click();
+  await expect(
+    row.getByLabel('Policy for fixture_first', { exact: true }),
+  ).toHaveValue('block');
+  const report = await (
+    await page.request.get('http://127.0.0.1:4193/api/fixture-report')
+  ).json();
+  expect(report.methods).not.toContain('tools/call');
 });
 
 test('a failed auth check does not erase a healthy connector and editing invalidates execution approval', async ({

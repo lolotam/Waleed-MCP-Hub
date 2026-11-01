@@ -369,7 +369,9 @@ export function App() {
                   {connectors.length ? (
                     <ConnectorList
                       connectors={connectors}
+                      revision={bootstrap?.revision ?? 0}
                       observations={observations}
+                      observe={setObservations}
                       profiles={profiles}
                       disabled={recoveryBlocked}
                       runtime={!!bootstrap?.capabilities.runtimeChecks}

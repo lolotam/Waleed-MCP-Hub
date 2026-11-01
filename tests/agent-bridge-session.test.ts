@@ -1473,3 +1473,38 @@ describe('agent bridge session mode', () => {
     }
   });
 });
+
+it('rechecks tool policy after a pooled call waits in the queue', async () => {
+  let release!: () => void;
+  let started = false;
+  const harness = await createHarness({
+    peer: {
+      onCall: async () => {
+        started = true;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+    },
+  });
+  try {
+    const name = (await harness.agent.listTools()).tools[0]!.name;
+    const first = harness.agent.callTool({ name, arguments: {} });
+    await until(() => started);
+    const reads = harness.session.reads;
+    const queued = harness.agent.callTool({ name, arguments: {} });
+    await until(() => harness.session.reads > reads);
+    harness.state.connectors[0]!.toolPolicies = { 'tool-0': 'block' };
+    release();
+    expect((await first).isError).not.toBe(true);
+    expect(await queued).toMatchObject({
+      isError: true,
+      content: [{ text: 'tool_blocked' }],
+    });
+    expect(harness.peers[0]!.calls).toHaveLength(1);
+  } finally {
+    release?.();
+    await harness.agent.close();
+    await harness.bridge.close();
+  }
+});

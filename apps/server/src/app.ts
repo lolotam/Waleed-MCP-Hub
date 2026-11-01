@@ -7,6 +7,7 @@ import {
   SessionRequestSchema,
   ApplyRequestSchema,
   IdSchema,
+  ToolPoliciesUpdateSchema,
   BootstrapSchema,
   AgentIdSchema,
   RefusalReasonSchema,
@@ -378,7 +379,49 @@ export async function createHubServer(options: ServerOptions) {
       }),
     ),
     observations: await options.lifecycle.checks.observations(),
+    discovering: options.lifecycle.checks.discovering(),
   }));
+  app.post<{ Params: { id: string } }>(
+    '/api/connectors/:id/tool-policies',
+    async (request) => {
+      const input = ToolPoliciesUpdateSchema.parse(request.body),
+        owner = request.cookies.waleed_hub_session!,
+        connectorId = IdSchema.parse(request.params.id);
+      const preview = await options.lifecycle.preview(
+        { ...input, connectorId, kind: 'set_tool_policies' },
+        owner,
+      );
+      const job = await options.lifecycle.apply(preview.id, owner);
+      let result = options.lifecycle.job(job.id, owner);
+      // Wait only for this registry mutation, not unrelated capability checks.
+      while (result.state === 'queued' || result.state === 'running') {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        result = options.lifecycle.job(job.id, owner);
+      }
+      if (result.state !== 'succeeded')
+        throw new HubError(
+          'conflict',
+          'Permissions were not saved. Refresh inventory and inspect recovery before retrying.',
+        );
+      return { state: 'saved', recoveryRequired: !!result.reason };
+    },
+  );
+  app.post('/api/connectors/discover', async (request) => {
+    if (
+      !request.body ||
+      typeof request.body !== 'object' ||
+      Array.isArray(request.body) ||
+      Object.keys(request.body).length
+    )
+      throw new HubError(
+        'invalid',
+        'Automatic discovery accepts only an empty object.',
+      );
+    await options.lifecycle.checks.discoverApproved(
+      request.cookies.waleed_hub_session!,
+    );
+    return { discovering: options.lifecycle.checks.discovering() };
+  });
   app.get('/api/profiles', async () => {
     const state = await options.lifecycle.inventory();
     return {

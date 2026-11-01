@@ -9,8 +9,9 @@ right and this page needs fixing.
 1. **Save** the definition (nothing runs yet).
 2. **Add credentials**, if the server needs them (Authentication on the connector row).
 3. **Approve execution** — you confirm you trust this exact command, image or URL.
-4. **Test capabilities** — the hub connects and lists the server's tools. It never
-   calls a tool during a test.
+4. **Automatic discovery** — enabled, approved connectors load their tools when
+   the connector list opens. **Test capabilities** retries a failed check.
+   Discovery never calls a tool.
 5. **Connect your agents** once (see [connecting-agents.md](connecting-agents.md)).
    Every enabled, approved connector then appears in each agent as
    `<connector-name>__<tool-name>`, for example `ssh-prod-mcp__list-connections`.
@@ -44,7 +45,8 @@ approved connector; profiles are only for generating Docker profile snapshots.
    Otherwise see [API keys and tokens](#api-keys-and-tokens).
 6. Tick **I trust this exact … endpoint** if you want it approved now, then
    **Save MCP**.
-7. Open the connector row and choose **Test capabilities**.
+7. Open the connector row; tools load automatically after approval.
+   Use **Test capabilities** to retry a failed check.
 
 `http://localhost` and private-network URLs are refused. The hub pins validated
 public DNS addresses and does not follow redirects.

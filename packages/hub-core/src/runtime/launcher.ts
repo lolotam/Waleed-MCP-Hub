@@ -30,6 +30,7 @@ export async function runNativeLauncher(manifestUrl: URL, expectedHash: string) 
     const safetyPath = join(dirname(manifest.registryPath), 'safety.json'); await assertNoLinks(safetyPath);
     if ((await lstat(safetyPath)).size > 1024 * 1024 || SafetyStateSchema.parse(JSON.parse(await readFile(safetyPath, 'utf8'))).operations.some((operation) => operation.phase === 'prepared' || operation.phase === 'needs_review')) throw new Error();
     const current = state.connectors.find((connector) => connector.id === saved.id);
+    if(current&&Object.values(current.toolPolicies??{}).some(policy=>policy!=='allow'))throw new Error();
     const profile = state.profiles.find((profile) => profile.id === manifest.profileId);
     if (!current || current.executionMode !== 'native' || !current.enabled || !profile || profile.enabled === false || !profile.connectorIds.includes(current.id) || !approved(current) || current.revision !== saved.revision || definitionHash(current) !== definitionHash(saved) || Object.keys(current.headerBindings).length) throw new Error();
     // A managed install is verified before the secret is resolved and before

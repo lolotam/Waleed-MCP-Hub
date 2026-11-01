@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   PackageJobSchema,
+  ToolPolicyNameSchema,
+  type ToolPolicy,
   type CapabilityObservation,
   type Connector,
   type ImportDefinition,
@@ -87,6 +89,7 @@ export function editableDefinition(
 }
 export function ConnectorList({
   connectors,
+  revision,
   observations,
   profiles,
   disabled,
@@ -95,9 +98,11 @@ export function ConnectorList({
   authenticate,
   operate,
   refresh,
+  observe,
   openPackage,
 }: {
   connectors: ManagedConnector[];
+  revision: number;
   observations: CapabilityObservation[];
   profiles: Profile[];
   disabled: boolean;
@@ -106,6 +111,7 @@ export function ConnectorList({
   authenticate: (connector: ManagedConnector) => void;
   operate: (input: OperationDialogInput) => void;
   refresh: () => Promise<unknown>;
+  observe: (observations: CapabilityObservation[]) => void;
   openPackage: (seed: PackageSeed) => void;
 }) {
   const [job, setJob] = useState<RuntimeJob | null>(null);
@@ -132,6 +138,78 @@ export function ConnectorList({
   const aborts = useRef(new Set<AbortController>());
   // Rows stay compact; details open in place and several may be open at once.
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    if (!runtime || disabled) return;
+    const eligible = connectors.filter(
+      (connector) =>
+        connector.enabled &&
+        connector.trustApproval?.revision === connector.revision &&
+        connector.trustApproval.definitionHash === connector.executionHash,
+    );
+    if (
+      !eligible.some((connector) => {
+        const current = observations.find(
+          (entry) =>
+            entry.connectorId === connector.id &&
+            entry.revision === connector.revision &&
+            entry.definitionHash === connector.executionHash,
+        );
+        return (
+          !current ||
+          current.state === 'untested' ||
+          current.state === 'checking'
+        );
+      })
+    )
+      return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const result = await api<{
+          observations: CapabilityObservation[];
+          discovering: boolean;
+        }>('/api/connectors', undefined, controller.signal);
+        if (controller.signal.aborted) return;
+        observe(result.observations);
+        if (result.discovering) timer = setTimeout(() => void poll(), 1000);
+        else if (
+          eligible.some(
+            (connector) =>
+              result.observations.find(
+                (entry) => entry.connectorId === connector.id,
+              )?.state === 'untested',
+          )
+        )
+          setError(
+            'Automatic tool discovery paused. Refresh to retry after checking recovery and runtime availability.',
+          );
+      } catch (failure) {
+        if (!controller.signal.aborted)
+          setError(
+            failure instanceof Error
+              ? failure.message
+              : 'Automatic tool discovery failed.',
+          );
+      }
+    };
+    void api('/api/connectors/discover', {}, controller.signal)
+      .then(() => poll())
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted)
+          setError(
+            failure instanceof Error
+              ? failure.message
+              : 'Automatic tool discovery failed.',
+          );
+      });
+    return () => {
+      controller.abort();
+      if (timer !== undefined) clearTimeout(timer);
+    };
+    // Observation updates are the output of this polling cycle; a changed
+    // connector definition or approval starts a fresh cycle instead.
+  }, [connectors, disabled, runtime, observe]);
   useEffect(
     () => () => {
       for (const controller of aborts.current) controller.abort();
@@ -244,7 +322,10 @@ export function ConnectorList({
       <ul className="connector-list">
         {connectors.map((connector) => {
           const observation = observations.find(
-            (entry) => entry.connectorId === connector.id,
+            (entry) =>
+              entry.connectorId === connector.id &&
+              entry.revision === connector.revision &&
+              entry.definitionHash === connector.executionHash,
           );
           const approval =
             connector.trustApproval?.revision === connector.revision &&
@@ -317,7 +398,14 @@ export function ConnectorList({
                   </span>
                 </span>
                 <span className="cell cell-tools">
-                  {toolCount === null ? '—' : `${toolCount} tools`}
+                  {toolCount === null
+                    ? connector.enabled &&
+                      approval &&
+                      runtime &&
+                      (state === 'untested' || state === 'checking')
+                      ? 'Loading tools…'
+                      : '—'
+                    : `${toolCount} tools`}
                 </span>
                 <span className="chevron" aria-hidden="true" />
               </button>
@@ -453,6 +541,13 @@ export function ConnectorList({
                         : 'Protected credentials are resolved only for this connector. Save success is not authentication verification.'}
                     </p>
                   )}
+                  <ToolPermissions
+                    connector={connector}
+                    observation={observation}
+                    revision={revision}
+                    disabled={disabled}
+                    refresh={refresh}
+                  />
                   <details>
                     <summary>Definition and capabilities</summary>
                     <pre>
@@ -708,5 +803,164 @@ function ConnectorActions({
         Remove
       </button>
     </>
+  );
+}
+
+function ToolPermissions({
+  connector,
+  observation,
+  revision,
+  disabled,
+  refresh,
+}: {
+  connector: ManagedConnector;
+  observation: CapabilityObservation | undefined;
+  revision: number;
+  disabled: boolean;
+  refresh: () => Promise<unknown>;
+}) {
+  const [policies, setPolicies] = useState(connector.toolPolicies ?? {}),
+    [saving, setSaving] = useState(false),
+    [stale, setStale] = useState(false),
+    [message, setMessage] = useState(''),
+    [error, setError] = useState('');
+  useEffect(() => {
+    setPolicies(connector.toolPolicies ?? {});
+    setStale(false);
+  }, [connector.toolPolicies, revision]);
+  const names = [
+    ...new Set([
+      ...(observation?.tools.map((tool) => tool.name) ?? []),
+      ...Object.keys(policies),
+    ]),
+  ].sort();
+  const blocked = Object.values(policies).filter(
+      (policy) => policy === 'block',
+    ).length,
+    asked = Object.values(policies).filter((policy) => policy === 'ask').length;
+  async function change(name: string, policy: ToolPolicy) {
+    const next = { ...policies };
+    if (policy === 'allow') delete next[name];
+    else next[name] = policy;
+    setPolicies(next);
+    setSaving(true);
+    setError('');
+    setMessage('Saving permissions…');
+    let saved = false;
+    try {
+      const result = await api<{ state: string; recoveryRequired: boolean }>(
+        `/api/connectors/${connector.id}/tool-policies`,
+        {
+          expectedRevision: revision,
+          expectedConnectorRevision: connector.revision,
+          toolPolicies: next,
+        },
+      );
+      saved = true;
+      if ((await refresh()) === false)
+        throw new Error('Inventory refresh failed.');
+      setMessage(
+        result.recoveryRequired
+          ? 'Permissions saved; recovery review is required.'
+          : 'Permissions saved. The managed bridge rechecks every call.',
+      );
+    } catch {
+      if (!saved) setPolicies(connector.toolPolicies ?? {});
+      setStale(true);
+      setMessage('');
+      setError(
+        saved
+          ? 'Permissions saved, but inventory refresh failed. Refresh before making another change.'
+          : 'Permissions were not confirmed. Refresh inventory before retrying; another window may have changed it.',
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <details className="tool-permissions">
+      <summary>
+        Tools &amp; Permissions{' '}
+        <span className="pill">
+          {names.length} tools · {asked} Ask · {blocked} Blocked
+        </span>
+      </summary>
+      <p>
+        Full permission runs normally. Always ask requires a one-time user
+        confirmation through the agent’s elicitation UI; unsupported clients are
+        refused. Closed removes the tool from the agent’s catalog and rejects
+        stale calls. Unconfigured tools default to Full permission, including
+        read-only tools.
+      </p>
+      {!names.length && (
+        <p>
+          No discovered tools yet. Enable and approve this connector for
+          automatic discovery; discovery executes no tools.
+        </p>
+      )}
+      <ul className="tool-policy-list">
+        {names.map((name) => {
+          const supported = ToolPolicyNameSchema.safeParse(name).success,
+            policy = supported ? (policies[name] ?? 'allow') : 'block';
+          return (
+            <li key={name}>
+              <label>
+                <code>{name}</code>
+                <select
+                  aria-label={`Policy for ${name}`}
+                  value={policy}
+                  disabled={disabled || saving || stale || !supported}
+                  onChange={(event) =>
+                    void change(name, event.target.value as ToolPolicy)
+                  }
+                >
+                  <option value="allow">Full permission</option>
+                  <option value="ask">Always ask</option>
+                  <option value="block">Closed</option>
+                </select>
+              </label>
+              <span className={`pill ${policy === 'allow' ? 'ok' : 'warn'}`}>
+                {policy === 'block'
+                  ? 'Blocked'
+                  : policy === 'ask'
+                    ? 'Ask'
+                    : 'Allow'}
+              </span>
+              {!supported && (
+                <small>
+                  Unsupported tool name; omitted by the managed bridge.
+                </small>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {message && <p role="status">{message}</p>}
+      {error && <p role="alert">{error}</p>}
+      {stale && (
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => {
+            setSaving(true);
+            void refresh()
+              .then((refreshed) => {
+                if (refreshed === false)
+                  throw new Error('Inventory refresh failed.');
+                setStale(false);
+                setError('');
+              })
+              .catch(() =>
+                setError(
+                  'Refresh failed. Permissions remain unchanged in this window.',
+                ),
+              )
+              .finally(() => setSaving(false));
+          }}
+        >
+          Refresh permissions
+        </button>
+      )}
+    </details>
   );
 }
