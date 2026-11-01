@@ -1355,19 +1355,19 @@ export function createAgentBridge(
     for (let offset = 0; offset < connectors.length; offset += 4) {
       if (signal.aborted || count >= 256) break;
       const batch = connectors.slice(offset, offset + 4);
+      // Each connector lists up to the whole cap: the order of the visits is
+      // not the order of the registry, so the cap is shared out in registry
+      // order by the catalog merge and by publish, never here.
       const results = await Promise.all(
-        batch.map((connector) =>
-          discover(connector, snapshot, signal, 256 - count),
-        ),
+        batch.map((connector) => discover(connector, snapshot, signal, 256)),
       );
       for (const [index, tools] of results.entries()) {
         const connector = batch[index]!;
-        const accepted = tools?.slice(0, 256 - count);
         found.set(
           connector.id,
-          accepted && { hash: definitionHash(connector), tools: accepted },
+          tools && { hash: definitionHash(connector), tools },
         );
-        count += accepted?.length ?? 0;
+        count += tools?.length ?? 0;
       }
     }
     // Only the deadline leaves connectors unreached as failures: the tool cap

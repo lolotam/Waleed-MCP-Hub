@@ -88,13 +88,21 @@ export async function startDesktop({
         return;
       }
       if (request === 'open\n' || request === `open:${rootId}\n`) {
+        // A closing manager opens nothing, so it must not acknowledge.
+        if (closing) {
+          socket.end('wmh-desktop-busy\n');
+          return;
+        }
         void openOrRestart();
         socket.end('wmh-desktop-v1\n');
       } else if (/^open:[a-f0-9]{24}\n$/.test(request)) {
         // A new version lives in a different installation folder. Release the
         // old backend and its locks before the replacement claims this pipe.
+        // A refusal is answered, never a bare close: only a manager that does
+        // not know the request closes in silence, and the caller reads that as
+        // a legacy manager.
         if (!backend?.connected || closing) {
-          socket.destroy();
+          socket.end('wmh-desktop-busy\n');
           return;
         }
         socket.setTimeout(15000, () => socket.destroy());
@@ -133,6 +141,7 @@ export async function startDesktop({
         const client = createConnection(pipe, () => client.write(request));
         let reply = '';
         let acknowledged = false,
+          busy = false,
           replace = false;
         client.setTimeout(15000, () => {
           client.destroy();
@@ -140,7 +149,10 @@ export async function startDesktop({
         });
         client.on('data', (data) => {
           reply += data.toString();
-          if (
+          if (reply === 'wmh-desktop-busy\n') {
+            busy = true;
+            client.destroy();
+          } else if (
             reply === 'wmh-desktop-v1\n' ||
             reply === 'wmh-desktop-handoff\n'
           ) {
@@ -161,6 +173,12 @@ export async function startDesktop({
         );
         client.once('close', () => {
           if (acknowledged) resolveClient(replace);
+          else if (busy)
+            reject(
+              new Error(
+                'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+              ),
+            );
           else
             reject(
               Object.assign(
@@ -177,9 +195,10 @@ export async function startDesktop({
       handedOff = await requestOwner(`open:${rootId}\n`);
     } catch (error) {
       // Legacy managers understand only open\n and close the connection
-      // without a reply. A timeout or an unknown owner is not that: a manager
-      // that is still shutting down would acknowledge open\n and leave no
-      // desktop behind.
+      // without a reply. A timeout, an unknown owner or a busy manager is not
+      // that: a manager that is still shutting down would acknowledge open\n
+      // and leave no desktop behind. A build older than the busy reply also
+      // closes in silence and cannot be told apart from a legacy manager.
       if (!error?.legacyClose) throw error;
       // Reopen that verified protocol without killing it or deleting its
       // locks; Settings can stop it safely.

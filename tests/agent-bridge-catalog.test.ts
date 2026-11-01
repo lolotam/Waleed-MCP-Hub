@@ -267,6 +267,26 @@ it('visits first the connectors the catalog lacks, so a slow startup cannot star
   expect(open.connects.indexOf('connector-0')).toBe(2);
 });
 
+it('shares the tool cap in registry order, whatever order the connectors were visited in', async () => {
+  const state = profileState(['native', 'native']);
+  const many = (prefix: string) =>
+    Array.from({ length: 200 }, (_, index) => tool(`${prefix}${index}`));
+  open = await createHarness({
+    state,
+    catalog: new Map([
+      ['connector-0', entryFor(state, 'connector-0', many('cached'))],
+    ]),
+    listing: (id) => many(id === 'connector-0' ? 'cached' : 'fresh'),
+  });
+
+  await names(open.agent);
+  await expect
+    .poll(() => open!.stored.catalog?.get('connector-1')?.tools.length)
+    .toBe(56);
+  // The connector visited second is not cut to the budget the first one used.
+  expect(open.stored.catalog?.get('connector-0')?.tools).toHaveLength(200);
+});
+
 it('fills the catalog even when the agent gives up on its first listing', async () => {
   const state = profileState(['native']);
   let release!: () => void;
