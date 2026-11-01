@@ -163,8 +163,11 @@ export async function startDesktop({
           if (acknowledged) resolveClient(replace);
           else
             reject(
-              new Error(
-                'Stop the existing desktop manager in Settings, then open this installation again. No process was stopped.',
+              Object.assign(
+                new Error(
+                  'Stop the existing desktop manager in Settings, then open this installation again. No process was stopped.',
+                ),
+                { legacyClose: true },
               ),
             );
         });
@@ -172,9 +175,14 @@ export async function startDesktop({
     let handedOff;
     try {
       handedOff = await requestOwner(`open:${rootId}\n`);
-    } catch {
-      // Legacy managers understand only open\n. Reopen that verified protocol
-      // without killing it or deleting its locks; Settings can stop it safely.
+    } catch (error) {
+      // Legacy managers understand only open\n and close the connection
+      // without a reply. A timeout or an unknown owner is not that: a manager
+      // that is still shutting down would acknowledge open\n and leave no
+      // desktop behind.
+      if (!error?.legacyClose) throw error;
+      // Reopen that verified protocol without killing it or deleting its
+      // locks; Settings can stop it safely.
       handedOff = await requestOwner('open\n');
       log(
         'legacy desktop reopened; stop its manager in Settings to activate this installation',

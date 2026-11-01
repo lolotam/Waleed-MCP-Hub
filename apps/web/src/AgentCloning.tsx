@@ -153,13 +153,20 @@ export function AgentCloning({
     );
     setBins((current) =>
       Object.fromEntries(
-        job.candidates.map((item) => [
-          item.key,
-          current[item.key] ??
-            (item.packagePreview?.entries.length === 1
-              ? item.packagePreview.entries[0]!.entry
-              : ''),
-        ]),
+        job.candidates.map((item) => {
+          // A command chosen for an earlier preview counts only while the
+          // new preview still offers it.
+          const entries = item.packagePreview?.entries ?? [];
+          const kept = current[item.key];
+          return [
+            item.key,
+            kept && entries.some((entry) => entry.entry === kept)
+              ? kept
+              : entries.length === 1
+                ? entries[0]!.entry
+                : '',
+          ];
+        }),
       ),
     );
   }, [job]);

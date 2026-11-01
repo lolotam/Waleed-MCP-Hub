@@ -1338,13 +1338,18 @@ export function createAgentBridge(
   // listed with. Package verification and process startup used to consume
   // the whole deadline before later healthy peers were visited, so at most
   // four peers start at once, in registry order, within one shared deadline
-  // and the 256-tool cap. A connector that could not list maps to undefined.
-  const discoverAll = async (signal: AbortSignal) => {
+  // and the 256-tool cap. A connector that could not list maps to undefined,
+  // and so does one the deadline ended the discovery before reaching. A
+  // connector the catalog lacks is visited first, so a slow startup cannot
+  // keep starving the last ones of the registry.
+  const discoverAll = async (signal: AbortSignal, cached?: ToolCatalog) => {
     const snapshot = bridge ? await bridge.snapshot() : undefined;
     const state = snapshot ? snapshot.state : await readState();
-    const connectors = state.connectors.filter(
-      (item) => item.enabled && approved(item),
-    );
+    const listed = (item: Connector) =>
+      cached?.get(item.id)?.hash === definitionHash(item) ? 1 : 0;
+    const connectors = state.connectors
+      .filter((item) => item.enabled && approved(item))
+      .sort((left, right) => listed(left) - listed(right));
     const found = new Map<string, CatalogEntry | undefined>();
     let count = 0;
     for (let offset = 0; offset < connectors.length; offset += 4) {
@@ -1365,6 +1370,11 @@ export function createAgentBridge(
         count += accepted?.length ?? 0;
       }
     }
+    // Only the deadline leaves connectors unreached as failures: the tool cap
+    // ends the discovery on purpose.
+    if (signal.aborted)
+      for (const connector of connectors)
+        if (!found.has(connector.id)) found.set(connector.id, undefined);
     return found;
   };
   // Registers, in registry order, the tools of every connector that still
@@ -1422,7 +1432,15 @@ export function createAgentBridge(
     refreshing ??= (async () => {
       try {
         if (closing) throw new Error(connectorUnavailableText);
-        const found = await discoverAll(AbortSignal.timeout(45000));
+        // The deadline runs on the session timers, like the retry below.
+        const deadline = new AbortController();
+        const timer = session?.setTimer(() => deadline.abort(), 45000);
+        let found: Awaited<ReturnType<typeof discoverAll>>;
+        try {
+          found = await discoverAll(deadline.signal, known);
+        } finally {
+          if (timer !== undefined) session?.clearTimer(timer);
+        }
         const state = await latestState();
         const { next, incomplete } = mergeCatalog(known, found, state);
         known = next;

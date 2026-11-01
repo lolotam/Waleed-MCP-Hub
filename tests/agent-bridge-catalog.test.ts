@@ -48,6 +48,8 @@ async function createHarness(options: {
   catalog?: ToolCatalog;
   listing: (connectorId: string) => Tool[] | Error;
   gate?: Promise<void>;
+  // The 45 s discovery deadline has run out as soon as it is armed.
+  expireDiscovery?: boolean;
   pageSize?: number;
   pooled?: boolean;
 }): Promise<Harness> {
@@ -70,6 +72,7 @@ async function createHarness(options: {
     async verify() {},
     now: () => 1_700_000_000_000,
     setTimer(callback, ms) {
+      if (options.expireDiscovery && ms === 45_000) callback();
       const id = nextTimer++;
       timers.set(id, { ms, callback });
       return id;
@@ -232,6 +235,36 @@ it('keeps the cached tools of a connector that cannot list and retries the listi
   await expect
     .poll(() => open!.connects.filter((id) => id === 'connector-1').length)
     .toBeGreaterThan(attempts);
+});
+
+it('retries the connectors a discovery deadline left unvisited instead of reporting the catalog complete', async () => {
+  const state = profileState(['native', 'native', 'native']);
+  open = await createHarness({
+    state,
+    listing: () => [tool('read')],
+    expireDiscovery: true,
+  });
+
+  expect(await names(open.agent)).toEqual([]);
+  expect(open.connects).toEqual([]);
+  expect([...open.timers.values()].some((timer) => timer.ms === 10_000)).toBe(
+    true,
+  );
+});
+
+it('visits first the connectors the catalog lacks, so a slow startup cannot starve the last ones', async () => {
+  const state = profileState(['native', 'native', 'native']);
+  open = await createHarness({
+    state,
+    catalog: new Map([
+      ['connector-0', entryFor(state, 'connector-0', [tool('cached')])],
+    ]),
+    listing: () => [tool('read')],
+  });
+
+  expect(await names(open.agent)).toHaveLength(1);
+  await expect.poll(() => open!.connects.length).toBe(3);
+  expect(open.connects.indexOf('connector-0')).toBe(2);
 });
 
 it('fills the catalog even when the agent gives up on its first listing', async () => {

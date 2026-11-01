@@ -62,8 +62,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq 'add' | Out-File -LiteralPath "$env:RUNNER_TEMP/releases.json" -Encoding utf8
+          # gh refuses --slurp together with --jq. One JSON release per line means
+          # the pages need no flattening, whichever PowerShell parses them.
+          $lines = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]'
           if ($LASTEXITCODE -ne 0) { throw 'Cannot read releases.' }
+          ConvertTo-Json -InputObject @($lines | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) -Depth 20 | Set-Content -LiteralPath "$env:RUNNER_TEMP/releases.json" -Encoding utf8
           node scripts/release-version.mjs "$env:RUNNER_TEMP/releases.json" $env:SOURCE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Cannot choose a release version.' }
       - name: Install locked build dependencies
@@ -108,8 +111,9 @@ jobs:
           $expected = ((Get-Content -LiteralPath $assets[1] -Raw).Split(' '))[0]
           if ((Get-FileHash -LiteralPath $assets[0] -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Installer checksum mismatch.' }
           $marker = "<!-- wmh-release:$env:SOURCE_SHA -->"
-          $found = @(gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq 'add' | ConvertFrom-Json | Where-Object { $_.tag_name -eq $env:RELEASE_TAG })
+          $lines = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]'
           if ($LASTEXITCODE -ne 0) { throw 'Cannot list release drafts.' }
+          $found = @($lines | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.tag_name -eq $env:RELEASE_TAG })
           if ($found.Count -gt 1) { throw 'Ambiguous release tag.' }
           if ($found.Count -eq 0) {
             @{ tag_name = $env:RELEASE_TAG; target_commitish = $env:SOURCE_SHA; name = "Waleed MCP Hub $env:RELEASE_TAG"; draft = $true; body = $marker; generate_release_notes = $true } | ConvertTo-Json | Set-Content -LiteralPath "$env:RUNNER_TEMP/draft.json" -Encoding utf8
