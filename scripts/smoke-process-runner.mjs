@@ -85,9 +85,15 @@ if (process.platform !== 'win32') {
       }),
     ]);
     const line = 's'.repeat(32 * 1024);
-    for (let index = 0; index < 96; index++) write(line);
     const echoDeadline = Date.now() + 40_000;
-    while (echoed < 3 * MIB && Date.now() < echoDeadline) await delay(25);
+    // Stay inside the host's bounded input queue. This proves duplex transfer,
+    // rather than depending on the target draining 96 frames during startup.
+    for (let index = 0; index < 96; index += 8) {
+      for (let frame = 0; frame < 8; frame++) write(line);
+      const expected = (index + 8) * line.length;
+      while (echoed < expected && Date.now() < echoDeadline) await delay(25);
+      if (echoed < expected) break;
+    }
     assert.ok(
       echoed >= 3 * MIB,
       'The synthetic session target echoed less than three mebibytes.',
