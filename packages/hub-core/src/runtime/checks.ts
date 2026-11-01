@@ -84,21 +84,28 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
             const observed = observations.get(connector.id);
             return !observed || observed.revision !== connector.revision || observed.definitionHash !== definitionHash(connector);
           });
+          let retryAdmission = false;
           for (const connector of candidates) {
             if (closed || [...jobs.values()].filter((entry) => !entry.job.completedAt).length >= 2) break;
             if (!secretSupport && (Object.keys(connector.secretBindings).length || Object.keys(connector.headerBindings).length)) {
               observations.set(connector.id, { ...untested(connector), state: 'unsupported', reason: 'secrets_pending' });
               continue;
             }
+            const inFlight = [...jobs.values()].filter((entry) => !entry.job.completedAt);
             try { await checks.start(connector.id, owner); }
             catch (error) {
               // A Docker discovery owns a prepared safety operation until its
               // cleanup finishes. Wait for active checks before admitting more;
               // an unrelated recovery block with no active checks still pauses.
-              if (error instanceof HubError && (error.code === 'busy' || error.code === 'conflict') && [...jobs.values()].some((entry) => !entry.job.completedAt)) break;
+              if (error instanceof HubError && (error.code === 'busy' || error.code === 'conflict') && inFlight.length) {
+                await Promise.race(inFlight.map((entry) => entry.task));
+                retryAdmission = true;
+                break;
+              }
               throw error;
             }
           }
+          if (retryAdmission) continue;
           const running = [...jobs.values()].filter((entry) => !entry.job.completedAt);
           if (!running.length) break;
           await Promise.race(running.map((entry) => entry.task));

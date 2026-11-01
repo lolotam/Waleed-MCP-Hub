@@ -130,7 +130,7 @@ describe('explicit read-only discovery API', () => {
     expect(snapshot.body + preview.body).not.toContain(privateMarker);
     expect(
       (await hub.app.inject({ url: '/api/connectors', headers })).json(),
-    ).toEqual({ connectors: [], observations: [] });
+    ).toEqual({ connectors: [], observations: [], discovering: false });
     expect(
       (await hub.app.inject({ url: '/api/agents', headers })).json<{
         agents: unknown[];

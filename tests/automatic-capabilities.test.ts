@@ -148,3 +148,50 @@ it('does not start a queued connector after its execution approval is revoked', 
     await hub.close();
   }
 });
+
+it('retries admission when a Docker job finishes before its safety conflict is handled', async () => {
+  const safety = createMemorySafetyLedger();
+  const assertWritable = safety.assertWritable.bind(safety);
+  let admissions = 0;
+  let release!: () => void;
+  const calls: string[] = [];
+  const hub = createLifecycle(
+    memoryStore(profileState(['docker', 'native'])),
+    Date.now,
+    safety,
+    {
+      runtime: {
+        async discover(connector) {
+          calls.push(connector.id);
+          if (connector.executionMode === 'docker')
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          return result;
+        },
+      },
+    },
+  );
+  safety.assertWritable = async () => {
+    admissions++;
+    try {
+      await assertWritable();
+    } catch (error) {
+      if (admissions === 3) {
+        release();
+        await expect
+          .poll(async () => (await hub.checks.observations())[0]!.state)
+          .toBe('connected');
+      }
+      throw error;
+    }
+  };
+  try {
+    await hub.checks.discoverApproved('owner');
+    await expect.poll(() => hub.checks.discovering()).toBe(false);
+    expect(calls).toEqual(['connector-0', 'connector-1']);
+  } finally {
+    release?.();
+    await hub.close();
+  }
+});
