@@ -126,6 +126,14 @@ it('distinguishes OpenCode wrappers from a direct MCP named servers', () => {
       'opencode',
     ),
   ).toEqual({ servers: servers.servers });
+  // A malformed record in the wrapper is rejected on its own later; it must
+  // not turn the wrapper into a server named "servers" and hide its siblings.
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { ...servers, broken: null } } }),
+      'opencode',
+    ),
+  ).toEqual({ ...servers, broken: null });
 });
 it('groups sanitized candidates by agent, omits the Hub and copies only selected entries with exact protected credentials', async () => {
   const f = fixture(),

@@ -10,6 +10,7 @@ import { createAgentBridge } from '@waleed/hub-core';
 import { profileState } from './helpers/runtime.js';
 import {
   assertNoCredentialEcho,
+  ambiguousConnectorIds,
   bridgeToolName,
 } from '../packages/hub-core/src/integrations/bridge.js';
 it('discovers seven healthy catalogs with bounded overlap instead of waiting for each earlier peer', async () => {
@@ -150,18 +151,34 @@ it.each(['__', '_'] as const)(
   },
 );
 it('names bridge tools readably, within 40 characters, without collisions', () => {
-  const first = bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'run-command');
-  expect(first).toMatch(/^ssh-prod__run-command_[0-9a-f]{16}$/);
+  // The documented form, unchanged for a name that fits and loses nothing.
+  const first = bridgeToolName({ id: 'a', name: 'SSH-Prod' }, 'run-command');
+  expect(first).toBe('ssh-prod__run-command');
   const long = bridgeToolName(
     { id: 'a', name: 'a-very-long-connector-name' },
     'and_an_equally_long_tool_name',
   );
-  const second = bridgeToolName({ id: 'b', name: 'ssh-prod' }, 'run-command');
-  expect(second).not.toBe(first);
-  expect(bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'run-command')).toBe(
-    first,
+  const lossy = bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'list.files');
+  expect(lossy).toMatch(/^ssh-prod__list_files_[0-9a-f]{16}$/);
+  expect(lossy).not.toBe(
+    bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'list_files'),
   );
-  for (const name of [first, long, second])
+  expect(bridgeToolName({ id: 'a', name: 'ssh-prod' }, '')).not.toBe(
+    bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'tool'),
+  );
+  // Two connectors sharing a prefix are both hashed, in any registry state.
+  const twins = [
+    { id: 'a', name: 'ssh-prod' },
+    { id: 'b', name: 'SSH-prod' },
+  ];
+  const ambiguous = ambiguousConnectorIds(twins);
+  const [left, right] = twins.map((twin) =>
+    bridgeToolName(twin, 'run-command', '__', ambiguous),
+  );
+  expect(left).toMatch(/^ssh-prod__run-command_[0-9a-f]{16}$/);
+  expect(right).not.toBe(left);
+  expect(bridgeToolName(twins[0]!, 'run-command', '__', ambiguous)).toBe(left);
+  for (const name of [first, long, lossy, left, right])
     expect(name).toMatch(/^[A-Za-z0-9_-]{1,40}$/);
   const flat = bridgeToolName(
     { id: 'grok-ssh', name: 'ssh__prod' },

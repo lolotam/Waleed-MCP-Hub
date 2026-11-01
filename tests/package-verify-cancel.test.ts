@@ -32,6 +32,9 @@ const plan = vi.hoisted(() => ({
   statActive: 0,
   statPeak: 0,
   countedEntries: 0,
+  statCounts: new Map<string, number>(),
+  abortOnStat: undefined as
+    undefined | { path: string; nth: number; controller: AbortController },
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -79,7 +82,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
           plan.countedEntries++;
           return plan.wideInfo!;
         }
-        return await actual.lstat(...args);
+        const info = await actual.lstat(...args);
+        const key = String(args[0]);
+        const count = (plan.statCounts.get(key) ?? 0) + 1;
+        plan.statCounts.set(key, count);
+        if (plan.abortOnStat?.path === key && plan.abortOnStat.nth === count)
+          plan.abortOnStat.controller.abort();
+        return info;
       } finally {
         plan.statActive--;
       }
@@ -110,6 +119,8 @@ afterEach(async () => {
   plan.controller = undefined;
   plan.replacement = undefined;
   plan.wideTree = undefined;
+  plan.statCounts.clear();
+  plan.abortOnStat = undefined;
   plan.wideInfo = undefined;
   plan.statActive = 0;
   plan.statPeak = 0;
@@ -262,6 +273,25 @@ describe('cancellable package verification', () => {
 describe('package manifest walk', () => {
   const sha256 = (value: string) =>
     createHash('sha256').update(value).digest('hex');
+
+  it('rejects when the signal aborts during the stat that confirms the last directory', async () => {
+    const tree = await createTempDir();
+    const directory = join(tree, 'only');
+    await mkdir(directory);
+    await writeFile(join(directory, 'a.txt'), 'x');
+    // A dry run counts the stats of the directory; the real run aborts as the
+    // last of them completes, whatever the walk did before.
+    await buildManifest(tree);
+    const last = plan.statCounts.get(directory)!;
+    plan.statCounts.clear();
+    const controller = new AbortController();
+    plan.abortOnStat = { path: directory, nth: last, controller };
+
+    await expect(buildManifest(tree, controller.signal)).rejects.toMatchObject({
+      reason: 'cancelled',
+    });
+    expect(controller.signal.aborted).toBe(true);
+  });
 
   it('hashes the documented manifest of nested, empty and non-ASCII files', async () => {
     const tree = await createTempDir();

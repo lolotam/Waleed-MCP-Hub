@@ -70,11 +70,17 @@ export function agentServers(
   const mcp = object(root.mcp);
   const nestedServers = object(mcp?.servers);
   // A direct server named "servers" must not hide its siblings. The optional
-  // wrapper contains server records, rather than a server's own fields.
+  // wrapper contains server records, rather than a server's own fields: a
+  // server always has a string or list `command` or `url`. A malformed record
+  // inside the wrapper is rejected on its own and never hides its siblings.
   const wrappedServers =
     nestedServers &&
     Object.keys(mcp!).length === 1 &&
-    Object.values(nestedServers).every((value) => object(value));
+    !['command', 'url'].some(
+      (field) =>
+        typeof nestedServers[field] === 'string' ||
+        Array.isArray(nestedServers[field]),
+    );
   const map =
     format === 'codex'
       ? root.mcp_servers

@@ -28,17 +28,11 @@ test.afterEach(async () => {
       server.once('exit', () => resolve()),
     );
     if (server.connected) server.send('shutdown', () => {});
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    // A fixture that ignores the shutdown is killed, and teardown still waits
+    // for it to exit so the next test never meets its port or files.
+    const timer = setTimeout(() => server.kill(), 3000);
     try {
-      await Promise.race([
-        exited,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(() => {
-            server.kill();
-            resolve();
-          }, 3000);
-        }),
-      ]);
+      await exited;
     } finally {
       clearTimeout(timer);
     }

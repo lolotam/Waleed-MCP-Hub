@@ -215,6 +215,8 @@ export async function buildManifest(
     )
       throw modified();
   }
+  // The last stat may have completed after the caller gave up.
+  throwIfAborted(signal);
   lines.sort();
   return {
     hash: createHash('sha256').update(lines.join('\n')).digest('hex'),

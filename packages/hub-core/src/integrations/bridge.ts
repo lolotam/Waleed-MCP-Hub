@@ -512,14 +512,41 @@ const slug = (value: string) =>
     .replace(/[^A-Za-z0-9_-]+/g, '_')
     .replace(/_{2,}/g, '_')
     .replace(/^[_-]+|[_-]+$/g, '');
+const readablePrefix = (connector: Pick<Connector, 'id' | 'name'>) =>
+  slug(connector.name).toLowerCase() || 'connector';
+// The connectors whose readable prefix another connector shares, so their
+// names need a hash. Only the registry decides this, never the tools found.
+export function ambiguousConnectorIds(
+  connectors: ReadonlyArray<Pick<Connector, 'id' | 'name'>>,
+) {
+  const owners = new Map<string, string[]>();
+  for (const connector of connectors) {
+    const prefix = readablePrefix(connector);
+    owners.set(prefix, [...(owners.get(prefix) ?? []), connector.id]);
+  }
+  return new Set([...owners.values()].filter((ids) => ids.length > 1).flat());
+}
 export function bridgeToolName(
   connector: Pick<Connector, 'id' | 'name'>,
   tool: string,
   separator: '__' | '_' = '__',
+  ambiguous: ReadonlySet<string> = new Set(),
 ) {
-  const name = `${slug(connector.name).toLowerCase() || 'connector'}${separator}${slug(tool) || 'tool'}`;
-  // Route names never depend on the discovered set: a stale advertised name
-  // cannot be reassigned when a colliding connector appears or disappears.
+  const name = `${readablePrefix(connector)}${separator}${slug(tool) || 'tool'}`;
+  // The documented `<connector>__<tool>` name is kept while nothing can
+  // confuse it: it fits, the slug lost nothing of the tool name, and no other
+  // connector shares its prefix. The single "_" separator cannot tell where a
+  // connector ends, so it is always hashed. None of this depends on the tools
+  // discovered, so a stale advertised name is never reassigned to another
+  // route.
+  if (
+    separator === '__' &&
+    name.length <= toolNameLimit &&
+    tool !== '' &&
+    slug(tool) === tool &&
+    !ambiguous.has(connector.id)
+  )
+    return name;
   const suffix = `_${hashData([connector.id, tool]).slice(0, 16)}`;
   return `${name.slice(0, toolNameLimit - suffix.length).replace(/[_-]+$/, '')}${suffix}`;
 }
@@ -1236,8 +1263,9 @@ export function createAgentBridge(
     ? createSessionBridge(session, connect, server, budget, limits)
     : undefined;
   // The bridge tool name of one tool, and the route it belongs to.
+  let ambiguous: ReadonlySet<string> = new Set();
   const register = (connector: Connector, tool: Tool, tools: Tool[]) => {
-    const name = bridgeToolName(connector, tool.name, toolSeparator);
+    const name = bridgeToolName(connector, tool.name, toolSeparator, ambiguous);
     names.set(name, {
       connectorId: connector.id,
       hash: definitionHash(connector),
@@ -1347,6 +1375,7 @@ export function createAgentBridge(
   const publish = (state: HubState, catalog: ToolCatalog) => {
     const tools: Tool[] = [];
     names.clear();
+    ambiguous = ambiguousConnectorIds(state.connectors);
     for (const connector of state.connectors) {
       const entry = catalog.get(connector.id);
       if (

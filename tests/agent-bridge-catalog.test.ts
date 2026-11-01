@@ -175,11 +175,11 @@ it('answers from the stored catalog while peers are still starting, then announc
   });
   const cached = await names(open.agent);
   expect(cached).toHaveLength(1);
-  expect(cached[0]).toMatch(/old_[0-9a-f]{16}$/);
+  expect(cached[0]).toMatch(/__old$/);
   release();
   await expect.poll(() => open!.changed()).toBe(1);
   expect(open.stored.catalog?.get('connector-0')?.tools).toEqual([tool('new')]);
-  expect((await names(open.agent))[0]).toMatch(/new_[0-9a-f]{16}$/);
+  expect((await names(open.agent))[0]).toMatch(/__new$/);
 });
 
 it('never serves a cached connector whose definition changed or that was disabled', async () => {
@@ -197,7 +197,7 @@ it('never serves a cached connector whose definition changed or that was disable
   await expect.poll(() => open!.changed()).toBe(1);
   const listed = await names(open.agent);
   expect(listed).toHaveLength(1);
-  expect(listed[0]).toMatch(/live_[0-9a-f]{16}$/);
+  expect(listed[0]).toMatch(/__live$/);
   expect(open.connects).toEqual(['connector-0']);
 });
 
@@ -247,7 +247,7 @@ it('fills the catalog even when the agent gives up on its first listing', async 
   release();
   await expect.poll(() => open!.stored.catalog?.size).toBe(1);
   const connectsBefore = open.connects.length;
-  expect((await names(open.agent))[0]).toMatch(/read_[0-9a-f]{16}$/);
+  expect((await names(open.agent))[0]).toMatch(/__read$/);
   expect(open.connects.length).toBeGreaterThanOrEqual(connectsBefore);
 });
 
