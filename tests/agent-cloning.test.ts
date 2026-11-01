@@ -477,7 +477,14 @@ it('waits through package commit cancellation and preserves the committed connec
           expectedRevision: 0,
           copyCredentials: true,
           approveExecution: true,
-          entries: [{ key: candidate.key, name: 'pkg', entry: 'serve' }],
+          entries: [
+            {
+              key: candidate.key,
+              name: 'pkg',
+              entry: 'serve',
+              previewId: preview.previewId,
+            },
+          ],
         },
         'owner',
       ),
@@ -493,6 +500,7 @@ it('waits through package commit cancellation and preserves the committed connec
             key: candidate.key,
             name: 'pkg',
             entry: 'serve',
+            previewId: preview.previewId,
             acknowledgedWarnings: ['large_size'],
           },
         ],
@@ -709,3 +717,159 @@ it('does not wait for unrelated capability checks when copying a connector', asy
     f.secrets.close();
   }
 });
+
+it.each([false, true])(
+  'copies more than five reviewed npm entries without weakening frozen-lock approval (changed=%s)',
+  async (changed) => {
+    const f = fixture();
+    f.files.set(
+      'C:\\agents\\claude.json',
+      JSON.stringify({
+        mcpServers: Object.fromEntries(
+          Array.from({ length: 6 }, (_, index) => [
+            `package-${index}`,
+            {
+              command: 'npx',
+              args: ['-y', `synthetic-${index}@1.2.3`],
+              env: { API_KEY: secret },
+            },
+          ]),
+        ),
+      }),
+    );
+    let serial = 0;
+    const previews = new Map<string, PackagePreview>();
+    const received: string[] = [];
+    const completed = (
+      preview: PackagePreview | null,
+      result: PackageJob['result'] = null,
+    ): PackageJob => ({
+      id: crypto.randomUUID(),
+      kind: preview ? 'resolve' : 'install',
+      state: 'succeeded',
+      createdAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      phase: 'complete',
+      progress: { downloadedBytes: 0, packages: 1 },
+      error: null,
+      preview,
+      result,
+    });
+    const resolve = vi.fn((raw: { name: string; version?: string }) => {
+      const preview: PackagePreview = {
+        previewId: crypto.randomUUID(),
+        name: raw.name,
+        version: '1.2.3',
+        description: null,
+        integrity: `sha512-${'A'.repeat(86)}==`,
+        lockHash: (changed && serial >= 6 ? 'b' : 'a').repeat(64),
+        packageCount: 1,
+        bundledCount: 0,
+        unpackedSize: 10,
+        releasedAt: null,
+        entries: [{ entry: 'serve', entryPath: 'server.js' }],
+        warnings: [],
+        expiresAt: new Date(Date.now() + 600000).toISOString(),
+      };
+      serial++;
+      previews.set(preview.previewId, preview);
+      if (previews.size > 5) previews.delete(previews.keys().next().value!);
+      return completed(preview);
+    });
+    const install = vi.fn(
+      async (raw: {
+        previewId: string;
+        connectorName: string;
+        env: { API_KEY: string };
+      }) => {
+        const preview = previews.get(raw.previewId);
+        if (!preview) throw new Error('Preview was evicted.');
+        previews.delete(raw.previewId);
+        received.push(raw.env.API_KEY);
+        const state = await f.hub.inventory();
+        const id = `installed-${received.length}`;
+        const p = await f.hub.preview(
+          {
+            kind: 'create_connector',
+            expectedRevision: state.revision,
+            definition: definition({
+              id,
+              name: raw.connectorName,
+              command: 'C:\\Synthetic\\node.exe',
+              args: ['server.js'],
+            }),
+          },
+          'owner',
+        );
+        await f.hub.apply(p.id, 'owner');
+        await f.hub.drain();
+        return completed(null, { connectorId: id, outcome: 'saved' });
+      },
+    );
+    const packages = {
+      resolve,
+      install,
+      job: () => {
+        throw new Error('No pending package jobs.');
+      },
+      cancel: () => {
+        throw new Error('No pending package jobs.');
+      },
+    } as unknown as PackageService;
+    const service = createAgentCloning({ ...f.hub, packages }, f.adapters);
+    const done = async (id: string) => {
+      await expect
+        .poll(() => service.job(id, 'owner').state, { timeout: 5000 })
+        .not.toMatch(/^(queued|running)$/);
+      return service.job(id, 'owner');
+    };
+    try {
+      const scan = await done(service.scan('owner').id),
+        candidates = scan.candidates.filter((item) => item.state === 'package');
+      service.prepare(
+        scan.id,
+        candidates.map((item) => item.key),
+        'owner',
+      );
+      const reviewed = await done(scan.id);
+      expect(previews.size).toBe(5);
+      const input = {
+        expectedRevision: 0,
+        copyCredentials: true,
+        approveExecution: true,
+        entries: reviewed.candidates
+          .filter((item) => item.state === 'package')
+          .map((item) => ({
+            key: item.key,
+            name: item.name,
+            entry: 'serve',
+            previewId: item.packagePreview!.previewId,
+            acknowledgedWarnings: [],
+          })),
+      };
+      service.copy(scan.id, input, 'owner');
+      const result = await done(scan.id);
+      if (changed) {
+        expect(install).not.toHaveBeenCalled();
+        expect((await f.hub.inventory()).connectors).toHaveLength(0);
+        expect(result.results.every((item) => item.state === 'failed')).toBe(
+          true,
+        );
+        expect(() => service.copy(scan.id, input, 'owner')).toThrow(
+          /Review the resolved package/,
+        );
+      } else {
+        expect(result.results).toHaveLength(6);
+        expect(result.results.every((item) => item.state === 'saved')).toBe(
+          true,
+        );
+        expect((await f.hub.inventory()).connectors).toHaveLength(6);
+        expect(received).toEqual(Array(6).fill(secret));
+      }
+    } finally {
+      await service.close();
+      await f.hub.close();
+      f.secrets.close();
+    }
+  },
+);

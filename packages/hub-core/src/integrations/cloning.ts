@@ -486,11 +486,11 @@ export function createAgentCloning(
           );
       for (const [index, candidate] of candidates.entries())
         if (candidate.packageProposal) {
-          record.controller.signal.throwIfAborted();
           const preview = candidate.packagePreview,
             choice = input.entries[index]!;
           if (
             !preview ||
+            choice.previewId !== preview.previewId ||
             Date.parse(preview.expiresAt) <= now() ||
             !preview.entries.some((item) => item.entry === choice.entry) ||
             preview.warnings.some(
@@ -585,12 +585,54 @@ export function createAgentCloning(
             'Choose a different destination name.',
           );
         if (candidate.packageProposal) {
+          record.controller.signal.throwIfAborted();
           const proposal = candidate.packageProposal;
+          const reviewed = candidate.packagePreview!;
+          // Bulk imports can evict the installer's bounded preview cache.
+          // Resolve just in time, but only install the exact reviewed lock.
+          const resolution = await packageDone(
+            record,
+            host.packages!.resolve(
+              { name: reviewed.name, version: reviewed.version },
+              record.owner,
+            ),
+          );
+          const fresh = resolution.preview;
+          if (resolution.state !== 'succeeded' || !fresh)
+            throw new HubError(
+              'unavailable',
+              'Package review could not be refreshed.',
+            );
+          const originalEntry = reviewed.entries.find(
+            (entry) => entry.entry === choice.entry,
+          );
+          if (
+            fresh.name !== reviewed.name ||
+            fresh.version !== reviewed.version ||
+            fresh.integrity !== reviewed.integrity ||
+            fresh.lockHash !== reviewed.lockHash ||
+            !fresh.entries.some(
+              (entry) =>
+                entry.entry === choice.entry &&
+                entry.entryPath === originalEntry?.entryPath,
+            ) ||
+            fresh.warnings.some(
+              (warning) => !choice.acknowledgedWarnings.includes(warning),
+            )
+          ) {
+            candidate.packagePreview = fresh;
+            candidate.issues = ['package_changed'];
+            throw new HubError(
+              'conflict',
+              'Package changed. Review the new snapshot before copying.',
+            );
+          }
+          record.controller.signal.throwIfAborted();
           const job = await packageDone(
             record,
             await host.packages!.install(
               {
-                previewId: candidate.packagePreview!.previewId,
+                previewId: fresh.previewId,
                 entry: choice.entry,
                 acknowledgedWarnings: choice.acknowledgedWarnings,
                 connectorName: choice.name,

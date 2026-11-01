@@ -273,3 +273,47 @@ it.each([
 ])('treats a stored catalog with %s as absent', (_case, text) => {
   expect(parseToolCatalog(text)).toBeUndefined();
 });
+
+it('persists a readable shared-budget catalog when parallel peers each expose 200 tools', async () => {
+  const state = profileState(['native', 'native']);
+  open = await createHarness({
+    state,
+    listing: () =>
+      Array.from({ length: 200 }, (_, index) => tool(`read_${index}`)),
+  });
+  expect((await open.agent.listTools()).tools).toHaveLength(256);
+  const catalog = open.stored.catalog!;
+  expect([...catalog.values()].map((entry) => entry.tools.length)).toEqual([
+    200, 56,
+  ]);
+  expect(parseToolCatalog(serializeToolCatalog(catalog))).toEqual(catalog);
+});
+it('bounds merged cached tools when one peer fails and another returns a large fresh catalog', async () => {
+  const state = profileState(['native', 'native']);
+  const previous: ToolCatalog = new Map([
+    [
+      'connector-0',
+      {
+        hash: definitionHash(state.connectors[0]!),
+        tools: Array.from({ length: 200 }, (_, index) =>
+          tool(`cached_${index}`),
+        ),
+      },
+    ],
+  ]);
+  open = await createHarness({
+    state,
+    catalog: previous,
+    listing: (id) =>
+      id === 'connector-0'
+        ? new Error('Unavailable')
+        : Array.from({ length: 200 }, (_, index) => tool(`fresh_${index}`)),
+  });
+  await open.agent.listTools();
+  await expect.poll(() => open!.stored.catalog?.has('connector-1')).toBe(true);
+  const catalog = open.stored.catalog!;
+  expect([...catalog.values()].map((entry) => entry.tools.length)).toEqual([
+    200, 56,
+  ]);
+  expect(parseToolCatalog(serializeToolCatalog(catalog))).toEqual(catalog);
+});

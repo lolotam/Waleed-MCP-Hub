@@ -87,6 +87,7 @@ export function AgentCloning({
   }
   async function action(path: string, body: unknown) {
     setBusy(true);
+    setReviewed(false);
     setError('');
     try {
       await follow(CloneJobSchema.parse(await api(path, body)));
@@ -327,6 +328,18 @@ export function AgentCloning({
                               ? ` · Missing: ${item.missing.join(', ')}`
                               : ''}
                           </small>
+                          {item.issues.includes('package_changed') && (
+                            <p className="notice">
+                              The package dependency snapshot changed. Review
+                              and approve its updated details before retrying.
+                            </p>
+                          )}
+                          {item.issues.includes('package_lookup_failed') && (
+                            <p className="notice">
+                              Package details could not be loaded. Review
+                              selected packages again to retry.
+                            </p>
+                          )}
                           {item.state === 'needs_setup' ? (
                             <p>
                               Needs setup: {item.issues.join(', ')}.{' '}
@@ -492,6 +505,7 @@ export function AgentCloning({
                       ...(item.packageProposal
                         ? {
                             entry: bins[item.key],
+                            previewId: item.packagePreview!.previewId,
                             acknowledgedWarnings: item.packagePreview!.warnings,
                           }
                         : {}),

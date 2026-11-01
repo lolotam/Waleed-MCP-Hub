@@ -39,6 +39,7 @@ export const CloneApplySchema = z.strictObject({
         key: z.uuid(),
         name: z.string().trim().min(1).max(100),
         entry: z.string().min(1).max(100).optional(),
+        previewId: z.uuid().optional(),
         acknowledgedWarnings: z.array(PackageWarningSchema).max(16).default([]),
       }),
     )

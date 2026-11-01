@@ -55,7 +55,7 @@ export function createUpdateChecker(
             redirect: 'error',
             headers: {
               Accept: 'application/vnd.github+json',
-              'User-Agent': `Waleed-MCP-Hub/${currentVersion}`,
+              'User-Agent': 'Waleed-MCP-Hub',
             },
             signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
           });

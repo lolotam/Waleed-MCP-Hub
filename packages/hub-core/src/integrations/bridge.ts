@@ -1170,14 +1170,18 @@ function mergeCatalog(
   found: Map<string, CatalogEntry | undefined>,
   state: HubState,
 ) {
-  const next: ToolCatalog = new Map(previous);
+  const next: ToolCatalog = new Map();
   let incomplete = false;
-  for (const [id, entry] of found) {
-    if (entry) next.set(id, entry);
-    else incomplete = true;
+  let count = 0;
+  for (const connector of state.connectors) {
+    if (!connector.enabled || !approved(connector)) continue;
+    const entry = found.get(connector.id) ?? previous?.get(connector.id);
+    if (found.has(connector.id) && !found.get(connector.id)) incomplete = true;
+    if (!entry || entry.hash !== definitionHash(connector)) continue;
+    const tools = entry.tools.slice(0, 256 - count);
+    next.set(connector.id, { hash: entry.hash, tools });
+    count += tools.length;
   }
-  for (const id of next.keys())
-    if (!state.connectors.some((item) => item.id === id)) next.delete(id);
   return { next, incomplete };
 }
 // Settles only by rejecting, when the request is cancelled.
@@ -1328,11 +1332,12 @@ export function createAgentBridge(
       );
       for (const [index, tools] of results.entries()) {
         const connector = batch[index]!;
+        const accepted = tools?.slice(0, 256 - count);
         found.set(
           connector.id,
-          tools && { hash: definitionHash(connector), tools },
+          accepted && { hash: definitionHash(connector), tools: accepted },
         );
-        count += tools?.length ?? 0;
+        count += accepted?.length ?? 0;
       }
     }
     return found;
