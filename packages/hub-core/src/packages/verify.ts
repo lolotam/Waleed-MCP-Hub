@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, readdir } from 'node:fs/promises';
+import { createReadStream, type BigIntStats } from 'node:fs';
+import { lstat, open, opendir } from 'node:fs/promises';
 import { dirname, join, resolve, win32 } from 'node:path';
 import type { Connector } from '@waleed/contracts';
-import { assertNoLinks } from '../adapters/managed-files.js';
+import { assertNoLinks, checkedReadFlags } from '../adapters/managed-files.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
 import {
   NO_GLOBAL_SEARCH_PATHS,
@@ -44,60 +44,179 @@ const cancelled = () => new RuntimeFault('cancelled');
 const throwIfAborted = (signal?: AbortSignal): void => {
   if (signal?.aborted) throw cancelled();
 };
-async function digest(path: string, signal?: AbortSignal): Promise<string> {
-  const hash = createHash('sha256');
-  const stream = createReadStream(path);
-  if (!signal) {
-    for await (const chunk of stream) hash.update(chunk);
-    return hash.digest('hex');
-  }
-  const onAbort = () => stream.destroy(cancelled());
-  signal.addEventListener('abort', onAbort, { once: true });
+interface InstalledDirectory {
+  path: string;
+  identity: BigIntStats;
+}
+interface InstalledFile {
+  path: string;
+  relative: string;
+  size: number;
+  identity: BigIntStats;
+}
+const sameFile = (left: BigIntStats, right: BigIntStats) =>
+  right.isFile() &&
+  right.nlink === 1n &&
+  left.dev === right.dev &&
+  left.ino === right.ino &&
+  left.size === right.size &&
+  left.mtimeNs === right.mtimeNs &&
+  left.ctimeNs === right.ctimeNs;
+async function digest(
+  file: InstalledFile,
+  signal?: AbortSignal,
+): Promise<string> {
+  throwIfAborted(signal);
+  const handle = await open(file.path, checkedReadFlags);
+  let stream: ReturnType<typeof createReadStream> | undefined;
+  let closed: Promise<void> | undefined;
+  const onAbort = () => stream?.destroy(cancelled());
   try {
+    if (!sameFile(file.identity, await handle.stat({ bigint: true })))
+      throw modified();
+    throwIfAborted(signal);
+    const hash = createHash('sha256');
+    // Hash the verified handle, never reopen the path after its identity check.
+    // A small file gets a small read buffer: most installed files are a few KiB,
+    // and a fixed 64 KiB buffer per file dominated the verification time.
+    stream = createReadStream(file.path, {
+      fd: handle,
+      autoClose: false,
+      highWaterMark: Math.min(Math.max(file.size, 1), 64 * 1024),
+    });
+    closed = new Promise<void>((resolve) => stream!.once('close', resolve));
+    // Cancellation may arrive between iterator reads or during final checks.
+    // The iterator still observes read errors; keep late destruction handled.
+    stream.on('error', () => undefined);
+    signal?.addEventListener('abort', onAbort, { once: true });
     throwIfAborted(signal);
     for await (const chunk of stream) hash.update(chunk);
     throwIfAborted(signal);
+    if (
+      !sameFile(file.identity, await handle.stat({ bigint: true })) ||
+      !sameFile(file.identity, await lstat(file.path, { bigint: true }))
+    )
+      throw modified();
     return hash.digest('hex');
   } catch (error) {
-    stream.destroy();
-    throw signal.aborted ? cancelled() : error;
+    throw signal?.aborted ? cancelled() : error;
   } finally {
-    signal.removeEventListener('abort', onAbort);
+    signal?.removeEventListener('abort', onAbort);
+    stream?.destroy();
+    await closed;
+    await handle.close();
   }
+}
+// Up to this many files are hashed at once. One at a time left a seven-peer
+// catalog waiting about 5 s per 13k-file install.
+const HASH_CONCURRENCY = 8;
+
+// Lists every installed file. A link, a hardlinked file or anything that is not
+// a plain file or folder fails the walk, and the caps are checked for the whole
+// tree before any file is read.
+async function listInstalledFiles(
+  installDir: string,
+  signal?: AbortSignal,
+): Promise<{
+  files: InstalledFile[];
+  directories: InstalledDirectory[];
+  bytes: number;
+}> {
+  const files: InstalledFile[] = [];
+  const directories: InstalledDirectory[] = [];
+  let bytes = 0,
+    entries = 0;
+  // Include directories in the admission cap and stream directory entries so a
+  // single wide directory cannot enqueue an unbounded number of stat calls.
+  const pending = [{ path: installDir, prefix: '' }];
+  while (pending.length) {
+    throwIfAborted(signal);
+    const directory = pending.pop()!;
+    const identity = await lstat(directory.path, { bigint: true });
+    if (!identity.isDirectory() || identity.isSymbolicLink()) throw modified();
+    directories.push({ path: directory.path, identity });
+    const listing = await opendir(directory.path);
+    for await (const entry of listing) {
+      throwIfAborted(signal);
+      if (++entries > MAX_FILES) throw modified();
+      const path = join(directory.path, entry.name);
+      const relative = directory.prefix
+        ? `${directory.prefix}/${entry.name}`
+        : entry.name;
+      const info = await lstat(path, { bigint: true });
+      if (info.isSymbolicLink()) throw modified();
+      if (info.isDirectory()) {
+        pending.push({ path, prefix: relative });
+        continue;
+      }
+      if (!info.isFile() || info.nlink !== 1n) throw modified();
+      bytes += Number(info.size);
+      if (bytes > MAX_BYTES) throw modified();
+      files.push({ path, relative, size: Number(info.size), identity: info });
+    }
+  }
+  return { files, directories, bytes };
+}
+
+// Every file is hashed even when a worker fails, so no stream outlives the
+// call; the first failure is then reported.
+async function manifestLines(
+  files: InstalledFile[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const lines = new Array<string>(files.length);
+  let next = 0,
+    failure: { error: unknown } | undefined;
+  const worker = async () => {
+    while (!failure && next < files.length) {
+      const index = next++;
+      const file = files[index]!;
+      try {
+        throwIfAborted(signal);
+        lines[index] =
+          `${file.relative}\0${file.size}\0${await digest(file, signal)}`;
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: HASH_CONCURRENCY }, worker));
+  if (failure) throw failure.error;
+  throwIfAborted(signal);
+  return lines;
 }
 
 // The installed-file manifest: one line per regular file, sorted, hashed
-// together. A link, a hardlinked file or anything that is not a plain file or
-// folder fails the walk.
+// together.
 export async function buildManifest(
   installDir: string,
   signal?: AbortSignal,
 ): Promise<PackageManifest> {
-  const lines: string[] = [];
-  let bytes = 0;
-  const walk = async (directory: string, prefix: string): Promise<void> => {
-    throwIfAborted(signal);
-    for (const entry of await readdir(directory)) {
-      throwIfAborted(signal);
-      const path = join(directory, entry);
-      const relative = prefix ? `${prefix}/${entry}` : entry;
-      const info = await lstat(path);
-      if (info.isSymbolicLink()) throw modified();
-      if (info.isDirectory()) {
-        await walk(path, relative);
-        continue;
-      }
-      if (!info.isFile() || info.nlink > 1) throw modified();
-      // The caps are checked before hashing, so an oversized file is never read.
-      bytes += info.size;
-      if (lines.length >= MAX_FILES || bytes > MAX_BYTES) throw modified();
-      lines.push(`${relative}\0${info.size}\0${await digest(path, signal)}`);
-      throwIfAborted(signal);
-    }
-  };
   const root = await lstat(installDir);
   if (!root.isDirectory() || root.isSymbolicLink()) throw modified();
-  await walk(installDir, '');
+  const { files, directories, bytes } = await listInstalledFiles(
+    installDir,
+    signal,
+  );
+  const lines = await manifestLines(files, signal);
+  // Directory names must still refer to the tree we walked, including paths
+  // that might otherwise have been replaced with links while files were read.
+  for (const directory of directories) {
+    throwIfAborted(signal);
+    const named = await lstat(directory.path, { bigint: true });
+    const before = directory.identity;
+    if (
+      !named.isDirectory() ||
+      named.isSymbolicLink() ||
+      named.dev !== before.dev ||
+      named.ino !== before.ino ||
+      named.mtimeNs !== before.mtimeNs ||
+      named.ctimeNs !== before.ctimeNs
+    )
+      throw modified();
+  }
+  // The last stat may have completed after the caller gave up.
+  throwIfAborted(signal);
   lines.sort();
   return {
     hash: createHash('sha256').update(lines.join('\n')).digest('hex'),

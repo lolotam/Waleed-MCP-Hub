@@ -32,10 +32,16 @@ export function publicAddress(address: string): boolean {
   }
   // Reject transition/documentation ranges as well as local IPv6; a 6to4
   // address can embed a private IPv4 destination behind an apparent public IP.
+  // 2001::/23 is reserved for IETF assignments; the entire 2001::/16 is
+  // not reserved. Public services such as Google's 2001:4860::/32 use it.
+  const second = Number.parseInt(address.split(':')[1] || '0', 16);
+  const reserved2001 =
+    /^2001:/i.test(address) && (second < 0x200 || second === 0xdb8);
   return (
     isIP(address) === 6 &&
     /^[23]/.test(address) &&
-    !/^(?:2001:|2002:|3ff[ef]:)/i.test(address)
+    !reserved2001 &&
+    !/^(?:2002:|3ff[ef]:)/i.test(address)
   );
 }
 

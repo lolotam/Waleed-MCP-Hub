@@ -157,7 +157,10 @@ function parseSource(source: string): Record<string, unknown> {
   return JSON.parse(source) as Record<string, unknown>;
 }
 
-export function normalizeImport(source: string): PrivateImport {
+export function normalizeImport(
+  source: string,
+  relatedEntries: readonly unknown[] = [],
+): PrivateImport {
   const document = parseSource(source);
   if (!Object.keys(document).length) throw invalid();
   let format: ImportPreview['format'] = 'single';
@@ -220,6 +223,7 @@ export function normalizeImport(source: string): PrivateImport {
       entry.env,
       entry.environment,
       entry.headers,
+      entry.http_headers,
       object(entry.remote)?.headers,
     ]) {
       for (const raw of Object.values(object(map) ?? {}))
@@ -258,6 +262,9 @@ export function normalizeImport(source: string): PrivateImport {
     }
   };
   entries.forEach(([, value]) => collect(value));
+  // Agent scans normalize one selected entry at a time, but credentials in
+  // sibling entries must still redact repeated names and arguments.
+  relatedEntries.forEach(collect);
   const containsSecret = (text: string) =>
     privateStrings.some(
       (secret) =>

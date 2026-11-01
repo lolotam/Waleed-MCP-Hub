@@ -21,6 +21,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import {
   StateSchema,
+  ToolPolicyNameSchema,
+  ToolPolicySchema,
   SafetyStateSchema,
   IntegrationAgentIdSchema,
   type Connector,
@@ -61,11 +63,34 @@ import {
 import { packagesRoot } from '../packages/store.js';
 import { verifyPackage } from '../packages/verify.js';
 import {
+  parseToolCatalog,
+  writeToolCatalogFile,
+  type CatalogEntry,
+  type ToolCatalog,
+  type ToolCatalogStore,
+} from './tool-catalog.js';
+import {
   createSessionPool,
   type OperationLease,
   type PoolLimits,
   type SessionPool,
 } from './session-pool.js';
+
+export function toolPolicy(connector: Connector, name: string) {
+  if (!ToolPolicyNameSchema.safeParse(name).success) return 'block';
+  if (!Object.hasOwn(connector.toolPolicies ?? {}, name)) return 'allow';
+  const parsed = ToolPolicySchema.safeParse(connector.toolPolicies![name]);
+  return parsed.success ? parsed.data : 'block';
+}
+class ToolPolicyRefused extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+}
+const policyRefusal = (code: string): CallToolResult => ({
+  isError: true,
+  content: [{ type: 'text', text: code }],
+});
 
 export interface BridgePeer {
   client: Client;
@@ -144,6 +169,10 @@ export interface BridgeSession {
   now(): number;
   setTimer(callback: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
+  // The persisted catalog of the agent. With it, a listing answers from the
+  // last discovered tools and refreshes them in the background, so an agent's
+  // tool-fetch timeout never waits on peer startup.
+  catalog?: ToolCatalogStore;
 }
 
 export type BridgeConnect = (
@@ -483,15 +512,42 @@ const slug = (value: string) =>
     .replace(/[^A-Za-z0-9_-]+/g, '_')
     .replace(/_{2,}/g, '_')
     .replace(/^[_-]+|[_-]+$/g, '');
+const readablePrefix = (connector: Pick<Connector, 'id' | 'name'>) =>
+  slug(connector.name).toLowerCase() || 'connector';
+// The connectors whose readable prefix another connector shares, so their
+// names need a hash. Only the registry decides this, never the tools found.
+export function ambiguousConnectorIds(
+  connectors: ReadonlyArray<Pick<Connector, 'id' | 'name'>>,
+) {
+  const owners = new Map<string, string[]>();
+  for (const connector of connectors) {
+    const prefix = readablePrefix(connector);
+    owners.set(prefix, [...(owners.get(prefix) ?? []), connector.id]);
+  }
+  return new Set([...owners.values()].filter((ids) => ids.length > 1).flat());
+}
 export function bridgeToolName(
   connector: Pick<Connector, 'id' | 'name'>,
   tool: string,
-  taken: ReadonlySet<string>,
+  separator: '__' | '_' = '__',
+  ambiguous: ReadonlySet<string> = new Set(),
 ) {
-  const name = `${slug(connector.name).toLowerCase() || 'connector'}__${slug(tool) || 'tool'}`;
-  if (name.length <= toolNameLimit && !taken.has(name)) return name;
-  // Too long or colliding: keep the readable prefix and add a stable short hash.
-  const suffix = `_${hashData([connector.id, tool]).slice(0, 6)}`;
+  const name = `${readablePrefix(connector)}${separator}${slug(tool) || 'tool'}`;
+  // The documented `<connector>__<tool>` name is kept while nothing can
+  // confuse it: it fits, the slug lost nothing of the tool name, and no other
+  // connector shares its prefix. The single "_" separator cannot tell where a
+  // connector ends, so it is always hashed. None of this depends on the tools
+  // discovered, so a stale advertised name is never reassigned to another
+  // route.
+  if (
+    separator === '__' &&
+    name.length <= toolNameLimit &&
+    tool !== '' &&
+    slug(tool) === tool &&
+    !ambiguous.has(connector.id)
+  )
+    return name;
+  const suffix = `_${hashData([connector.id, tool]).slice(0, 16)}`;
   return `${name.slice(0, toolNameLimit - suffix.length).replace(/[_-]+$/, '')}${suffix}`;
 }
 
@@ -514,6 +570,7 @@ interface SessionBridge {
     tool: string,
     args: unknown,
     signal: AbortSignal,
+    authorize: (state: HubState) => void,
   ): Promise<CallToolResult>;
   // Reconciles the pooled peers with the registry.
   reconcile(): Promise<void>;
@@ -616,6 +673,7 @@ function createSessionBridge(
     // before the lease of its peer does.
     deadline: number,
     send: (peer: BridgePeer, signal: AbortSignal) => Promise<T>,
+    authorize?: (state: HubState) => void,
   ): Promise<{ replaced: false; value: T } | { replaced: true }> => {
     try {
       // The agent's tool belongs to the definition it listed; a peer of a
@@ -674,6 +732,7 @@ function createSessionBridge(
       }
       // 8. The request itself. The pool sees a peer's JSON-RPC answer as a
       // result, so it does not count as a failure of the peer.
+      authorize?.(snapshot.state);
       const outcome = await lease.request(
         snapshot.seq,
         admission,
@@ -705,6 +764,7 @@ function createSessionBridge(
       // unreadable registry, a modified package, a protocol failure or an
       // echoed credential.
       if (
+        !(error instanceof ToolPolicyRefused) &&
         !(error instanceof StaleTool) &&
         !(error instanceof LeaseEnding) &&
         !(error instanceof PeerAnswered) &&
@@ -765,7 +825,8 @@ function createSessionBridge(
           admission = false;
           for (const tool of outcome.value.tools) {
             if (collected.length >= budget) break;
-            collected.push(tool);
+            if (toolPolicy(connector, tool.name) !== 'block')
+              collected.push(tool);
           }
           if (!outcome.value.nextCursor || collected.length >= budget) break;
           cursor = outcome.value.nextCursor;
@@ -783,6 +844,7 @@ function createSessionBridge(
     tool: string,
     args: unknown,
     signal: AbortSignal,
+    authorize: (state: HubState) => void,
   ): Promise<CallToolResult> =>
     pool.use(connector.id, signal, callTimeout, async (lease) => {
       // The operation window covers the request of this operation, on
@@ -806,6 +868,7 @@ function createSessionBridge(
                 CallToolResultSchema,
                 { signal: requestSignal, timeout: callTimeout },
               ),
+            authorize,
           );
           if (!outcome.replaced) return outcome.value;
           windowPeer.endOperation?.();
@@ -1126,12 +1189,46 @@ export function createBridgeStartupRecovery(
   return { attempt: retry.attempt, stop: retry.stop, settled: retry.settled };
 }
 
+// The catalog after a discovery: a connector that listed replaces its entry,
+// one that could not list keeps its previous entry, and a connector that left
+// the registry is dropped.
+function mergeCatalog(
+  previous: ToolCatalog | undefined,
+  found: Map<string, CatalogEntry | undefined>,
+  state: HubState,
+) {
+  const next: ToolCatalog = new Map();
+  let incomplete = false;
+  let count = 0;
+  for (const connector of state.connectors) {
+    if (!connector.enabled || !approved(connector)) continue;
+    const entry = found.get(connector.id) ?? previous?.get(connector.id);
+    if (found.has(connector.id) && !found.get(connector.id)) incomplete = true;
+    if (!entry || entry.hash !== definitionHash(connector)) continue;
+    const tools = entry.tools
+      .filter((tool) => toolPolicy(connector, tool.name) !== 'block')
+      .slice(0, 256 - count);
+    next.set(connector.id, { hash: entry.hash, tools });
+    count += tools.length;
+  }
+  return { next, incomplete };
+}
+// Settles only by rejecting, when the request is cancelled.
+const whenAborted = (signal: AbortSignal) =>
+  new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else
+      signal.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      });
+  });
 export function createAgentBridge(
   read: () => Promise<HubState>,
   connect: BridgeConnect,
   session?: BridgeSession,
   budget?: ShutdownBudget,
   limits?: Partial<PoolLimits>,
+  toolSeparator: '__' | '_' = '__',
 ) {
   const server = new Server(
     { name: 'waleed-mcp-hub', version: '0.1.0' },
@@ -1166,8 +1263,9 @@ export function createAgentBridge(
     ? createSessionBridge(session, connect, server, budget, limits)
     : undefined;
   // The bridge tool name of one tool, and the route it belongs to.
+  let ambiguous: ReadonlySet<string> = new Set();
   const register = (connector: Connector, tool: Tool, tools: Tool[]) => {
-    const name = bridgeToolName(connector, tool.name, new Set(names.keys()));
+    const name = bridgeToolName(connector, tool.name, toolSeparator, ambiguous);
     names.set(name, {
       connectorId: connector.id,
       hash: definitionHash(connector),
@@ -1182,71 +1280,209 @@ export function createAgentBridge(
       ),
     });
   };
+  // One connector's tools, or undefined when it could not list.
+  const discover = async (
+    connector: Connector,
+    snapshot: BridgeSnapshot | undefined,
+    signal: AbortSignal,
+    remaining: number,
+  ): Promise<Tool[] | undefined> => {
+    if (signal.aborted) return undefined;
+    if (
+      bridge &&
+      snapshot &&
+      (connector.executionMode === 'native' ||
+        connector.executionMode === 'remote' ||
+        connector.executionMode === 'docker')
+    ) {
+      // A pooled peer: one peer for the whole listing.
+      try {
+        return await bridge.list(connector, signal, remaining);
+      } catch {
+        // Isolate unavailable/auth-required peers; never reflect
+        // diagnostics.
+        return undefined;
+      }
+    }
+    const listed: Tool[] = [];
+    let peer: BridgePeer | undefined;
+    try {
+      const peerSignal = AbortSignal.any([signal, AbortSignal.timeout(20000)]);
+      if (closing) throw new Error();
+      peer = await connect(connector, peerSignal);
+      let cursor: string | undefined;
+      for (let page = 0; page < 8; page++) {
+        const result = await peer.client.listTools(cursor ? { cursor } : {}, {
+          signal: peerSignal,
+          timeout: 20000,
+        });
+        peer.assertPublic(result);
+        for (const tool of result.tools) {
+          if (listed.length >= remaining) break;
+          if (toolPolicy(connector, tool.name) !== 'block') listed.push(tool);
+        }
+        if (!result.nextCursor || listed.length >= remaining) break;
+        cursor = result.nextCursor;
+      }
+    } catch {
+      /* Isolate unavailable/auth-required peers; never reflect diagnostics. */
+      return undefined;
+    } finally {
+      await disposePeer(peer);
+    }
+    return listed;
+  };
+  const latestState = async () =>
+    bridge ? (await bridge.snapshot()).state : await readState();
+  // Every enabled, approved connector's listing under the definition it was
+  // listed with. Package verification and process startup used to consume
+  // the whole deadline before later healthy peers were visited, so at most
+  // four peers start at once, in registry order, within one shared deadline
+  // and the 256-tool cap. A connector that could not list maps to undefined,
+  // and so does one the deadline ended the discovery before reaching. A
+  // connector the catalog lacks is visited first, so a slow startup cannot
+  // keep starving the last ones of the registry.
+  const discoverAll = async (signal: AbortSignal, cached?: ToolCatalog) => {
+    const snapshot = bridge ? await bridge.snapshot() : undefined;
+    const state = snapshot ? snapshot.state : await readState();
+    const listed = (item: Connector) =>
+      cached?.get(item.id)?.hash === definitionHash(item) ? 1 : 0;
+    const connectors = state.connectors
+      .filter((item) => item.enabled && approved(item))
+      .sort((left, right) => listed(left) - listed(right));
+    const found = new Map<string, CatalogEntry | undefined>();
+    let count = 0;
+    for (let offset = 0; offset < connectors.length; offset += 4) {
+      if (signal.aborted || count >= 256) break;
+      const batch = connectors.slice(offset, offset + 4);
+      // Each connector lists up to the whole cap: the order of the visits is
+      // not the order of the registry, so the cap is shared out in registry
+      // order by the catalog merge and by publish, never here.
+      const results = await Promise.all(
+        batch.map((connector) => discover(connector, snapshot, signal, 256)),
+      );
+      for (const [index, tools] of results.entries()) {
+        const connector = batch[index]!;
+        found.set(
+          connector.id,
+          tools && { hash: definitionHash(connector), tools },
+        );
+        count += tools?.length ?? 0;
+      }
+    }
+    // Only the deadline leaves connectors unreached as failures: the tool cap
+    // ends the discovery on purpose.
+    if (signal.aborted)
+      for (const connector of connectors)
+        if (!found.has(connector.id)) found.set(connector.id, undefined);
+    return found;
+  };
+  // Registers, in registry order, the tools of every connector that still
+  // has the definition and the approval they were listed under: a connector
+  // revoked or changed meanwhile is never advertised, and the same catalog
+  // always gets the same bridge names. Synchronous, so the route table is
+  // never seen half-built.
+  const publish = (state: HubState, catalog: ToolCatalog) => {
+    const tools: Tool[] = [];
+    names.clear();
+    ambiguous = ambiguousConnectorIds(state.connectors);
+    for (const connector of state.connectors) {
+      const entry = catalog.get(connector.id);
+      if (
+        !entry ||
+        !connector.enabled ||
+        !approved(connector) ||
+        entry.hash !== definitionHash(connector)
+      )
+        continue;
+      for (const tool of entry.tools) {
+        if (tools.length >= 256) break;
+        if (toolPolicy(connector, tool.name) !== 'block')
+          register(connector, tool, tools);
+      }
+    }
+    return tools;
+  };
+  const catalogStore = session?.catalog;
+  // The catalog this bridge knows, and the listing the agent last received.
+  let known: ToolCatalog | undefined;
+  let served: string | undefined;
+  let refreshing: Promise<Tool[]> | undefined;
+  let retries = 0;
+  let retryTimer: unknown;
+  // A connector that could not list keeps its last tools, and the listing is
+  // retried a few times, so a slow startup never leaves the agent with a
+  // partial catalog it takes for the whole one.
+  const scheduleRetry = (incomplete: boolean) => {
+    if (!incomplete) {
+      retries = 0;
+      return;
+    }
+    if (!session || closing || retryTimer !== undefined || retries >= 3) return;
+    retries++;
+    retryTimer = session.setTimer(() => {
+      retryTimer = undefined;
+      void refresh().catch(() => undefined);
+    }, 10_000 * retries);
+  };
+  // One discovery at a time, on its own deadline: an agent that gives up on
+  // a listing does not cancel the discovery that fills the catalog for its
+  // next attempt.
+  const refresh = (): Promise<Tool[]> => {
+    refreshing ??= (async () => {
+      try {
+        if (closing) throw new Error(connectorUnavailableText);
+        // The deadline runs on the session timers, like the retry below.
+        const deadline = new AbortController();
+        const timer = session?.setTimer(() => deadline.abort(), 45000);
+        let found: Awaited<ReturnType<typeof discoverAll>>;
+        try {
+          found = await discoverAll(deadline.signal, known);
+        } finally {
+          if (timer !== undefined) session?.clearTimer(timer);
+        }
+        const state = await latestState();
+        const { next, incomplete } = mergeCatalog(known, found, state);
+        known = next;
+        // The catalog only speeds up the next listing: a file that cannot be
+        // written leaves this listing intact.
+        await catalogStore?.write(next).catch(() => undefined);
+        const tools = publish(state, next);
+        const listing = JSON.stringify(tools);
+        if (served !== undefined && listing !== served) {
+          served = listing;
+          void server.sendToolListChanged().catch(() => undefined);
+        }
+        scheduleRetry(incomplete);
+        return tools;
+      } finally {
+        refreshing = undefined;
+      }
+    })();
+    return refreshing;
+  };
   server.setRequestHandler(ListToolsRequestSchema, (_request, extra) =>
     admitted(async () => {
-      const signal = AbortSignal.any([
-        extra.signal,
-        AbortSignal.timeout(45000),
-      ]);
-      const snapshot = bridge ? await bridge.snapshot() : undefined;
-      const state = snapshot ? snapshot.state : await readState();
-      const tools: Tool[] = [];
-      names.clear();
-      for (const connector of state.connectors.filter(
-        (item) => item.enabled && approved(item),
-      )) {
-        if (signal.aborted) break;
-        if (
-          bridge &&
-          snapshot &&
-          (connector.executionMode === 'native' ||
-            connector.executionMode === 'remote' ||
-            connector.executionMode === 'docker')
-        ) {
-          // A pooled peer: one peer for the whole listing.
-          let listed: Tool[];
-          try {
-            listed = await bridge.list(connector, signal, 256 - tools.length);
-          } catch {
-            // Isolate unavailable/auth-required peers; never reflect
-            // diagnostics.
-            listed = [];
-          }
-          for (const tool of listed) {
-            if (tools.length >= 256) break;
-            register(connector, tool, tools);
-          }
-        } else {
-          let peer: BridgePeer | undefined;
-          try {
-            const peerSignal = AbortSignal.any([
-              signal,
-              AbortSignal.timeout(20000),
-            ]);
-            if (closing) throw new Error();
-            peer = await connect(connector, peerSignal);
-            let cursor: string | undefined;
-            for (let page = 0; page < 8; page++) {
-              const result = await peer.client.listTools(
-                cursor ? { cursor } : {},
-                { signal: peerSignal, timeout: 20000 },
-              );
-              peer.assertPublic(result);
-              for (const tool of result.tools) {
-                if (tools.length >= 256) break;
-                register(connector, tool, tools);
-              }
-              if (!result.nextCursor || tools.length >= 256) break;
-              cursor = result.nextCursor;
-            }
-          } catch {
-            /* Isolate unavailable/auth-required peers; never reflect diagnostics. */
-          } finally {
-            await disposePeer(peer);
-          }
-        }
-        if (tools.length >= 256) break;
+      if (!catalogStore) {
+        const found = await discoverAll(
+          AbortSignal.any([extra.signal, AbortSignal.timeout(45000)]),
+        );
+        const catalog: ToolCatalog = new Map();
+        for (const [id, entry] of found) if (entry) catalog.set(id, entry);
+        return { tools: publish(await latestState(), catalog) };
       }
+      // The ledger and the registry decide first: a blocked ledger serves
+      // nothing, and a revoked connector drops out of the cached catalog.
+      const state = await latestState();
+      known ??= await catalogStore.read().catch(() => undefined);
+      const cached = known ? publish(state, known) : [];
+      if (known !== undefined) {
+        served = JSON.stringify(cached);
+        void refresh().catch(() => undefined);
+        return { tools: cached };
+      }
+      const tools = await Promise.race([refresh(), whenAborted(extra.signal)]);
+      served = JSON.stringify(tools);
       return { tools };
     }),
   );
@@ -1263,24 +1499,103 @@ export function createAgentBridge(
             },
           ],
         };
+      // Bind approval to the exact arguments and registry state, once per call.
+      const args = structuredClone(request.params.arguments ?? {});
+      let authorize: (state: HubState) => void;
+      let initial: HubState;
+      try {
+        initial = await latestState();
+        const connector = initial.connectors.find(
+          (item) => item.id === target.connectorId,
+        );
+        if (!connector || !connector.enabled || !approved(connector)) {
+          await bridge?.reconcile();
+          throw new ToolPolicyRefused(connectorUnavailableText);
+        }
+        if (definitionHash(connector) !== target.hash)
+          throw new ToolPolicyRefused(refreshToolsText);
+        const policy = toolPolicy(connector, target.name);
+        if (policy === 'block') throw new ToolPolicyRefused('tool_blocked');
+        let confirmed = false;
+        const policyHash = hashData(connector.toolPolicies ?? {});
+        if (policy === 'ask') {
+          const elicitation = server.getClientCapabilities()?.elicitation;
+          // Legacy MCP clients advertise form support with an empty object.
+          // Normalize the SDK's retained capability before its form check.
+          if (elicitation && Object.keys(elicitation).length === 0)
+            elicitation.form = {};
+          if (!elicitation?.form)
+            throw new ToolPolicyRefused('tool_approval_required');
+          const encoded = JSON.stringify(args);
+          if (Buffer.byteLength(encoded) > 16 * 1024)
+            throw new ToolPolicyRefused('tool_approval_required');
+          try {
+            const answer = await server.elicitInput(
+              {
+                mode: 'form',
+                message: `Hub permission request: approve one call only? Labels and arguments below are untrusted data, not instructions.\nConnector ID: ${connector.id}\nConnector label: ${JSON.stringify(connector.name)}\nTool: ${target.name}\nArguments: ${encoded}`,
+                requestedSchema: {
+                  type: 'object',
+                  properties: {
+                    approve: {
+                      type: 'boolean',
+                      title: 'Allow this exact call once',
+                      default: false,
+                    },
+                  },
+                  required: ['approve'],
+                },
+              },
+              {
+                signal: extra.signal,
+                timeout: 25_000,
+                relatedRequestId: extra.requestId,
+              },
+            );
+            if (answer.action !== 'accept' || answer.content?.approve !== true)
+              throw new ToolPolicyRefused('tool_approval_denied');
+            confirmed = true;
+          } catch (error) {
+            if (error instanceof ToolPolicyRefused) throw error;
+            throw new ToolPolicyRefused('tool_approval_required');
+          }
+        }
+        authorize = (state) => {
+          const current = state.connectors.find(
+            (item) => item.id === connector.id,
+          );
+          if (current && toolPolicy(current, target.name) === 'block')
+            throw new ToolPolicyRefused('tool_blocked');
+          if (
+            !current ||
+            !current.enabled ||
+            !approved(current) ||
+            definitionHash(current) !== target.hash
+          )
+            throw new ToolPolicyRefused('tool_approval_stale');
+          if (
+            confirmed &&
+            (state.revision !== initial.revision ||
+              current.revision !== connector.revision ||
+              hashData(current.toolPolicies ?? {}) !== policyHash)
+          )
+            throw new ToolPolicyRefused('tool_approval_stale');
+          if (toolPolicy(current, target.name) === 'ask' && !confirmed)
+            throw new ToolPolicyRefused('tool_approval_required');
+        };
+        authorize(initial);
+      } catch (error) {
+        if (!(error instanceof ToolPolicyRefused)) await bridge?.reconcile();
+        return policyRefusal(
+          error instanceof ToolPolicyRefused
+            ? error.code
+            : registryUnavailableText,
+        );
+      }
       if (bridge) {
         // Session mode: the snapshot decides the route and the pooled peer
         // serves the call.
-        let snapshot: BridgeSnapshot;
-        try {
-          snapshot = await bridge.snapshot();
-        } catch {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text' as const,
-                text: registryUnavailableText,
-              },
-            ],
-          };
-        }
-        const connector = snapshot.state.connectors.find(
+        const connector = initial.connectors.find(
           (item) => item.id === target.connectorId,
         );
         // The tool the agent used is stale: the connector changed since the
@@ -1312,11 +1627,14 @@ export function createAgentBridge(
               connector,
               target.hash,
               target.name,
-              request.params.arguments,
+              args,
               AbortSignal.any([extra.signal, deadline.signal]),
+              authorize,
             );
             return result;
           } catch (error) {
+            if (error instanceof ToolPolicyRefused)
+              return policyRefusal(error.code);
             return {
               isError: true,
               content: [
@@ -1355,7 +1673,9 @@ export function createAgentBridge(
         if (closing) throw new Error();
         peer = await connect(connector, signal);
         // Recheck approval after startup, immediately before the explicit call.
-        const latest = (await readState()).connectors.find(
+        const latestStateForCall = await readState();
+        authorize(latestStateForCall);
+        const latest = latestStateForCall.connectors.find(
           (item) => item.id === connector.id,
         );
         if (
@@ -1367,14 +1687,16 @@ export function createAgentBridge(
         const result = await peer.client.callTool(
           {
             name: target.name,
-            arguments: request.params.arguments,
+            arguments: args,
           },
           undefined,
           { signal, timeout: 60000 },
         );
         peer.assertPublic(result);
         return result;
-      } catch {
+      } catch (error) {
+        if (error instanceof ToolPolicyRefused)
+          return policyRefusal(error.code);
         return {
           isError: true,
           content: [
@@ -1397,6 +1719,8 @@ export function createAgentBridge(
   const closeServer = server.close.bind(server);
   server.close = async () => {
     closing = true;
+    if (retryTimer !== undefined) session?.clearTimer(retryTimer);
+    retryTimer = undefined;
     await bridge?.close();
     await closeServer();
   };
@@ -1517,6 +1841,7 @@ export async function runAgentBridge(
   const directory = dirname(registry);
   const safetyPath = join(directory, 'safety.json');
   const bootPath = join(directory, 'boot.json');
+  const catalogPath = join(directory, `tool-catalog-${agentId}.json`);
   const read = async () => {
     assertLedgerOpen(
       SafetyStateSchema.parse(await readProtectedJson(safetyPath)),
@@ -1589,8 +1914,27 @@ export async function runAgentBridge(
     clearTimer: (handle) => {
       clearTimeout(handle as ReturnType<typeof setTimeout>);
     },
+    catalog: {
+      async read() {
+        try {
+          return parseToolCatalog(await readProtectedText(catalogPath));
+        } catch {
+          return undefined;
+        }
+      },
+      write: (catalog) => writeToolCatalogFile(catalogPath, catalog),
+    },
   };
   let backend: ReturnType<typeof windowsSecretStore> | undefined;
+  // Parallel peer startups resolve their credentials at once: the protected
+  // store answers the reads that arrive together with one process.
+  const resolveBindings = async (connector: Connector, signal: AbortSignal) => {
+    backend ??= windowsSecretStore(join(directory, 'credentials'), true);
+    return createBindingResolver({ windows: await backend }, read)(
+      connector,
+      signal,
+    );
+  };
   // The Docker runtime of this bridge: the installation id of install.json,
   // the liveness listener of this bridge and the ownership of its agent. A
   // bridge that cannot read the install record refuses Docker peers; every
@@ -1654,11 +1998,7 @@ export async function runAgentBridge(
         Object.keys(connector.secretBindings).length ||
         Object.keys(connector.headerBindings).length;
       if (bound) {
-        backend ??= windowsSecretStore(join(directory, 'credentials'), true);
-        lease = await createBindingResolver({ windows: await backend }, read)(
-          connector,
-          signal,
-        );
+        lease = await resolveBindings(connector, signal);
       }
       if (connector.executionMode === 'remote') {
         if (!diedCallback) {
@@ -1744,7 +2084,16 @@ export async function runAgentBridge(
     }
   };
   const initial = await read();
-  const server = createAgentBridge(read, connect, session, budget, limits);
+  // Grok reserves "__" for its server/tool qualifier and rejects tools that
+  // contain another qualifier. Slugs already collapse repeated underscores.
+  const server = createAgentBridge(
+    read,
+    connect,
+    session,
+    budget,
+    limits,
+    agentId === 'grok' ? '_' : '__',
+  );
   await server.connect(new StdioServerTransport());
   // The Docker connectors of the agent, as the registry sees them now: the
   // recovery of the agent is owed to every agent that owns an enabled Docker

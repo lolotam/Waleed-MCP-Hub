@@ -165,10 +165,21 @@ export function planRegistry(input: RegistryOperation, state: HubState, targetId
         const managed = existing && existing.executionMode === 'native' && existing.package ? existing : null;
         const definition = managed ? managedDefinition(raw, managed, next) : checkedDefinition(raw, next, context, existing ?? undefined);
         if (next.connectors.some((item) => item.id !== existing?.id && (item.id === definition.id || fold(item.name) === fold(definition.name)))) conflict('Connector name or identifier already exists.');
-        const connector = ConnectorSchema.parse({ ...definition, revision: existing ? existing.revision + 1 : 1, createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp });
+        const connector = ConnectorSchema.parse({ ...definition, ...(existing?.toolPolicies ? {toolPolicies:existing.toolPolicies} : {}), revision: existing ? existing.revision + 1 : 1, createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp });
         next.connectors = next.connectors.filter((item) => item.id !== existing?.id); next.connectors.push(connector);
         connectors.add(connector.id); actualTarget = connector.id;
       }
+      break;
+    }
+    case 'set_tool_policies': {
+      const connector=requireConnector(next,input.connectorId);
+      if(connector.revision!==input.expectedConnectorRevision)conflict('Connector changed. Refresh permissions before saving.');
+      if(Object.values(input.toolPolicies).some(policy=>policy!=='allow')&&next.materializations?.some(record=>record.files.some(file=>file.name.endsWith(`-${hashData(connector.id).slice(0,16)}.json`))||next.profiles.some(profile=>profile.id===record.profileId&&profile.connectorIds.includes(connector.id))))conflict('Dematerialize direct profile snapshots before restricting tools. Tool policies require the managed agent bridge.');
+      if(hashData(connector.toolPolicies??{})===hashData(input.toolPolicies))conflict('Tool policies already have this state.');
+      connector.toolPolicies=structuredClone(input.toolPolicies);connector.updatedAt=timestamp;actualTarget=connector.id;
+      // Policies authorize bridge calls, not process startup. Keep the execution
+      // revision/hash/approval and discovery observations for the unchanged code.
+      // The bridge separately fingerprints policies and rechecks every call.
       break;
     }
     case 'set_connector_enabled': {

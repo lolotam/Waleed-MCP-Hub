@@ -1,4 +1,38 @@
 import { z } from 'zod';
+export const ToolPolicySchema = z.enum(['allow', 'ask', 'block']);
+export const ToolPolicyNameSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .refine((key) =>
+    [...key].every(
+      (char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127,
+    ),
+  )
+  .refine((key) => !['constructor', 'prototype', '__proto__'].includes(key));
+// Zod records intentionally skip __proto__; reject it on the raw object rather
+// than silently dropping a forbidden policy key during parsing.
+export const ToolPoliciesSchema = z.preprocess(
+  (value, ctx) => {
+    if (value && typeof value === 'object' && Object.hasOwn(value, '__proto__'))
+      ctx.addIssue({ code: 'custom', message: 'Forbidden tool policy key.' });
+    return value;
+  },
+  z
+    .record(ToolPolicyNameSchema, ToolPolicySchema)
+    .refine((policies) => Object.keys(policies).length <= 256),
+);
+export const ToolPoliciesUpdateSchema = z.strictObject({
+  expectedRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  expectedConnectorRevision: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER),
+  toolPolicies: ToolPoliciesSchema,
+});
+export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
+
 export const PortBindingsSchema = z
   .array(
     z.strictObject({
@@ -64,8 +98,11 @@ export const AgentChangeSchema = z.strictObject({
 export const ManualMcpSchema = z.strictObject({
   expectedRevision: z.number().int().nonnegative(),
   name: z.string().trim().min(1).max(100),
+  description: z.string().max(1000).optional(),
+  enabled: z.boolean().default(true),
   type: z.enum(['stdio', 'docker', 'streamable_http', 'sse']),
   command: z.string().max(1024).default(''),
+  containerCommand: z.array(z.string().max(4096)).max(128).default([]),
   args: z.array(z.string().max(4096)).max(128).default([]),
   image: z.string().max(256).default(''),
   url: z.string().max(2048).default(''),

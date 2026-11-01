@@ -58,6 +58,56 @@ afterEach(async () => {
 });
 
 describe('P5 protected lifecycle HTTP interface', () => {
+  it('protects automatic discovery and per-tool policy mutations', async () => {
+    const { hub, lifecycle } = await setup();
+    const headers = await login(hub);
+    for (const url of [
+      '/api/connectors/discover',
+      '/api/connectors/fixture/tool-policies',
+    ]) {
+      expect(
+        (
+          await hub.app.inject({
+            method: 'POST',
+            url,
+            headers: { host, origin },
+            payload: {},
+          })
+        ).statusCode,
+      ).not.toBe(200);
+      expect(
+        (
+          await hub.app.inject({
+            method: 'POST',
+            url,
+            headers: { host, origin, cookie: headers.cookie },
+            payload: {},
+          })
+        ).statusCode,
+      ).not.toBe(200);
+    }
+    expect(
+      (
+        await hub.app.inject({
+          method: 'POST',
+          url: '/api/connectors/discover',
+          headers,
+          payload: { execute: true },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await hub.app.inject({
+          method: 'POST',
+          url: '/api/connectors/discover',
+          headers,
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await lifecycle.inventory()).revision).toBe(0);
+  });
   it('saves no-secret imports through a separate registry preview and never executes on save/materialize', async () => {
     const { hub, lifecycle, fixture } = await setup();
     const headers = await login(hub);

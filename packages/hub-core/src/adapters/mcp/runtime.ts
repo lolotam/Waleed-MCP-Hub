@@ -49,7 +49,12 @@ export function createCapabilityRuntime(options: {
       // A managed install is verified first: when the folder is not the
       // approved one, no secret is resolved and no process is started.
       if (connector.executionMode === 'native' && connector.package)
-        await verifyPackage(connector, packagesRoot(options.workingDirectory));
+        await verifyPackage(
+          connector,
+          packagesRoot(options.workingDirectory),
+          signal,
+        );
+      signal.throwIfAborted();
       const bound =
         Object.keys(connector.secretBindings).length ||
         Object.keys(connector.headerBindings).length;

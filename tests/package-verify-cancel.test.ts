@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BigIntStats } from 'node:fs';
 import type { Connector, PackageProvenance } from '@waleed/contracts';
 import {
   installDirectory,
@@ -21,9 +22,19 @@ type NativeConnector = Extract<Connector, { executionMode: 'native' }>;
 const plan = vi.hoisted(() => ({
   opened: 0,
   closed: 0,
+  peak: 0,
   abortOnOpen: undefined as undefined | number,
   abortOnPath: undefined as undefined | string,
   controller: undefined as undefined | AbortController,
+  replacement: undefined as undefined | { path: string; hardlink: boolean },
+  wideTree: undefined as undefined | string,
+  wideInfo: undefined as undefined | BigIntStats,
+  statActive: 0,
+  statPeak: 0,
+  countedEntries: 0,
+  statCounts: new Map<string, number>(),
+  abortOnStat: undefined as
+    undefined | { path: string; nth: number; controller: AbortController },
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -36,6 +47,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ) => {
       const stream = actual.createReadStream(path, options);
       plan.opened += 1;
+      plan.peak = Math.max(plan.peak, plan.opened - plan.closed);
       stream.on('close', () => {
         plan.closed += 1;
       });
@@ -47,14 +59,72 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    async open(...args: Parameters<typeof actual.open>) {
+      if (plan.replacement && args[0] === plan.replacement.path) {
+        const replacement = plan.replacement;
+        plan.replacement = undefined;
+        await actual.rename(replacement.path, `${replacement.path}.original`);
+        if (replacement.hardlink)
+          await actual.link(`${replacement.path}.original`, replacement.path);
+        else await actual.writeFile(replacement.path, 'evil');
+      }
+      return actual.open(...args);
+    },
+    async lstat(...args: Parameters<typeof actual.lstat>) {
+      plan.statPeak = Math.max(plan.statPeak, ++plan.statActive);
+      try {
+        await Promise.resolve();
+        if (plan.wideTree && /entry-[0-9]+$/.test(String(args[0]))) {
+          plan.countedEntries++;
+          return plan.wideInfo!;
+        }
+        const info = await actual.lstat(...args);
+        const key = String(args[0]);
+        const count = (plan.statCounts.get(key) ?? 0) + 1;
+        plan.statCounts.set(key, count);
+        if (plan.abortOnStat?.path === key && plan.abortOnStat.nth === count)
+          plan.abortOnStat.controller.abort();
+        return info;
+      } finally {
+        plan.statActive--;
+      }
+    },
+    async opendir(...args: Parameters<typeof actual.opendir>) {
+      if (args[0] === plan.wideTree) {
+        plan.wideInfo = await actual.lstat(plan.wideTree!, { bigint: true });
+        return {
+          async *[Symbol.asyncIterator]() {
+            for (let index = 0; index < 50_001; index++)
+              yield { name: `entry-${index}` };
+          },
+        };
+      }
+      return actual.opendir(...args);
+    },
+  };
+});
+
 const tempDirs: string[] = [];
 
 afterEach(async () => {
   plan.opened = 0;
   plan.closed = 0;
+  plan.peak = 0;
   plan.abortOnOpen = undefined;
   plan.abortOnPath = undefined;
   plan.controller = undefined;
+  plan.replacement = undefined;
+  plan.wideTree = undefined;
+  plan.statCounts.clear();
+  plan.abortOnStat = undefined;
+  plan.wideInfo = undefined;
+  plan.statActive = 0;
+  plan.statPeak = 0;
+  plan.countedEntries = 0;
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir)
@@ -199,3 +269,83 @@ describe('cancellable package verification', () => {
     expect(plan.closed).toBe(plan.opened);
   });
 });
+
+describe('package manifest walk', () => {
+  const sha256 = (value: string) =>
+    createHash('sha256').update(value).digest('hex');
+
+  it('rejects when the signal aborts during the stat that confirms the last directory', async () => {
+    const tree = await createTempDir();
+    const directory = join(tree, 'only');
+    await mkdir(directory);
+    await writeFile(join(directory, 'a.txt'), 'x');
+    // A dry run counts the stats of the directory; the real run aborts as the
+    // last of them completes, whatever the walk did before.
+    await buildManifest(tree);
+    const last = plan.statCounts.get(directory)!;
+    plan.statCounts.clear();
+    const controller = new AbortController();
+    plan.abortOnStat = { path: directory, nth: last, controller };
+
+    await expect(buildManifest(tree, controller.signal)).rejects.toMatchObject({
+      reason: 'cancelled',
+    });
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it('hashes the documented manifest of nested, empty and non-ASCII files', async () => {
+    const tree = await createTempDir();
+    await mkdir(join(tree, 'nested', 'deeper'), { recursive: true });
+    await mkdir(join(tree, 'نص'));
+    await writeFile(join(tree, 'a.txt'), 'alpha');
+    await writeFile(join(tree, 'nested', 'deeper', 'b.js'), '');
+    await writeFile(join(tree, 'نص', 'ج.txt'), 'مرحبا');
+    const lines = [
+      `a.txt\0${5}\0${sha256('alpha')}`,
+      `nested/deeper/b.js\0${0}\0${sha256('')}`,
+      `نص/ج.txt\0${Buffer.byteLength('مرحبا')}\0${sha256('مرحبا')}`,
+    ].sort();
+
+    await expect(buildManifest(tree)).resolves.toEqual({
+      hash: sha256(lines.join('\n')),
+      files: 3,
+      bytes: 5 + Buffer.byteLength('مرحبا'),
+    });
+  });
+
+  // Regression 2026-10-31: hashing one file at a time took ~5.5 s per
+  // 13,584-file ssh-mcp install, so seven peers made the first agent
+  // tools/list take 21-30 s and Claude Code timed out.
+  it('hashes install files concurrently and closes every stream', async () => {
+    const tree = await createTempDir();
+    for (let index = 0; index < 24; index++)
+      await writeFile(join(tree, `file-${index}.txt`), `content ${index}`);
+
+    await buildManifest(tree);
+
+    expect(plan.peak).toBeGreaterThan(1);
+    expect(plan.closed).toBe(plan.opened);
+  });
+});
+
+for (const hardlink of [false, true])
+  it(`rejects a file replaced between enumeration and hashing (hardlink=${hardlink})`, async () => {
+    const tree = await createTempDir();
+    const path = join(tree, 'entry.txt');
+    await writeFile(path, 'safe');
+    plan.replacement = { path, hardlink };
+    await expect(buildManifest(tree)).rejects.toMatchObject({
+      reason: 'package_modified',
+    });
+    expect(plan.opened).toBe(0);
+  });
+it('caps streamed directories before scheduling an unbounded stat fan-out', async () => {
+  const tree = await createTempDir();
+  plan.wideTree = tree;
+  await expect(buildManifest(tree)).rejects.toMatchObject({
+    reason: 'package_modified',
+  });
+  expect(plan.countedEntries).toBe(50_000);
+  expect(plan.statPeak).toBe(1);
+  expect(plan.opened).toBe(0);
+}, 20_000);

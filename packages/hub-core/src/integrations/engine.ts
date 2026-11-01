@@ -260,9 +260,16 @@ export function createIntegrationEngine(
         if (actual !== stateHash(next)) {
           let unchanged = false;
           try {
+            // Agents rewrite their own configuration at any time (Claude Code
+            // does so every few minutes), so the hub's edit is judged by the
+            // managed entry alone: an unrelated rewrite racing the replace
+            // left nothing of the hub's in the file. An unparseable file
+            // fails closed.
+            const managed = (value: string | null) =>
+              hashData(managedEntry(value, target.format) ?? null);
             unchanged =
-              (await options.files.read(current.configPath)) === text &&
-              actual === stateHash(before);
+              managed(await options.files.read(current.configPath)) ===
+                managed(text) && actual === stateHash(before);
           } catch {
             /* fail closed */
           }

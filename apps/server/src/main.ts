@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -12,6 +13,7 @@ import {
   localRuntimeAdapters,
   ensureInstallRecord,
   writeBootRecord,
+  createUpdateChecker,
 } from '@waleed/hub-core';
 import { createHubServer } from './app.js';
 
@@ -108,6 +110,16 @@ async function main() {
         ),
       ),
       webRoot,
+      updates: createUpdateChecker(
+        (
+          JSON.parse(
+            await readFile(
+              new URL('../../../package.json', import.meta.url),
+              'utf8',
+            ),
+          ) as { version: string }
+        ).version,
+      ),
       ...(process.env.HUB_DESKTOP === '1'
         ? {
             shutdown: () => {

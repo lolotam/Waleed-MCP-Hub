@@ -14,7 +14,9 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
   const observations = new Map<string, CapabilityObservation>();
   const jobs = new Map<string, { owner: string; job: RuntimeJob; controller: AbortController; task: Promise<void> }>();
   let closed = false, starting = false;
-  return {
+  let automatic: Promise<void> | undefined;
+  let admission: Promise<void> | undefined;
+  const checks = {
     async observations() {
       const state = await store.read();
       return state.connectors.map((connector) => { const observed = observations.get(connector.id); return observed?.revision === connector.revision && observed.definitionHash === definitionHash(connector) ? structuredClone(observed) : untested(connector); });
@@ -22,8 +24,11 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
     async start(id: string, owner: string) {
       if (closed || !runtime) throw new HubError('unavailable', 'No verified runtime adapter is configured.');
       if (starting) throw new HubError('busy', 'Another check is being admitted.'); starting = true;
+      let admitted!: () => void;
+      admission = new Promise<void>((resolve) => { admitted = resolve; });
       try {
         await safety.assertWritable(); const state = await store.read(); const connector = structuredClone(requireConnector(state, id));
+        if (closed) throw new HubError('unavailable', 'Runtime checks are closed.');
         if (!connector.enabled || !approved(connector)) throw new HubError('conflict', 'Approve the current enabled definition before starting it.');
         if (!secretSupport && (Object.keys(connector.secretBindings).length || Object.keys(connector.headerBindings).length)) throw new HubError('unavailable', 'A protected secret backend is required.');
         const active = [...jobs.values()].filter((entry) => !entry.job.completedAt);
@@ -36,12 +41,14 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
         if (connector.executionMode === 'docker') {
           await safety.prepare({ id: job.id, operation: 'check_connector', targetId: id, expectedRevision: state.revision, beforeHash: stateHash(state), afterHash: hashData({ jobId: job.id, cleanup: 'owned_container_label' }), phase: 'prepared', reason: 'none', createdAt: job.createdAt, updatedAt: job.createdAt, external: true }); prepared = true;
         }
+        if (closed) controller.abort();
         observations.set(id, observed);
         const timer = setTimeout(() => { job.reason = 'timed_out'; controller.abort(); }, 20_000);
         const task = Promise.resolve().then(async () => {
           let result: CapabilityObservation = { ...observed };
           let uncertain = false;
           try {
+            controller.signal.throwIfAborted();
             const discovered = await runtime.discover(connector, controller.signal);
             if (controller.signal.aborted) throw new RuntimeFault(job.reason === 'timed_out' ? 'timed_out' : 'cancelled');
             result = { ...untested(connector), ...discovered, state: 'connected', checkedAt: new Date(now()).toISOString(), method: 'mcp_discovery', reason: 'none' }; job.state = 'succeeded';
@@ -63,12 +70,57 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
           }
         });
         jobs.set(job.id, { job, owner, controller, task }); return structuredClone(job);
-      } finally { starting = false; }
+      } finally { starting = false; admitted(); admission = undefined; }
     },
+    async discoverApproved(owner: string): Promise<void> {
+      if (closed || !runtime) throw new HubError('unavailable', 'No verified runtime adapter is configured.');
+      await safety.assertWritable();
+      if (automatic || closed) return;
+      // Reuse the same admission, deadlines, cleanup and two-job limit as a
+      // manual check. Re-read desired state between jobs so edits and revocation
+      // win over queued work. A failed check is not retried on every UI poll.
+      automatic = (async () => {
+        while (!closed) {
+          const state = await store.read();
+          const candidates = state.connectors.filter((connector) => {
+            if (!connector.enabled || !approved(connector)) return false;
+            const observed = observations.get(connector.id);
+            return !observed || observed.revision !== connector.revision || observed.definitionHash !== definitionHash(connector);
+          });
+          let retryAdmission = false;
+          for (const connector of candidates) {
+            if (closed || [...jobs.values()].filter((entry) => !entry.job.completedAt).length >= 2) break;
+            if (!secretSupport && (Object.keys(connector.secretBindings).length || Object.keys(connector.headerBindings).length)) {
+              observations.set(connector.id, { ...untested(connector), state: 'unsupported', reason: 'secrets_pending' });
+              continue;
+            }
+            const inFlight = [...jobs.values()].filter((entry) => !entry.job.completedAt);
+            try { await checks.start(connector.id, owner); }
+            catch (error) {
+              // A Docker discovery owns a prepared safety operation until its
+              // cleanup finishes. Wait for active checks before admitting more;
+              // an unrelated recovery block with no active checks still pauses.
+              if (error instanceof HubError && (error.code === 'busy' || error.code === 'conflict') && inFlight.length) {
+                await Promise.race(inFlight.map((entry) => entry.task));
+                retryAdmission = true;
+                break;
+              }
+              throw error;
+            }
+          }
+          if (retryAdmission) continue;
+          const running = [...jobs.values()].filter((entry) => !entry.job.completedAt);
+          if (!running.length) break;
+          await Promise.race(running.map((entry) => entry.task));
+        }
+      })().catch(() => { /* Recovery or shutdown pauses automatic discovery. */ }).finally(() => { automatic = undefined; });
+    },
+    discovering() { return !!automatic || [...jobs.values()].some((entry) => !entry.job.completedAt); },
     job(id: string, owner: string) { const entry = jobs.get(id); if (!entry || entry.owner !== owner) throw new HubError('not_found', 'Check job not found.'); return structuredClone(entry.job); },
     cancel(id: string, owner: string) { const entry = jobs.get(id); if (!entry || entry.owner !== owner) throw new HubError('not_found', 'Check job not found.'); if (!entry.job.completedAt) entry.controller.abort(); return structuredClone(entry.job); },
     invalidate(ids: string[]) { ids.forEach((id) => { observations.delete(id); for (const entry of jobs.values()) if (entry.job.connectorId === id && !entry.job.completedAt) entry.controller.abort(); }); },
     async drain() { await Promise.all([...jobs.values()].map((entry) => entry.task)); },
-    async close() { closed = true; for (const entry of jobs.values()) if (!entry.job.completedAt) entry.controller.abort(); await Promise.all([...jobs.values()].map((entry) => entry.task)); },
+    async close() { closed = true; await admission; for (const entry of jobs.values()) if (!entry.job.completedAt) entry.controller.abort(); await Promise.all([...jobs.values()].map((entry) => entry.task)); await automatic; },
   };
+  return checks;
 }

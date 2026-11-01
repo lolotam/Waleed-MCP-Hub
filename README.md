@@ -83,16 +83,27 @@ backend restarts are intentionally not enabled yet.
   and separate execution consent; partial saves return a connector ID to inspect.
 - Portable-folder desktop packaging, Windows launchers and opt-in shortcut installer.
 
-Opening the manager does **not** inspect agent configs or run dependency probes.
-Choose **Discover environment** to start a bounded read-only job; cancellation and
-progress are available. **Refresh** reloads the last observations without starting
-another scan. The preview shows saved definitions/pointers, not live MCP health.
+On first authenticated opening, **Copy MCPs from your agents** scans known supported
+user configuration files. Select source agents and individual MCPs, review their
+definitions, and choose **Clone and connect**. Available credentials are copied through
+the protected Hub store; values never appear in the browser. Source files stay
+unchanged. Existing names require a different destination name. Disabled source
+entries remain disabled. Missing credentials and failed connections remain repairable
+in Connectors. Unsupported definitions are listed for manual setup. Package-based
+`npx` entries require resolved package/command review and warning acknowledgement.
+Dismiss or finish the first-run panel to stop automatic rescanning on later openings;
+**Scan agents** is always available. Only this nonsecret preference uses browser storage.
+
+**Discover environment** remains a separate bounded read-only Docker/pilot survey;
+**Refresh** reloads its observations. Neither scan launches connector commands or calls
+tools. MCP discovery after copying is a separate automatic approved-definition check.
 No agent/connector command, gateway, image pull, package install, or upstream tool
-is launched by environment discovery. Adoption and startup registration remain
-disabled/unimplemented. Agent integration is a separate explicit action.
+is launched by environment discovery. Pilot adoption and startup registration remain
+disabled/unimplemented. Agent integration is a separate explicit action in Agents.
 Protected credential writes and supported
-OAuth are separate explicit actions. Explicit
-**Test capabilities** is a different action that can start an approved connector.
+OAuth are separate explicit actions. Opening the connector list automatically
+discovers capabilities for enabled, approved definitions. **Test capabilities**
+remains available for explicit retries.
 
 Versions come from installed package manifests where safely available; native or
 wrapper versions without safe metadata remain unknown. P7 supports documented current
@@ -145,8 +156,9 @@ or secret, updates Docker/agent files, approves execution, or fixes upstream aut
    separate registry preview. Private import values stay memory-only; save a
    value-free definition, then enter credentials in **Authentication**.
 2. Review the exact executable/image/endpoint and **Approve execution**. Edits and
-   toggles invalidate approval; approval never starts the connector.
-3. **Test capabilities** performs real MCP initialize and tools/resources/prompts
+   toggles invalidate approval. While the connector list is open, approval makes
+   enabled connectors eligible for automatic capability discovery.
+3. Automatic discovery (or **Test capabilities** for a retry) performs real MCP initialize and tools/resources/prompts
    listing, never `tools/call`, resource reads or prompt execution. Results show
    timestamps, protocol, verification level and per-connector failure status.
 4. Create a profile and **Edit membership** using connector IDs. **Apply profile**
@@ -435,3 +447,31 @@ external operational state; they cannot safely all be moved into the source tree
 
 Never copy real API keys, SSH passwords, personal configuration inventories,
 OAuth credentials, logs, or backups into version control.
+
+### Per-tool permissions
+
+Open a connector and expand **Tools & Permissions**. **Full permission** is the
+default; **Always ask** requires one-time MCP form elicitation approval for the
+exact arguments; clients without that capability are refused. **Closed** hides
+the tool from the managed bridge catalog and rejects stale calls. Calls recheck
+permissions after startup and queue waits. A CLI may impose additional approvals.
+Permission changes preserve execution approval and capability observations.
+Restricted tools cannot be exported as direct profile snapshots; dematerialize
+existing snapshots first and use the managed agent bridge.
+
+## GitHub releases and update notices
+
+Successful main-branch CI and Security workflows automatically publish a stable patch
+release for that verified commit. PR/fork/scheduled/failed runs cannot publish. The
+release job skips superseded heads and completed commits, builds the Windows x64
+installer with its release version, verifies the installer checksum, uploads the
+installer, SHA256SUMS.txt and release.json to an owned draft, then publishes it.
+A failed upload leaves a draft that a later successful run can resume. The first
+release advances the root package version by one patch; later releases advance the
+highest root/published stable version. Published commits are not released twice.
+
+The desktop app checks the fixed public GitHub repository on opening and hourly while
+open, with a cached manual Check updates action. Newer stable releases show version,
+download and release-note links. Checks send no Hub credentials and accept only
+links belonging to this repository. Network/rate/metadata failures do not block local
+MCP management. Downloading, running the installer and restarting remain user actions.

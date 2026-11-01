@@ -130,6 +130,12 @@ describe('real bounded MCP HTTP/SSE discovery', () => {
     'fd00::1',
     '::ffff:127.0.0.1',
     '2001:db8::1',
+    '2001::1',
+    '2001:0000::1',
+    '2001:2::1',
+    '2001:10::1',
+    '2001:20::1',
+    '2001:01ff:ffff::1',
     '2002:7f00:1::1',
     '3ffe::1',
     '3fff::1',
@@ -140,6 +146,9 @@ describe('real bounded MCP HTTP/SSE discovery', () => {
   it('accepts public addresses without weakening TLS or following redirects', () => {
     expect(publicAddress('8.8.8.8')).toBe(true);
     expect(publicAddress('2606:4700:4700::1111')).toBe(true);
+    expect(publicAddress('2001:4860:4843:400::')).toBe(true);
+    expect(publicAddress('2001:4860:4860::8888')).toBe(true);
+    expect(publicAddress('2001:200::1')).toBe(true);
   });
 });
 

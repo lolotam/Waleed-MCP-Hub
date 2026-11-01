@@ -18,6 +18,8 @@ import { latestRunner, untilAborted } from './latest.js';
 import { Icon } from './Icon.js';
 import { ProfileDialog } from './ProfileDialog.js';
 import { DiscoveryPanel } from './DiscoveryPanel.js';
+import { AgentCloning } from './AgentCloning.js';
+import { UpdateNotice } from './UpdateNotice.js';
 import { ImportDialog } from './ImportDialog.js';
 import {
   OperationDialog,
@@ -310,6 +312,13 @@ export function App() {
             </div>
             <span className="read-only-tag">Explicit actions only</span>
           </div>
+          {bootstrap?.capabilities.agentCloning && (
+            <AgentCloning
+              disabled={loading || !!error || recoveryBlocked}
+              refresh={refresh}
+              openManual={() => setManual(true)}
+            />
+          )}
           {error ? (
             <section className="error-panel" role="alert">
               <h2>Unable to load this workspace</h2>
@@ -328,6 +337,7 @@ export function App() {
             </div>
           ) : (
             <>
+              {bootstrap?.capabilities.appUpdates && <UpdateNotice />}
               {bootstrap?.capabilities.discovery && (
                 <DiscoveryPanel
                   snapshot={discovery}
@@ -369,7 +379,9 @@ export function App() {
                   {connectors.length ? (
                     <ConnectorList
                       connectors={connectors}
+                      revision={bootstrap?.revision ?? 0}
                       observations={observations}
+                      observe={setObservations}
                       profiles={profiles}
                       disabled={recoveryBlocked}
                       runtime={!!bootstrap?.capabilities.runtimeChecks}

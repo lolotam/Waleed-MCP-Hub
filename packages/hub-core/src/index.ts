@@ -46,6 +46,11 @@ export {
   type CapabilityRuntime,
 } from './runtime/capabilities.js';
 export { localRuntimeAdapters } from './adapters/local-runtime.js';
+export { createUpdateChecker, type UpdateChecker } from './updates.js';
+export {
+  createAgentCloning,
+  type AgentCloning,
+} from './integrations/cloning.js';
 export { windowsAgentTargets } from './integrations/targets.js';
 export { agentFiles } from './integrations/files.js';
 export {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ToolPoliciesUpdateSchema } from './integrations.js';
 import { ImportDefinitionSchema } from './imports.js';
 
 export const LifecycleKindSchema = z.enum([
@@ -20,6 +21,7 @@ export const LifecycleKindSchema = z.enum([
   'remove_connector',
   'set_connector_enabled',
   'approve_connector',
+  'set_tool_policies',
   'materialize_profile',
   'dematerialize_profile',
 ]);
@@ -36,6 +38,10 @@ const ids = z
   .refine((items) => new Set(items).size === items.length);
 const base = { expectedRevision: Revision };
 export const RegistryOperationSchema = z.discriminatedUnion('kind', [
+  ToolPoliciesUpdateSchema.extend({
+    kind: z.literal('set_tool_policies'),
+    connectorId: Id,
+  }),
   z.strictObject({
     ...base,
     kind: z.literal('create_profile'),

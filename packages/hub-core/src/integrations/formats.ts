@@ -59,6 +59,45 @@ export function managedEntry(
   }
   return value;
 }
+
+// Source MCP extraction shares the strict parser used for owned edits. No
+// project search, executable config or credential-cache loading occurs here.
+export function agentServers(
+  text: string,
+  format: AgentFormat,
+): Record<string, unknown> {
+  const root = document(text.replace(/^\uFEFF/, ''), format);
+  const mcp = object(root.mcp);
+  const nestedServers = object(mcp?.servers);
+  // A direct server named "servers" must not hide its siblings. The optional
+  // wrapper contains server records, rather than a server's own fields: a
+  // server always has a string or list `command` or `url`. A malformed record
+  // inside the wrapper is rejected on its own and never hides its siblings.
+  const wrappedServers =
+    nestedServers &&
+    Object.keys(mcp!).length === 1 &&
+    !['command', 'url'].some(
+      (field) =>
+        typeof nestedServers[field] === 'string' ||
+        Array.isArray(nestedServers[field]),
+    );
+  const map =
+    format === 'codex'
+      ? root.mcp_servers
+      : format === 'vscode'
+        ? root.servers
+        : format === 'opencode'
+          ? wrappedServers
+            ? nestedServers
+            : root.mcp
+          : format === 'kilo'
+            ? root.mcp
+            : root.mcpServers;
+  if (map === undefined) return {};
+  const result = object(map);
+  if (!result) throw conflict();
+  return result;
+}
 export function agentEntry(
   format: AgentFormat,
   node: string,

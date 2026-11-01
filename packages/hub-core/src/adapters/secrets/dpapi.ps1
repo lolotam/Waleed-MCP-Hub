@@ -30,18 +30,38 @@ try {
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($system, $rights, $inherit, $propagate, $allow)))
         [IO.Directory]::SetAccessControl($path, $acl)
         [Console]::Out.Write('ok')
-    } else {
+    } elseif ($inputData.action -eq 'unprotect_many') {
+        # One line per item, in order; an empty line for an item DPAPI refuses,
+        # so one bad credential never fails the reads batched with it.
+        $items = @($inputData.items)
+        if ($items.Count -lt 1 -or $items.Count -gt 64) { throw 'invalid' }
+        $scope = [Security.Cryptography.DataProtectionScope]::CurrentUser
+        $lines = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($item in $items) {
+            try {
+                $bytes = [Convert]::FromBase64String([string]$item.data)
+                $entropy = [Convert]::FromBase64String([string]$item.entropy)
+                if ($bytes.Length -gt 32768 -or $entropy.Length -ne 32) { throw 'invalid' }
+                $result = [Security.Cryptography.ProtectedData]::Unprotect($bytes, $entropy, $scope)
+                $lines.Add([Convert]::ToBase64String($result))
+            } catch {
+                $lines.Add('')
+            } finally {
+                if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+                if ($entropy) { [Array]::Clear($entropy, 0, $entropy.Length) }
+                if ($result) { [Array]::Clear($result, 0, $result.Length) }
+                $bytes = $null; $entropy = $null; $result = $null
+            }
+        }
+        [Console]::Out.Write(($lines -join "`n"))
+    } elseif ($inputData.action -eq 'protect') {
         $bytes = [Convert]::FromBase64String([string]$inputData.data)
         $entropy = [Convert]::FromBase64String([string]$inputData.entropy)
         if ($bytes.Length -gt 32768 -or $entropy.Length -ne 32) { throw 'invalid' }
         $scope = [Security.Cryptography.DataProtectionScope]::CurrentUser
-        if ($inputData.action -eq 'protect') {
-            $result = [Security.Cryptography.ProtectedData]::Protect($bytes, $entropy, $scope)
-        } elseif ($inputData.action -eq 'unprotect') {
-            $result = [Security.Cryptography.ProtectedData]::Unprotect($bytes, $entropy, $scope)
-        } else { throw 'invalid' }
+        $result = [Security.Cryptography.ProtectedData]::Protect($bytes, $entropy, $scope)
         [Console]::Out.Write([Convert]::ToBase64String($result))
-    }
+    } else { throw 'invalid' }
 } catch {
     # Never print DPAPI/provider exceptions or input/ciphertext/plaintext.
     [Console]::Error.Write('Protected credential operation unavailable.')
