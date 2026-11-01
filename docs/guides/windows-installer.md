@@ -4,8 +4,8 @@
 Desktop and Start menu shortcuts, and opens the app. Share this single file;
 recipients do not need the source repository, Git, Node.js, npm, or a compiler.
 
-Supported target: Windows 10/11 x64 with Microsoft Edge. The installer includes
-Node.js 24, the built web/server applications, all production dependencies, and
+Supported target: Windows 10 build 17763 or later / Windows 11 x64 with Microsoft
+Edge. The installer includes Node.js 24, the built web/server applications, all production dependencies, and
 the Hub's managed npm installer. Installation works offline. Adding a new managed
 npm connector later requires access to the npm registry. Docker connectors also
 require Docker Desktop; Docker and agent CLIs are separate applications.

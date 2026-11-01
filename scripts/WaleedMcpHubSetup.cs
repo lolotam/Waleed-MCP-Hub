@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Windows.Forms;
@@ -13,6 +14,23 @@ namespace WaleedMcpHub
 {
     internal static class Setup
     {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WindowsVersion
+        {
+            internal int Size, Major, Minor, Build, Platform;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] internal string ServicePack;
+        }
+
+        [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
+        private static extern int RtlGetVersion(ref WindowsVersion version);
+
+        private static void SupportedWindows()
+        {
+            WindowsVersion version = new WindowsVersion { Size = Marshal.SizeOf(typeof(WindowsVersion)) };
+            if (!Environment.Is64BitOperatingSystem || RtlGetVersion(ref version) != 0 || version.Major < 10 || version.Build < 17763)
+                throw new IOException("Windows 10 build 17763 or later / Windows 11 x64 is required.");
+        }
+
         private static string Hash(Stream stream)
         {
             using (SHA256 sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
@@ -73,31 +91,42 @@ namespace WaleedMcpHub
                     if (Directory.Exists(target))
                     {
                         if (Matches(target, archive)) return target;
+                        foreach (string previous in Directory.GetDirectories(root, Path.GetFileName(target) + "-repair-*"))
+                            if (Matches(previous, archive)) return previous;
                         // Repair into a new folder; running installations and
                         // previous connector pointers remain available.
                         target += "-repair-" + Guid.NewGuid().ToString("N");
                     }
                     string staging = Path.Combine(root, ".staging-" + Guid.NewGuid().ToString("N"));
                     Directory.CreateDirectory(staging);
-                    HashSet<string> paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    int index = 0;
-                    foreach (ZipArchiveEntry entry in archive.Entries)
+                    try
                     {
-                        string path = EntryPath(staging, entry);
-                        if (!paths.Add(path)) throw new IOException("Duplicate application archive entry.");
-                        if (entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\")) Directory.CreateDirectory(path);
-                        else
+                        HashSet<string> paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        int index = 0;
+                        foreach (ZipArchiveEntry entry in archive.Entries)
                         {
-                            Directory.CreateDirectory(Path.GetDirectoryName(path));
-                            using (Stream source = entry.Open())
-                            using (Stream destination = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)) source.CopyTo(destination);
+                            string path = EntryPath(staging, entry);
+                            if (!paths.Add(path)) throw new IOException("Duplicate application archive entry.");
+                            if (entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\")) Directory.CreateDirectory(path);
+                            else
+                            {
+                                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                                using (Stream source = entry.Open())
+                                using (Stream destination = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)) source.CopyTo(destination);
+                            }
+                            progress(++index, archive.Entries.Count);
                         }
-                        progress(++index, archive.Entries.Count);
+                        foreach (string required in new string[] { "WaleedMcpHub.exe", "runtime/node.exe", "apps/server/dist/main.js", "apps/web/dist/index.html", "node_modules/npm/package.json" })
+                            if (!File.Exists(Path.Combine(staging, required))) throw new IOException("A required application package is missing.");
+                        LocalDirectory(root);
+                        Directory.Move(staging, target);
                     }
-                    foreach (string required in new string[] { "WaleedMcpHub.exe", "runtime/node.exe", "apps/server/dist/main.js", "apps/web/dist/index.html", "node_modules/npm/package.json" })
-                        if (!File.Exists(Path.Combine(staging, required))) throw new IOException("A required application package is missing.");
-                    LocalDirectory(root);
-                    Directory.Move(staging, target);
+                    catch
+                    {
+                        // Only remove the unique staging directory allocated by this invocation.
+                        try { LocalDirectory(staging); if (Directory.Exists(staging)) Directory.Delete(staging, true); } catch { }
+                        throw;
+                    }
                     return target;
                 }
             }
@@ -115,7 +144,7 @@ namespace WaleedMcpHub
             if (File.Exists(path))
             {
                 string existing = linkType.InvokeMember("TargetPath", BindingFlags.GetProperty, null, link, null) as string;
-                if (String.IsNullOrEmpty(existing) || !Path.GetFullPath(existing).StartsWith(installationRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
+                if (String.IsNullOrEmpty(existing) || !Path.GetFullPath(existing).StartsWith(installationRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
             }
             linkType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, link, new object[] { executable });
             linkType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, link, new object[] { Path.GetDirectoryName(executable) });
@@ -139,9 +168,10 @@ namespace WaleedMcpHub
             Form window = null;
             try
             {
-                if (!Environment.Is64BitOperatingSystem) throw new IOException("Windows 10/11 x64 is required.");
+                SupportedWindows();
                 LocalDirectory(root);
-                root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+                root = Path.GetFullPath(root);
+                if (root.Length > Path.GetPathRoot(root).Length) root = root.TrimEnd(Path.DirectorySeparatorChar);
                 string sid = System.Security.Principal.WindowsIdentity.GetCurrent().User.Value;
                 using (Mutex mutex = new Mutex(false, @"Local\WaleedMcpHubSetup-" + sid))
                 {

@@ -222,9 +222,11 @@ export function createAgentCloning(
         );
       return candidate;
     });
-  const approve = async (id: string, owner: string) => {
+  const approve = async (id: string, owner: string, signal: AbortSignal) => {
+    signal.throwIfAborted();
     const state = await host.inventory(),
       connector = state.connectors.find((item) => item.id === id)!;
+    signal.throwIfAborted();
     const preview = await host.preview(
       {
         kind: 'approve_connector',
@@ -236,6 +238,7 @@ export function createAgentCloning(
       },
       owner,
     );
+    signal.throwIfAborted();
     const job = await host.apply(preview.id, owner);
     while (['queued', 'running'].includes(host.job(job.id, owner).state))
       await wait();
@@ -339,9 +342,13 @@ export function createAgentCloning(
               const source = object(raw);
               if (
                 source &&
-                JSON.stringify([source.command, source.args]).includes(
-                  adapters.registry,
-                )
+                [source.command, source.args]
+                  .flat()
+                  .some(
+                    (value) =>
+                      typeof value === 'string' &&
+                      value.includes(adapters.registry),
+                  )
               )
                 continue;
               if (record.view.candidates.length >= 256) {
@@ -700,7 +707,9 @@ export function createAgentCloning(
                 'Imported settings were not saved.',
               );
           }
-          if (candidate.enabled) await approve(connectorId, record.owner);
+          record.controller.signal.throwIfAborted();
+          if (candidate.enabled)
+            await approve(connectorId, record.owner, record.controller.signal);
         } else {
           const definition = candidate.definition!;
           let command =

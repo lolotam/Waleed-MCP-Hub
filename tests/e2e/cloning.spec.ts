@@ -23,12 +23,25 @@ test.beforeEach(async ({ page }) => {
   await page.goto(launch);
 });
 test.afterEach(async () => {
-  if (server?.connected) {
+  if (server && server.exitCode === null && server.signalCode === null) {
     const exited = new Promise<void>((resolve) =>
       server.once('exit', () => resolve()),
     );
-    server.send('shutdown');
-    await exited;
+    if (server.connected) server.send('shutdown', () => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        exited,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            server.kill();
+            resolve();
+          }, 3000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 });
 test('first opening scans agents, clones only the selection with credentials and shows tools and release notification', async ({
@@ -101,5 +114,34 @@ test('a copied connector with missing authentication remains available for repai
     await page.request.get('http://127.0.0.1:4198/api/fixture-report')
   ).json();
   expect(report.names).toEqual(['needs_auth']);
+  expect(report.sourceUnchanged).toBe(true);
+});
+
+test('a saved copy reports an inventory refresh failure without suggesting another copy', async ({
+  page,
+}) => {
+  await expect(
+    page.getByText('Claude Code · 1 MCPs · found', { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByLabel('Copy primary from Claude Code', { exact: true })
+    .check();
+  await page.getByLabel(/I reviewed the selected commands/).check();
+  await page.route('**/api/connectors', (route) =>
+    route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }),
+  );
+  await page
+    .getByRole('button', { name: 'Clone and connect (1)', exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      'Copies saved, but inventory refresh failed. Refresh inventory before making another change.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  const report = await (
+    await page.request.get('http://127.0.0.1:4198/api/fixture-report')
+  ).json();
+  expect(report.names).toEqual(['primary']);
   expect(report.sourceUnchanged).toBe(true);
 });

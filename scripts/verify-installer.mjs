@@ -63,6 +63,12 @@ assert.equal(
   'Repair publishes a fresh build without overwriting a running installation.',
 );
 assert.ok(folders.some((name) => name.includes('-repair-')));
+await install();
+assert.deepEqual(
+  await readdir(destination),
+  folders,
+  'A repeated repair reuses the intact repair build.',
+);
 assert.ok(
   (await readFile(join(app, 'WaleedMcpHub.exe'))).includes(
     Buffer.from('installer-repair-verification'),

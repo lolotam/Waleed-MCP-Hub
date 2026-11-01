@@ -15,6 +15,7 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
   const jobs = new Map<string, { owner: string; job: RuntimeJob; controller: AbortController; task: Promise<void> }>();
   let closed = false, starting = false;
   let automatic: Promise<void> | undefined;
+  let admission: Promise<void> | undefined;
   const checks = {
     async observations() {
       const state = await store.read();
@@ -23,6 +24,8 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
     async start(id: string, owner: string) {
       if (closed || !runtime) throw new HubError('unavailable', 'No verified runtime adapter is configured.');
       if (starting) throw new HubError('busy', 'Another check is being admitted.'); starting = true;
+      let admitted!: () => void;
+      admission = new Promise<void>((resolve) => { admitted = resolve; });
       try {
         await safety.assertWritable(); const state = await store.read(); const connector = structuredClone(requireConnector(state, id));
         if (closed) throw new HubError('unavailable', 'Runtime checks are closed.');
@@ -67,7 +70,7 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
           }
         });
         jobs.set(job.id, { job, owner, controller, task }); return structuredClone(job);
-      } finally { starting = false; }
+      } finally { starting = false; admitted(); admission = undefined; }
     },
     async discoverApproved(owner: string): Promise<void> {
       if (closed || !runtime) throw new HubError('unavailable', 'No verified runtime adapter is configured.');
@@ -117,7 +120,7 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
     cancel(id: string, owner: string) { const entry = jobs.get(id); if (!entry || entry.owner !== owner) throw new HubError('not_found', 'Check job not found.'); if (!entry.job.completedAt) entry.controller.abort(); return structuredClone(entry.job); },
     invalidate(ids: string[]) { ids.forEach((id) => { observations.delete(id); for (const entry of jobs.values()) if (entry.job.connectorId === id && !entry.job.completedAt) entry.controller.abort(); }); },
     async drain() { await Promise.all([...jobs.values()].map((entry) => entry.task)); },
-    async close() { closed = true; for (const entry of jobs.values()) if (!entry.job.completedAt) entry.controller.abort(); await Promise.all([...jobs.values()].map((entry) => entry.task)); await automatic; },
+    async close() { closed = true; await admission; for (const entry of jobs.values()) if (!entry.job.completedAt) entry.controller.abort(); await Promise.all([...jobs.values()].map((entry) => entry.task)); await automatic; },
   };
   return checks;
 }

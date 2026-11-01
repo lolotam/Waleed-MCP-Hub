@@ -81,7 +81,15 @@ export function AgentCloning({
             ),
         );
         setReviewed(false);
-        await refresh();
+        try {
+          if ((await refresh()) === false)
+            throw new Error('Inventory refresh failed.');
+        } catch {
+          if (mounted.current)
+            setError(
+              'Copies saved, but inventory refresh failed. Refresh inventory before making another change.',
+            );
+        }
       }
     }
   }

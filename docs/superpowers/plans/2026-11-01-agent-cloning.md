@@ -1,6 +1,6 @@
 # Agent MCP Cloning Implementation Plan
 
-> **For agentic workers:** Execute inline, task by task, with focused tests and checkpoints.
+The implementation is organized into tasks with focused tests and checkpoints.
 
 **Goal:** Copy user-selected agent MCPs with available credentials into the Hub.
 **Architecture:** Reuse known AgentTarget paths, strict JSONC/TOML parsing, normalization,

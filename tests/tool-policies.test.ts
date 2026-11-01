@@ -20,7 +20,10 @@ import {
 import { profileState, apply } from './helpers/runtime.js';
 import { memoryStore } from './helpers/memory-store.js';
 
-async function fixture(pooled: boolean, elicitation = true) {
+async function fixture(
+  pooled: boolean,
+  elicitation: boolean | 'legacy' = true,
+) {
   const state = profileState(['native']);
   const calls: unknown[] = [];
   let starts = 0,
@@ -83,7 +86,11 @@ async function fixture(pooled: boolean, elicitation = true) {
   await bridge.connect(a);
   const agent = new Client(
     { name: 'policy-agent', version: '1' },
-    { capabilities: elicitation ? { elicitation: { form: {} } } : {} },
+    {
+      capabilities: elicitation
+        ? { elicitation: elicitation === 'legacy' ? {} : { form: {} } }
+        : {},
+    },
   );
   await agent.connect(b);
   const name = (await agent.listTools()).tools[0]!.name;
@@ -251,3 +258,20 @@ for (const pooled of [false, true]) {
     }
   });
 }
+
+it('accepts empty legacy elicitation capability for one-time form approval', async () => {
+  const f = await fixture(false, 'legacy');
+  f.agent.setRequestHandler(ElicitRequestSchema, async () => ({
+    action: 'accept',
+    content: { approve: true },
+  }));
+  try {
+    f.state.connectors[0]!.toolPolicies = { read: 'ask' };
+    expect(
+      (await f.agent.callTool({ name: f.name, arguments: {} })).isError,
+    ).not.toBe(true);
+    expect(f.calls).toEqual([{}]);
+  } finally {
+    await f.close();
+  }
+});

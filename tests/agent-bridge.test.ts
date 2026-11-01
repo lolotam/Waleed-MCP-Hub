@@ -150,37 +150,27 @@ it.each(['__', '_'] as const)(
   },
 );
 it('names bridge tools readably, within 40 characters, without collisions', () => {
-  const none = new Set<string>();
-  expect(
-    bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'run-command', none),
-  ).toBe('ssh-prod__run-command');
-  expect(
-    bridgeToolName({ id: 'a', name: 'Hub Chrome!' }, 'take screenshot', none),
-  ).toBe('hub_chrome__take_screenshot');
+  const first = bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'run-command');
+  expect(first).toMatch(/^ssh-prod__run-command_[0-9a-f]{16}$/);
   const long = bridgeToolName(
     { id: 'a', name: 'a-very-long-connector-name' },
     'and_an_equally_long_tool_name',
-    none,
   );
-  expect(long).toMatch(/^a-very-long-connector-name__and_a_[0-9a-f]{6}$/);
-  expect(long.length).toBeLessThanOrEqual(40);
-  const taken = new Set(['dup__read']);
-  const second = bridgeToolName({ id: 'b', name: 'dup' }, 'read', taken);
-  expect(second).not.toBe('dup__read');
-  expect(second).toMatch(/^dup__read_[0-9a-f]{6}$/);
-  for (const name of [long, second])
+  const second = bridgeToolName({ id: 'b', name: 'ssh-prod' }, 'run-command');
+  expect(second).not.toBe(first);
+  expect(bridgeToolName({ id: 'a', name: 'ssh-prod' }, 'run-command')).toBe(
+    first,
+  );
+  for (const name of [first, long, second])
     expect(name).toMatch(/^[A-Za-z0-9_-]{1,40}$/);
   const flat = bridgeToolName(
     { id: 'grok-ssh', name: 'ssh__prod' },
     'read__command',
-    new Set(),
     '_',
   );
-  expect(flat).toBe('ssh_prod_read_command');
   const collision = bridgeToolName(
     { id: 'grok-other', name: 'ssh__prod' },
     'read__command',
-    new Set([flat]),
     '_',
   );
   expect(collision).not.toBe(flat);

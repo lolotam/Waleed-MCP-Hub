@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BigIntStats } from 'node:fs';
 import type { Connector, PackageProvenance } from '@waleed/contracts';
 import {
   installDirectory,
@@ -25,6 +26,12 @@ const plan = vi.hoisted(() => ({
   abortOnOpen: undefined as undefined | number,
   abortOnPath: undefined as undefined | string,
   controller: undefined as undefined | AbortController,
+  replacement: undefined as undefined | { path: string; hardlink: boolean },
+  wideTree: undefined as undefined | string,
+  wideInfo: undefined as undefined | BigIntStats,
+  statActive: 0,
+  statPeak: 0,
+  countedEntries: 0,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -49,6 +56,49 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    async open(...args: Parameters<typeof actual.open>) {
+      if (plan.replacement && args[0] === plan.replacement.path) {
+        const replacement = plan.replacement;
+        plan.replacement = undefined;
+        await actual.rename(replacement.path, `${replacement.path}.original`);
+        if (replacement.hardlink)
+          await actual.link(`${replacement.path}.original`, replacement.path);
+        else await actual.writeFile(replacement.path, 'evil');
+      }
+      return actual.open(...args);
+    },
+    async lstat(...args: Parameters<typeof actual.lstat>) {
+      plan.statPeak = Math.max(plan.statPeak, ++plan.statActive);
+      try {
+        await Promise.resolve();
+        if (plan.wideTree && /entry-[0-9]+$/.test(String(args[0]))) {
+          plan.countedEntries++;
+          return plan.wideInfo!;
+        }
+        return await actual.lstat(...args);
+      } finally {
+        plan.statActive--;
+      }
+    },
+    async opendir(...args: Parameters<typeof actual.opendir>) {
+      if (args[0] === plan.wideTree) {
+        plan.wideInfo = await actual.lstat(plan.wideTree!, { bigint: true });
+        return {
+          async *[Symbol.asyncIterator]() {
+            for (let index = 0; index < 50_001; index++)
+              yield { name: `entry-${index}` };
+          },
+        };
+      }
+      return actual.opendir(...args);
+    },
+  };
+});
+
 const tempDirs: string[] = [];
 
 afterEach(async () => {
@@ -58,6 +108,12 @@ afterEach(async () => {
   plan.abortOnOpen = undefined;
   plan.abortOnPath = undefined;
   plan.controller = undefined;
+  plan.replacement = undefined;
+  plan.wideTree = undefined;
+  plan.wideInfo = undefined;
+  plan.statActive = 0;
+  plan.statPeak = 0;
+  plan.countedEntries = 0;
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir)
@@ -241,3 +297,25 @@ describe('package manifest walk', () => {
     expect(plan.closed).toBe(plan.opened);
   });
 });
+
+for (const hardlink of [false, true])
+  it(`rejects a file replaced between enumeration and hashing (hardlink=${hardlink})`, async () => {
+    const tree = await createTempDir();
+    const path = join(tree, 'entry.txt');
+    await writeFile(path, 'safe');
+    plan.replacement = { path, hardlink };
+    await expect(buildManifest(tree)).rejects.toMatchObject({
+      reason: 'package_modified',
+    });
+    expect(plan.opened).toBe(0);
+  });
+it('caps streamed directories before scheduling an unbounded stat fan-out', async () => {
+  const tree = await createTempDir();
+  plan.wideTree = tree;
+  await expect(buildManifest(tree)).rejects.toMatchObject({
+    reason: 'package_modified',
+  });
+  expect(plan.countedEntries).toBe(50_000);
+  expect(plan.statPeak).toBe(1);
+  expect(plan.opened).toBe(0);
+}, 20_000);

@@ -10,7 +10,10 @@ export function releaseVersion(baseVersion, releases, sha) {
   if (!/^[a-f0-9]{40}$/.test(sha) || !Array.isArray(releases))
     throw new Error('Invalid verified release input.');
   const existing = releases.find(
-    (release) => release.target_commitish === sha && !release.prerelease,
+    (release) =>
+      release.target_commitish === sha &&
+      !release.prerelease &&
+      (!release.draft || release.body?.includes(`<!-- wmh-release:${sha} -->`)),
   );
   if (existing) {
     parse(existing.tag_name);

@@ -67,13 +67,23 @@ export function agentServers(
   format: AgentFormat,
 ): Record<string, unknown> {
   const root = document(text.replace(/^\uFEFF/, ''), format);
+  const mcp = object(root.mcp);
+  const nestedServers = object(mcp?.servers);
+  // A direct server named "servers" must not hide its siblings. The optional
+  // wrapper contains server records, rather than a server's own fields.
+  const wrappedServers =
+    nestedServers &&
+    Object.keys(mcp!).length === 1 &&
+    Object.values(nestedServers).every((value) => object(value));
   const map =
     format === 'codex'
       ? root.mcp_servers
       : format === 'vscode'
         ? root.servers
         : format === 'opencode'
-          ? (object(root.mcp)?.servers ?? root.mcp)
+          ? wrappedServers
+            ? nestedServers
+            : root.mcp
           : format === 'kilo'
             ? root.mcp
             : root.mcpServers;

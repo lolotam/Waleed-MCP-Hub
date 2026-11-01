@@ -515,13 +515,12 @@ const slug = (value: string) =>
 export function bridgeToolName(
   connector: Pick<Connector, 'id' | 'name'>,
   tool: string,
-  taken: ReadonlySet<string>,
   separator: '__' | '_' = '__',
 ) {
   const name = `${slug(connector.name).toLowerCase() || 'connector'}${separator}${slug(tool) || 'tool'}`;
-  if (name.length <= toolNameLimit && !taken.has(name)) return name;
-  // Too long or colliding: keep the readable prefix and add a stable short hash.
-  const suffix = `_${hashData([connector.id, tool]).slice(0, 6)}`;
+  // Route names never depend on the discovered set: a stale advertised name
+  // cannot be reassigned when a colliding connector appears or disappears.
+  const suffix = `_${hashData([connector.id, tool]).slice(0, 16)}`;
   return `${name.slice(0, toolNameLimit - suffix.length).replace(/[_-]+$/, '')}${suffix}`;
 }
 
@@ -799,7 +798,8 @@ function createSessionBridge(
           admission = false;
           for (const tool of outcome.value.tools) {
             if (collected.length >= budget) break;
-            collected.push(tool);
+            if (toolPolicy(connector, tool.name) !== 'block')
+              collected.push(tool);
           }
           if (!outcome.value.nextCursor || collected.length >= budget) break;
           cursor = outcome.value.nextCursor;
@@ -1178,7 +1178,9 @@ function mergeCatalog(
     const entry = found.get(connector.id) ?? previous?.get(connector.id);
     if (found.has(connector.id) && !found.get(connector.id)) incomplete = true;
     if (!entry || entry.hash !== definitionHash(connector)) continue;
-    const tools = entry.tools.slice(0, 256 - count);
+    const tools = entry.tools
+      .filter((tool) => toolPolicy(connector, tool.name) !== 'block')
+      .slice(0, 256 - count);
     next.set(connector.id, { hash: entry.hash, tools });
     count += tools.length;
   }
@@ -1235,12 +1237,7 @@ export function createAgentBridge(
     : undefined;
   // The bridge tool name of one tool, and the route it belongs to.
   const register = (connector: Connector, tool: Tool, tools: Tool[]) => {
-    const name = bridgeToolName(
-      connector,
-      tool.name,
-      new Set(names.keys()),
-      toolSeparator,
-    );
+    const name = bridgeToolName(connector, tool.name, toolSeparator);
     names.set(name, {
       connectorId: connector.id,
       hash: definitionHash(connector),
@@ -1294,7 +1291,7 @@ export function createAgentBridge(
         peer.assertPublic(result);
         for (const tool of result.tools) {
           if (listed.length >= remaining) break;
-          listed.push(tool);
+          if (toolPolicy(connector, tool.name) !== 'block') listed.push(tool);
         }
         if (!result.nextCursor || listed.length >= remaining) break;
         cursor = result.nextCursor;
@@ -1432,7 +1429,7 @@ export function createAgentBridge(
       const state = await latestState();
       known ??= await catalogStore.read().catch(() => undefined);
       const cached = known ? publish(state, known) : [];
-      if (cached.length) {
+      if (known !== undefined) {
         served = JSON.stringify(cached);
         void refresh().catch(() => undefined);
         return { tools: cached };
@@ -1475,7 +1472,12 @@ export function createAgentBridge(
         let confirmed = false;
         const policyHash = hashData(connector.toolPolicies ?? {});
         if (policy === 'ask') {
-          if (!server.getClientCapabilities()?.elicitation?.form)
+          const elicitation = server.getClientCapabilities()?.elicitation;
+          // Legacy MCP clients advertise form support with an empty object.
+          // Normalize the SDK's retained capability before its form check.
+          if (elicitation && Object.keys(elicitation).length === 0)
+            elicitation.form = {};
+          if (!elicitation?.form)
             throw new ToolPolicyRefused('tool_approval_required');
           const encoded = JSON.stringify(args);
           if (Buffer.byteLength(encoded) > 16 * 1024)

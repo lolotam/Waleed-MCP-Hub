@@ -48,8 +48,10 @@ jobs:
           $runs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs?head_sha=$env:SOURCE_SHA&event=push&per_page=100" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cannot verify CI and Security.' }
           $verified = $current -eq $env:SOURCE_SHA
-          foreach ($name in @('CI', 'Security')) {
-            $run = @($runs.workflow_runs | Where-Object { $_.name -eq $name -and $_.head_branch -eq 'main' } | Sort-Object created_at -Descending)[0]
+          foreach ($file in @('ci.yml', 'security.yml')) {
+            $workflow = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/$file" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot identify required workflow.' }
+            $run = @($runs.workflow_runs | Where-Object { $_.workflow_id -eq $workflow.id -and $_.head_branch -eq 'main' } | Sort-Object created_at -Descending)[0]
             if (-not $run -or $run.status -ne 'completed' -or $run.conclusion -ne 'success') { $verified = $false }
           }
           "current=$verified".ToLowerInvariant() >> $env:GITHUB_OUTPUT
@@ -60,7 +62,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | Out-File -LiteralPath "$env:RUNNER_TEMP/releases.json" -Encoding utf8
+          gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq 'add' | Out-File -LiteralPath "$env:RUNNER_TEMP/releases.json" -Encoding utf8
           if ($LASTEXITCODE -ne 0) { throw 'Cannot read releases.' }
           node scripts/release-version.mjs "$env:RUNNER_TEMP/releases.json" $env:SOURCE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Cannot choose a release version.' }
@@ -90,25 +92,53 @@ jobs:
           if ($current -ne $env:SOURCE_SHA) { Write-Output 'A newer main superseded this build.'; exit 0 }
           $runs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs?head_sha=$env:SOURCE_SHA&event=push&per_page=100" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cannot recheck CI and Security.' }
-          foreach ($name in @('CI', 'Security')) {
-            $run = @($runs.workflow_runs | Where-Object { $_.name -eq $name -and $_.head_branch -eq 'main' } | Sort-Object created_at -Descending)[0]
+          foreach ($file in @('ci.yml', 'security.yml')) {
+            $workflow = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/$file" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot identify required workflow.' }
+            $run = @($runs.workflow_runs | Where-Object { $_.workflow_id -eq $workflow.id -and $_.head_branch -eq 'main' } | Sort-Object created_at -Descending)[0]
             if (-not $run -or $run.status -ne 'completed' -or $run.conclusion -ne 'success') { Write-Output 'CI or Security is not currently successful.'; exit 0 }
           }
           $metadata = Get-ChildItem desktop-builds -Filter release.json -Recurse | Select-Object -First 1
           if (-not $metadata) { throw 'Release metadata is missing.' }
           $release = Get-Content -LiteralPath $metadata.FullName -Raw | ConvertFrom-Json
-          if ($release.sourceRevision -ne $env:SOURCE_SHA) { throw 'Artifact source mismatch.' }
+          if ($release.sourceRevision -ne $env:SOURCE_SHA -or ('v' + $release.version) -ne $env:RELEASE_TAG) { throw 'Artifact source or version mismatch.' }
           $folder = $metadata.Directory.FullName
           $assets = @((Join-Path $folder 'Waleed-MCP-Hub-Setup.exe'), (Join-Path $folder 'SHA256SUMS.txt'), $metadata.FullName)
           foreach ($asset in $assets) { if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw 'Release asset is missing.' } }
           $expected = ((Get-Content -LiteralPath $assets[1] -Raw).Split(' '))[0]
           if ((Get-FileHash -LiteralPath $assets[0] -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Installer checksum mismatch.' }
-          gh release create $env:RELEASE_TAG --draft --target $env:SOURCE_SHA --title "Waleed MCP Hub $env:RELEASE_TAG" --generate-notes
-          if ($LASTEXITCODE -ne 0) {
-            $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
-            if ($LASTEXITCODE -ne 0 -or $existing.target_commitish -ne $env:SOURCE_SHA -or -not $existing.draft) { throw 'Release tag is not an owned draft for this commit.' }
+          $marker = "<!-- wmh-release:$env:SOURCE_SHA -->"
+          $found = @(gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq 'add' | ConvertFrom-Json | Where-Object { $_.tag_name -eq $env:RELEASE_TAG })
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot list release drafts.' }
+          if ($found.Count -gt 1) { throw 'Ambiguous release tag.' }
+          if ($found.Count -eq 0) {
+            @{ tag_name = $env:RELEASE_TAG; target_commitish = $env:SOURCE_SHA; name = "Waleed MCP Hub $env:RELEASE_TAG"; draft = $true; body = $marker; generate_release_notes = $true } | ConvertTo-Json | Set-Content -LiteralPath "$env:RUNNER_TEMP/draft.json" -Encoding utf8
+            $draft = gh api --method POST "repos/$env:GITHUB_REPOSITORY/releases" --input "$env:RUNNER_TEMP/draft.json" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot create release draft.' }
+          } else { $draft = $found[0] }
+          $expectedNames = @($assets | ForEach-Object { Split-Path -Leaf $_ })
+          if (-not $draft.draft -or $draft.target_commitish -ne $env:SOURCE_SHA -or -not $draft.body.Contains($marker)) { throw 'Release is not an owned draft for this commit.' }
+          foreach ($asset in $draft.assets) {
+            if ($asset.name -notin $expectedNames) { throw 'Owned draft has unexpected assets.' }
+            gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot replace draft asset.' }
           }
-          gh release upload $env:RELEASE_TAG @assets --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft.' }
-          gh release edit $env:RELEASE_TAG --draft=false --latest
+          foreach ($asset in $assets) {
+            $name = [Uri]::EscapeDataString((Split-Path -Leaf $asset))
+            gh api --method POST "https://uploads.github.com/repos/$env:GITHUB_REPOSITORY/releases/$($draft.id)/assets?name=$name" -H 'Content-Type: application/octet-stream' --input $asset --silent
+            if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft.' }
+          }
+          # Upload can take minutes. Recheck the authoritative gates immediately before publication.
+          $current = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot recheck main after upload.' }
+          if ($current -ne $env:SOURCE_SHA) { Write-Output 'A newer main superseded this draft.'; exit 0 }
+          $runs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs?head_sha=$env:SOURCE_SHA&event=push&per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot recheck workflow runs after upload.' }
+          foreach ($file in @('ci.yml', 'security.yml')) {
+            $workflow = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/$file" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot identify required workflow.' }
+            $run = @($runs.workflow_runs | Where-Object { $_.workflow_id -eq $workflow.id -and $_.head_branch -eq 'main' } | Sort-Object created_at -Descending)[0]
+            if (-not $run -or $run.status -ne 'completed' -or $run.conclusion -ne 'success') { Write-Output 'Required workflow is no longer successful; leaving draft.'; exit 0 }
+          }
+          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$($draft.id)" -F draft=false -f make_latest=true --silent
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

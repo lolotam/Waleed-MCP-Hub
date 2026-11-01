@@ -5,6 +5,7 @@ export function releaseVersion(
     target_commitish: string;
     draft: boolean;
     prerelease: boolean;
+    body?: string;
   }>,
   sha: string,
 ): { version: string; tag: string; skip: boolean };

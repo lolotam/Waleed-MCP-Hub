@@ -1,6 +1,6 @@
 # GitHub Releases and Update Notices Implementation Plan
 
-> **For agentic workers:** Execute inline, task by task, with focused tests and checkpoints.
+The implementation is organized into tasks with focused tests and checkpoints.
 
 **Goal:** Publish verified main builds and notify installed users of newer releases.
 **Architecture:** A trusted-CI workflow owns publishing. A bounded, cached fixed-repository

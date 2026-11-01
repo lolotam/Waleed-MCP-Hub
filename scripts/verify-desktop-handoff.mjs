@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, access } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
+import { createServer } from 'node:net';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { startDesktop } from './desktop-runtime.mjs';
 
@@ -76,4 +78,41 @@ try {
 } finally {
   for (const host of hosts) host.stop();
   await Promise.all(hosts.map((host) => host.closed));
+}
+
+// Pre-upgrade managers accept only the original request. Keep their process and
+// locks intact while providing a usable reopen and explicit Settings migration.
+const pipe = `\\\\.\\pipe\\wmh-desktop-${createHash('sha256')
+  .update(homedir().toLowerCase() + '|' + directory.toLowerCase())
+  .digest('hex')
+  .slice(0, 32)}`;
+const requests = [];
+const legacy = createServer((socket) => {
+  socket.on('error', () => socket.destroy());
+  socket.once('data', (chunk) => {
+    const request = chunk.toString();
+    requests.push(request);
+    if (request === 'open\n') socket.end('wmh-desktop-v1\n');
+    else socket.destroy();
+  });
+});
+await new Promise((resolve, reject) => {
+  legacy.once('error', reject);
+  legacy.listen(pipe, resolve);
+});
+try {
+  const reused = await startDesktop({
+    root: join(temporary, 'new-installation'),
+    directory,
+    log: console.info,
+  });
+  assert.equal(reused.reused, true);
+  assert.equal(requests.length, 2);
+  assert.match(requests[0], /^open:[a-f0-9]{24}\n$/);
+  assert.equal(requests[1], 'open\n');
+  console.info(
+    'Legacy desktop protocol fallback verified without stopping its owner.',
+  );
+} finally {
+  await new Promise((resolve) => legacy.close(resolve));
 }

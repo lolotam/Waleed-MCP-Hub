@@ -126,10 +126,24 @@ it('selects increasing stable patch versions and never republishes a completed c
   expect(
     releaseVersion(
       '0.1.0',
-      [{ ...previous, target_commitish: sha, draft: true }],
+      [
+        {
+          ...previous,
+          target_commitish: sha,
+          draft: true,
+          body: `<!-- wmh-release:${sha} -->`,
+        },
+      ],
       sha,
     ),
   ).toEqual({ version: '0.1.9', tag: 'v0.1.9', skip: false });
+  expect(
+    releaseVersion(
+      '0.1.0',
+      [{ ...previous, target_commitish: sha, draft: true }],
+      sha,
+    ).tag,
+  ).toBe('v0.1.10');
   expect(() => releaseVersion('0.1.0', [], 'main')).toThrow();
 });
 

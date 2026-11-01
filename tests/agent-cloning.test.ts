@@ -9,6 +9,7 @@ import { HubError } from '@waleed/hub-core';
 import type { PackageJob, PackagePreview } from '@waleed/contracts';
 import type { PackageService } from '../packages/hub-core/src/packages/service.js';
 import { definition, profileState } from './helpers/runtime.js';
+import { agentServers } from '../packages/hub-core/src/integrations/formats.js';
 
 const secret = 'SYNTHETIC_CLONE_TOKEN_123456789';
 function fixture() {
@@ -82,6 +83,50 @@ async function finished(f: ReturnType<typeof fixture>, id: string) {
     .not.toMatch(/^(queued|running)$/);
   return f.hub.cloning!.job(id, 'owner');
 }
+it('omits alternate-name Hub entries with raw Windows arguments and array commands', async () => {
+  const f = fixture();
+  f.files.set(
+    'C:\\agents\\claude.json',
+    JSON.stringify({
+      mcpServers: {
+        alternate: {
+          command: 'node',
+          args: ['bridge.js', f.adapters.registry],
+        },
+        array: { command: ['node', 'bridge.js', f.adapters.registry] },
+        ordinary: { url: 'https://example.test/mcp' },
+      },
+    }),
+  );
+  try {
+    const scan = await finished(f, f.hub.cloning!.scan('owner').id);
+    expect(scan.candidates.map((item) => item.name)).toEqual([
+      'ordinary',
+      'third',
+    ]);
+  } finally {
+    await f.hub.close();
+    f.secrets.close();
+  }
+});
+it('distinguishes OpenCode wrappers from a direct MCP named servers', () => {
+  const servers = {
+    servers: { type: 'local', command: ['node', 'server.js'] },
+    sibling: { type: 'remote', url: 'https://example.test/mcp' },
+  };
+  expect(agentServers(JSON.stringify({ mcp: servers }), 'opencode')).toEqual(
+    servers,
+  );
+  expect(
+    agentServers(JSON.stringify({ mcp: { servers } }), 'opencode'),
+  ).toEqual(servers);
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: servers.servers } }),
+      'opencode',
+    ),
+  ).toEqual({ servers: servers.servers });
+});
 it('groups sanitized candidates by agent, omits the Hub and copies only selected entries with exact protected credentials', async () => {
   const f = fixture(),
     before = new Map(f.files);
@@ -396,81 +441,127 @@ it('keeps unsupported large credential maps readable and missing references repa
     f.secrets.close();
   }
 });
-it('waits through package commit cancellation and preserves the committed connector for repair', async () => {
-  const f = fixture();
-  let installedId: string | null = null;
-  let release: () => void = () => {};
-  const preview: PackagePreview = {
-    previewId: '00000000-0000-4000-8000-000000000001',
-    name: 'synthetic-mcp',
-    version: '1.2.3',
-    description: null,
-    integrity: `sha512-${'A'.repeat(86)}==`,
-    lockHash: 'a'.repeat(64),
-    packageCount: 1,
-    bundledCount: 0,
-    unpackedSize: 100,
-    releasedAt: null,
-    entries: [{ entry: 'serve', entryPath: 'server.js' }],
-    warnings: ['large_size'],
-    expiresAt: new Date(Date.now() + 600000).toISOString(),
-  };
-  const job: PackageJob = {
-    id: '00000000-0000-4000-8000-000000000002',
-    kind: 'install',
-    state: 'running',
-    createdAt: new Date().toISOString(),
-    completedAt: null,
-    phase: 'saving',
-    progress: { downloadedBytes: 100, packages: 1 },
-    error: null,
-    preview: null,
-    result: null,
-  };
-  const packages = {
-    resolve: () => ({ ...job, kind: 'resolve', state: 'succeeded', preview }),
-    install: async (input: { connectorName: string }) => {
-      const state = await f.hub.inventory();
-      const p = await f.hub.preview(
-        {
-          kind: 'create_connector',
-          expectedRevision: state.revision,
-          definition: definition({
-            id: 'saved-package',
-            name: input.connectorName,
-            command: 'C:\\Synthetic\\node.exe',
-            args: ['server.js'],
-          }),
+it.each(['package', 'settings'] as const)(
+  'preserves the unapproved connector when cancellation arrives during %s commit',
+  async (phase) => {
+    const f = fixture();
+    let installedId: string | null = null;
+    let release: () => void = () => {};
+    let settingsWaiting = false;
+    const settingsPreviews = new Set<string>();
+    const preview: PackagePreview = {
+      previewId: '00000000-0000-4000-8000-000000000001',
+      name: 'synthetic-mcp',
+      version: '1.2.3',
+      description: null,
+      integrity: `sha512-${'A'.repeat(86)}==`,
+      lockHash: 'a'.repeat(64),
+      packageCount: 1,
+      bundledCount: 0,
+      unpackedSize: 100,
+      releasedAt: null,
+      entries: [{ entry: 'serve', entryPath: 'server.js' }],
+      warnings: ['large_size'],
+      expiresAt: new Date(Date.now() + 600000).toISOString(),
+    };
+    const job: PackageJob = {
+      id: '00000000-0000-4000-8000-000000000002',
+      kind: 'install',
+      state: 'running',
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+      phase: 'saving',
+      progress: { downloadedBytes: 100, packages: 1 },
+      error: null,
+      preview: null,
+      result: null,
+    };
+    const packages = {
+      resolve: () => ({ ...job, kind: 'resolve', state: 'succeeded', preview }),
+      install: async (input: { connectorName: string }) => {
+        const state = await f.hub.inventory();
+        const p = await f.hub.preview(
+          {
+            kind: 'create_connector',
+            expectedRevision: state.revision,
+            definition: definition({
+              id: 'saved-package',
+              name: input.connectorName,
+              command: 'C:\\Synthetic\\node.exe',
+              args: ['server.js'],
+            }),
+          },
+          'owner',
+        );
+        await f.hub.apply(p.id, 'owner');
+        await f.hub.drain();
+        installedId = 'saved-package';
+        release = () => {
+          job.state = 'succeeded';
+          job.result = { connectorId: installedId!, outcome: 'saved' };
+        };
+        if (phase === 'settings') release();
+        return job;
+      },
+      job: vi.fn(() => job),
+      cancel: vi.fn(() => {
+        throw new HubError('busy', 'Already committing.');
+      }),
+    } as unknown as PackageService;
+    const service = createAgentCloning(
+      {
+        ...f.hub,
+        packages,
+        preview: async (input, owner) => {
+          const result = await f.hub.preview(input, owner);
+          if ((input as { kind: string }).kind === 'edit_connector')
+            settingsPreviews.add(result.id);
+          return result;
         },
-        'owner',
-      );
-      await f.hub.apply(p.id, 'owner');
-      await f.hub.drain();
-      installedId = 'saved-package';
-      release = () => {
-        job.state = 'succeeded';
-        job.result = { connectorId: installedId!, outcome: 'saved' };
-      };
-      return job;
-    },
-    job: vi.fn(() => job),
-    cancel: vi.fn(() => {
-      throw new HubError('busy', 'Already committing.');
-    }),
-  } as unknown as PackageService;
-  const service = createAgentCloning({ ...f.hub, packages }, f.adapters);
-  const done = async (id: string) => {
-    await expect
-      .poll(() => service.job(id, 'owner').state)
-      .not.toMatch(/^(queued|running)$/);
-    return service.job(id, 'owner');
-  };
-  try {
-    const scan = await done(service.scan('owner').id),
-      candidate = scan.candidates.find((item) => item.state === 'package')!;
-    service.prepare(scan.id, [candidate.key], 'owner');
-    await done(scan.id);
-    expect(() =>
+        apply: async (id, owner) => {
+          const result = await f.hub.apply(id, owner);
+          if (phase === 'settings' && settingsPreviews.has(id)) {
+            await f.hub.drain();
+            settingsWaiting = true;
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          }
+          return result;
+        },
+      },
+      f.adapters,
+    );
+    const done = async (id: string) => {
+      await expect
+        .poll(() => service.job(id, 'owner').state)
+        .not.toMatch(/^(queued|running)$/);
+      return service.job(id, 'owner');
+    };
+    try {
+      const scan = await done(service.scan('owner').id),
+        candidate = scan.candidates.find((item) => item.state === 'package')!;
+      service.prepare(scan.id, [candidate.key], 'owner');
+      await done(scan.id);
+      expect(() =>
+        service.copy(
+          scan.id,
+          {
+            expectedRevision: 0,
+            copyCredentials: true,
+            approveExecution: true,
+            entries: [
+              {
+                key: candidate.key,
+                name: 'pkg',
+                entry: 'serve',
+                previewId: preview.previewId,
+              },
+            ],
+          },
+          'owner',
+        ),
+      ).toThrow(/every warning/);
       service.copy(
         scan.id,
         {
@@ -483,51 +574,38 @@ it('waits through package commit cancellation and preserves the committed connec
               name: 'pkg',
               entry: 'serve',
               previewId: preview.previewId,
+              acknowledgedWarnings: ['large_size'],
             },
           ],
         },
         'owner',
-      ),
-    ).toThrow(/every warning/);
-    service.copy(
-      scan.id,
-      {
-        expectedRevision: 0,
-        copyCredentials: true,
-        approveExecution: true,
-        entries: [
-          {
-            key: candidate.key,
-            name: 'pkg',
-            entry: 'serve',
-            previewId: preview.previewId,
-            acknowledgedWarnings: ['large_size'],
-          },
-        ],
-      },
-      'owner',
-    );
-    await expect.poll(() => packages.job).toBeTruthy();
-    await expect.poll(() => installedId).toBe('saved-package');
-    await expect
-      .poll(() => vi.mocked(packages.job).mock.calls.length)
-      .toBeGreaterThan(0);
-    expect(() => service.cancel(scan.id, 'owner')).not.toThrow();
-    release();
-    const result = await done(scan.id);
-    expect(result.state).toBe('cancelled');
-    expect(result.results[0]).toMatchObject({
-      connectorId: 'saved-package',
-      state: 'partially_saved',
-    });
-    expect((await f.hub.inventory()).connectors).toHaveLength(1);
-  } finally {
-    release();
-    await service.close();
-    await f.hub.close();
-    f.secrets.close();
-  }
-});
+      );
+      await expect.poll(() => packages.job).toBeTruthy();
+      await expect.poll(() => installedId).toBe('saved-package');
+      if (phase === 'package')
+        await expect
+          .poll(() => vi.mocked(packages.job).mock.calls.length)
+          .toBeGreaterThan(0);
+      if (phase === 'settings')
+        await expect.poll(() => settingsWaiting).toBe(true);
+      expect(() => service.cancel(scan.id, 'owner')).not.toThrow();
+      release();
+      const result = await done(scan.id);
+      expect(result.state).toBe('cancelled');
+      expect(result.results[0]).toMatchObject({
+        connectorId: 'saved-package',
+        state: 'partially_saved',
+      });
+      expect((await f.hub.inventory()).connectors).toHaveLength(1);
+      expect((await f.hub.inventory()).connectors[0]!.trustApproval).toBeNull();
+    } finally {
+      release();
+      await service.close();
+      await f.hub.close();
+      f.secrets.close();
+    }
+  },
+);
 
 it('ignores unrelated agent settings changes while binding the exact selected MCP', async () => {
   const f = fixture();

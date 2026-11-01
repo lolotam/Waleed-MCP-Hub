@@ -8,6 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   ListToolsRequestSchema,
+  CallToolRequestSchema,
   ToolListChangedNotificationSchema,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -34,6 +35,7 @@ interface Harness {
   agent: Client;
   stored: { catalog: ToolCatalog | undefined };
   connects: string[];
+  calls: string[];
   timers: Map<number, { ms: number; callback: () => void }>;
   changed: () => number;
   close(): Promise<void>;
@@ -46,9 +48,12 @@ async function createHarness(options: {
   catalog?: ToolCatalog;
   listing: (connectorId: string) => Tool[] | Error;
   gate?: Promise<void>;
+  pageSize?: number;
+  pooled?: boolean;
 }): Promise<Harness> {
   const stored = { catalog: options.catalog };
   const connects: string[] = [];
+  const calls: string[] = [];
   const timers = new Map<number, { ms: number; callback: () => void }>();
   let nextTimer = 1;
   let seq = 0;
@@ -88,9 +93,19 @@ async function createHarness(options: {
       { name: 'catalog-peer', version: '1' },
       { capabilities: { tools: {} } },
     );
-    peer.setRequestHandler(ListToolsRequestSchema, async () => {
+    peer.setRequestHandler(ListToolsRequestSchema, async (request) => {
       await options.gate;
-      return { tools: options.listing(connector.id) as Tool[] };
+      const all = options.listing(connector.id) as Tool[];
+      const offset = Number(request.params?.cursor ?? 0);
+      const end = offset + (options.pageSize ?? all.length);
+      return {
+        tools: all.slice(offset, end),
+        ...(end < all.length ? { nextCursor: String(end) } : {}),
+      };
+    });
+    peer.setRequestHandler(CallToolRequestSchema, async () => {
+      calls.push(connector.id);
+      return { content: [{ type: 'text', text: 'done' }] };
     });
     const [a, b] = InMemoryTransport.createLinkedPair();
     await peer.connect(a);
@@ -106,7 +121,7 @@ async function createHarness(options: {
   const bridge = createAgentBridge(
     async () => structuredClone(options.state),
     connect,
-    session,
+    options.pooled === false ? undefined : session,
   );
   const [a, b] = InMemoryTransport.createLinkedPair();
   await bridge.connect(a);
@@ -120,6 +135,7 @@ async function createHarness(options: {
     agent,
     stored,
     connects,
+    calls,
     timers,
     changed: () => changes,
     async close() {
@@ -159,11 +175,11 @@ it('answers from the stored catalog while peers are still starting, then announc
   });
   const cached = await names(open.agent);
   expect(cached).toHaveLength(1);
-  expect(cached[0]).toMatch(/old$/);
+  expect(cached[0]).toMatch(/old_[0-9a-f]{16}$/);
   release();
   await expect.poll(() => open!.changed()).toBe(1);
   expect(open.stored.catalog?.get('connector-0')?.tools).toEqual([tool('new')]);
-  expect((await names(open.agent))[0]).toMatch(/new$/);
+  expect((await names(open.agent))[0]).toMatch(/new_[0-9a-f]{16}$/);
 });
 
 it('never serves a cached connector whose definition changed or that was disabled', async () => {
@@ -177,9 +193,11 @@ it('never serves a cached connector whose definition changed or that was disable
     ]),
     listing: () => [tool('live')],
   });
+  expect(await names(open.agent)).toEqual([]);
+  await expect.poll(() => open!.changed()).toBe(1);
   const listed = await names(open.agent);
   expect(listed).toHaveLength(1);
-  expect(listed[0]).toMatch(/live$/);
+  expect(listed[0]).toMatch(/live_[0-9a-f]{16}$/);
   expect(open.connects).toEqual(['connector-0']);
 });
 
@@ -229,7 +247,7 @@ it('fills the catalog even when the agent gives up on its first listing', async 
   release();
   await expect.poll(() => open!.stored.catalog?.size).toBe(1);
   const connectsBefore = open.connects.length;
-  expect((await names(open.agent))[0]).toMatch(/read$/);
+  expect((await names(open.agent))[0]).toMatch(/read_[0-9a-f]{16}$/);
   expect(open.connects.length).toBeGreaterThanOrEqual(connectsBefore);
 });
 
@@ -316,4 +334,119 @@ it('bounds merged cached tools when one peer fails and another returns a large f
     200, 56,
   ]);
   expect(parseToolCatalog(serializeToolCatalog(catalog))).toEqual(catalog);
+});
+
+it('answers an empty valid catalog without waiting for held discovery', async () => {
+  const state = profileState(['native']);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  open = await createHarness({
+    state,
+    catalog: new Map(),
+    listing: () => [tool('new')],
+    gate,
+  });
+  try {
+    expect(await names(open.agent)).toEqual([]);
+    expect(open.changed()).toBe(0);
+  } finally {
+    release();
+  }
+  await expect.poll(() => open!.changed()).toBe(1);
+});
+
+it('never reroutes a cached advertised name when an earlier colliding connector appears', async () => {
+  const state = profileState(['native', 'native']);
+  state.connectors.forEach((connector) => {
+    connector.name = 'Duplicate';
+    connector.trustApproval!.definitionHash = definitionHash(connector);
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  open = await createHarness({
+    state,
+    catalog: new Map([
+      ['connector-1', entryFor(state, 'connector-1', [tool('read')])],
+    ]),
+    listing: () => [tool('read')],
+    gate,
+  });
+  const [advertised] = await names(open.agent);
+  release();
+  await expect.poll(() => open!.changed()).toBe(1);
+  await open.agent.callTool({ name: advertised!, arguments: {} });
+  expect(open.calls).toEqual(['connector-1']);
+});
+
+for (const pooled of [true, false]) {
+  it(`keeps blocked tools out of the shared catalog budget (pooled=${pooled})`, async () => {
+    const state = profileState(['native', 'native']);
+    state.connectors[0]!.toolPolicies = Object.fromEntries(
+      Array.from({ length: 200 }, (_, index) => [
+        `read_${index}`,
+        'block' as const,
+      ]),
+    );
+    open = await createHarness({
+      state,
+      pooled,
+      listing: () =>
+        Array.from({ length: 200 }, (_, index) => tool(`read_${index}`)),
+    });
+    expect(await names(open.agent)).toHaveLength(200);
+    if (pooled)
+      expect(
+        [...open.stored.catalog!.values()].map((entry) => entry.tools.length),
+      ).toEqual([0, 200]);
+  });
+  it(`paginates beyond a blocked prefix to discover allowed tools (pooled=${pooled})`, async () => {
+    const state = profileState(['native']);
+    state.connectors[0]!.toolPolicies = Object.fromEntries(
+      Array.from({ length: 256 }, (_, index) => [
+        `blocked_${index}`,
+        'block' as const,
+      ]),
+    );
+    open = await createHarness({
+      state,
+      pooled,
+      pageSize: 128,
+      listing: () => [
+        ...Array.from({ length: 256 }, (_, index) => tool(`blocked_${index}`)),
+        ...Array.from({ length: 200 }, (_, index) => tool(`allowed_${index}`)),
+      ],
+    });
+    const listed = await names(open.agent);
+    expect(listed).toHaveLength(200);
+    expect(listed.every((name) => name.includes('allowed_'))).toBe(true);
+  });
+}
+it('removes blocked cached tools before merging a fresh connector into the shared budget', async () => {
+  const state = profileState(['native', 'native']);
+  const blocked = Array.from({ length: 200 }, (_, index) =>
+    tool(`cached_${index}`),
+  );
+  state.connectors[0]!.toolPolicies = Object.fromEntries(
+    blocked.map((tool) => [tool.name, 'block' as const]),
+  );
+  open = await createHarness({
+    state,
+    catalog: new Map([
+      ['connector-0', entryFor(state, 'connector-0', blocked)],
+    ]),
+    listing: (id) =>
+      id === 'connector-0'
+        ? new Error('Unavailable')
+        : Array.from({ length: 200 }, (_, index) => tool(`fresh_${index}`)),
+  });
+  expect(await names(open.agent)).toEqual([]);
+  await expect.poll(() => open!.stored.catalog?.has('connector-1')).toBe(true);
+  expect(
+    [...open.stored.catalog!.values()].map((entry) => entry.tools.length),
+  ).toEqual([0, 200]);
+  expect(await names(open.agent)).toHaveLength(200);
 });

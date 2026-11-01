@@ -128,45 +128,58 @@ export async function startDesktop({
         handoffDeadline,
       });
     }
-    const handedOff = await new Promise((resolveClient, reject) => {
-      const client = createConnection(pipe, () =>
-        client.write(`open:${rootId}\n`),
-      );
-      let reply = '';
-      let acknowledged = false,
-        replace = false;
-      client.setTimeout(15000, () => {
-        client.destroy();
-        reject(new Error('Desktop control timed out.'));
-      });
-      client.on('data', (data) => {
-        reply += data.toString();
-        if (reply === 'wmh-desktop-v1\n' || reply === 'wmh-desktop-handoff\n') {
-          acknowledged = true;
-          replace = reply === 'wmh-desktop-handoff\n';
+    const requestOwner = (request) =>
+      new Promise((resolveClient, reject) => {
+        const client = createConnection(pipe, () => client.write(request));
+        let reply = '';
+        let acknowledged = false,
+          replace = false;
+        client.setTimeout(15000, () => {
           client.destroy();
-        } else if (reply.length > 64 || reply.includes('\n')) {
-          client.destroy();
-          reject(new Error('Unknown desktop control owner.'));
-        }
-      });
-      client.once('error', (error) =>
-        reject(
-          new Error('Existing desktop unavailable; no process was stopped.', {
-            cause: error,
-          }),
-        ),
-      );
-      client.once('close', () => {
-        if (acknowledged) resolveClient(replace);
-        else
+          reject(new Error('Desktop control timed out.'));
+        });
+        client.on('data', (data) => {
+          reply += data.toString();
+          if (
+            reply === 'wmh-desktop-v1\n' ||
+            reply === 'wmh-desktop-handoff\n'
+          ) {
+            acknowledged = true;
+            replace = reply === 'wmh-desktop-handoff\n';
+            client.destroy();
+          } else if (reply.length > 64 || reply.includes('\n')) {
+            client.destroy();
+            reject(new Error('Unknown desktop control owner.'));
+          }
+        });
+        client.once('error', (error) =>
           reject(
-            new Error(
-              'Stop the existing desktop manager in Settings, then open this installation again. No process was stopped.',
-            ),
-          );
+            new Error('Existing desktop unavailable; no process was stopped.', {
+              cause: error,
+            }),
+          ),
+        );
+        client.once('close', () => {
+          if (acknowledged) resolveClient(replace);
+          else
+            reject(
+              new Error(
+                'Stop the existing desktop manager in Settings, then open this installation again. No process was stopped.',
+              ),
+            );
+        });
       });
-    });
+    let handedOff;
+    try {
+      handedOff = await requestOwner(`open:${rootId}\n`);
+    } catch {
+      // Legacy managers understand only open\n. Reopen that verified protocol
+      // without killing it or deleting its locks; Settings can stop it safely.
+      handedOff = await requestOwner('open\n');
+      log(
+        'legacy desktop reopened; stop its manager in Settings to activate this installation',
+      );
+    }
     if (handedOff) {
       log('previous desktop backend stopped; claiming its control pipe');
       return startDesktop({

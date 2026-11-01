@@ -312,6 +312,13 @@ export function App() {
             </div>
             <span className="read-only-tag">Explicit actions only</span>
           </div>
+          {bootstrap?.capabilities.agentCloning && (
+            <AgentCloning
+              disabled={loading || !!error || recoveryBlocked}
+              refresh={refresh}
+              openManual={() => setManual(true)}
+            />
+          )}
           {error ? (
             <section className="error-panel" role="alert">
               <h2>Unable to load this workspace</h2>
@@ -331,13 +338,6 @@ export function App() {
           ) : (
             <>
               {bootstrap?.capabilities.appUpdates && <UpdateNotice />}
-              {bootstrap?.capabilities.agentCloning && (
-                <AgentCloning
-                  disabled={recoveryBlocked}
-                  refresh={refresh}
-                  openManual={() => setManual(true)}
-                />
-              )}
               {bootstrap?.capabilities.discovery && (
                 <DiscoveryPanel
                   snapshot={discovery}

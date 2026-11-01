@@ -901,7 +901,11 @@ function ToolPermissions({
       <ul className="tool-policy-list">
         {names.map((name) => {
           const supported = ToolPolicyNameSchema.safeParse(name).success,
-            policy = supported ? (policies[name] ?? 'allow') : 'block';
+            policy = supported
+              ? Object.hasOwn(policies, name)
+                ? policies[name]!
+                : 'allow'
+              : 'block';
           return (
             <li key={name}>
               <label>
