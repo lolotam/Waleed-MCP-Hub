@@ -595,6 +595,28 @@ describe('4. Unmanaged native connector', () => {
 });
 
 describe('5. Launch point ordering (createCapabilityRuntime)', () => {
+  it('passes discovery cancellation into package verification before resolving credentials', async () => {
+    const dataDir = await createTempDir();
+    const { connector } = await createFakeInstall(dataDir);
+    const resolveBindings = vi.fn(async () => ({
+      environment: {},
+      headers: {},
+      dispose() {},
+    }));
+    const runtime = createCapabilityRuntime({
+      workingDirectory: dataDir,
+      resolveBindings,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      runtime.discover(
+        { ...connector, secretBindings: { API_KEY: 'secret-ref-1' } },
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ reason: 'cancelled' });
+    expect(resolveBindings).not.toHaveBeenCalled();
+  });
   it('rejects discover with package_modified on tampered install and never calls resolveBindings or starts process', async () => {
     const dataDir = await createTempDir();
     const { connector, installDir } = await createFakeInstall(dataDir);
