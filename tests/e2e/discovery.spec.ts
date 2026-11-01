@@ -93,7 +93,7 @@ test('explicit discovery displays sanitized observations and a non-applicable pi
     await (
       await page.request.get('http://127.0.0.1:4190/api/connectors')
     ).json(),
-  ).toEqual({ connectors: [], observations: [] });
+  ).toEqual({ connectors: [], observations: [], discovering: false });
   for (const width of [1440, 1024, 768, 390]) {
     await page.setViewportSize({ width, height: 900 });
     expect(

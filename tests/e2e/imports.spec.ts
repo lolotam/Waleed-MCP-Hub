@@ -178,7 +178,7 @@ test('paste/select/review/export is sanitized, responsive, keyboard accessible a
     await (
       await page.request.get('http://127.0.0.1:4192/api/connectors')
     ).json(),
-  ).toEqual({ connectors: [], observations: [] });
+  ).toEqual({ connectors: [], observations: [], discovering: false });
   expect(errors).toEqual([]);
 });
 

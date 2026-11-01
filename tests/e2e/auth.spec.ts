@@ -250,7 +250,10 @@ test('cancelled OAuth closes the listener and never fabricates a connected state
     .getByRole('button', { name: 'Cancel sign-in', exact: true })
     .click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(row.getByText(/untested · not verified/)).toBeVisible();
+  await expect(
+    row.getByText(/auth_required · MCP discovery only/),
+  ).toBeVisible();
+  await expect(row.getByText(/connected · MCP discovery only/)).toHaveCount(0);
   const report = await (
     await page.request.get('http://127.0.0.1:4194/api/fixture-report')
   ).json();
