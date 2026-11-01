@@ -19,6 +19,8 @@ export * from './runtime.js';
 export * from './auth.js';
 export * from './integrations.js';
 export * from './packages.js';
+export * from './cloning.js';
+export * from './updates.js';
 
 export const MAX_REQUEST_BYTES = 64 * 1024;
 export const IdSchema = z
@@ -479,6 +481,8 @@ export const BootstrapSchema = z.strictObject({
     materialization: z.boolean(),
     secrets: z.boolean(),
     agentApply: z.boolean(),
+    agentCloning: z.boolean().optional(),
+    appUpdates: z.boolean().optional(),
     desktop: z.boolean().optional(),
     startup: z.literal(false),
   }),

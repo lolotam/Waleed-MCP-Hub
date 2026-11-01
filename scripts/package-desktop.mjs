@@ -10,6 +10,9 @@ import { buildLauncher } from './build-launcher.mjs';
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Package using Node 24 on Windows.');
 const root = fileURLToPath(new URL('../', import.meta.url));
+const { version } = JSON.parse(
+  await readFile(join(root, 'package.json'), 'utf8'),
+);
 await access(join(root, 'apps/server/dist/main.js'));
 await access(join(root, 'apps/web/dist/index.html'));
 export const output = join(
@@ -127,7 +130,7 @@ await writeFile(
   join(output, 'package.json'),
   JSON.stringify({
     name: 'waleed-mcp-hub-desktop',
-    version: '0.1.0',
+    version,
     private: true,
     type: 'module',
   }),

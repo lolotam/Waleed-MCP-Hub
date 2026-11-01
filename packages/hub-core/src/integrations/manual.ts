@@ -28,8 +28,10 @@ export async function writeCredentialValues(
   location: 'environment' | 'header',
   values: Record<string, string>,
   adapter: 'windows' | 'docker',
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const name of Object.keys(values)) {
+    signal?.throwIfAborted();
     const state = await host.inventory(),
       connector = state.connectors.find((item) => item.id === connectorId)!;
     await host.auth.credentials.write(connectorId, {
@@ -48,9 +50,19 @@ export async function writeCredentialValues(
 // Values are transient and committed through P6's journaled one-way interface.
 // Partial completion is explicit; never retry a saved definition as a new one.
 export async function addManualMcp(
-  hub: HubLifecycle,
+  hub: Pick<
+    HubLifecycle,
+    | 'inventory'
+    | 'preview'
+    | 'apply'
+    | 'job'
+    | 'drain'
+    | 'auth'
+    | 'integrations'
+  >,
   raw: unknown,
   owner: string,
+  signal?: AbortSignal,
 ) {
   let input: ReturnType<typeof ManualMcpSchema.parse> | undefined;
   const clear = () => {
@@ -68,7 +80,8 @@ export async function addManualMcp(
   try {
     input = ManualMcpSchema.parse(raw);
     if (
-      (input.type !== 'docker' && input.ports.length) ||
+      (input.type !== 'docker' &&
+        (input.ports.length || input.containerCommand.length)) ||
       (input.type === 'stdio' && Object.keys(input.headers).length) ||
       (input.type === 'docker' && Object.keys(input.headers).length) ||
       (!['stdio', 'docker'].includes(input.type) &&
@@ -90,8 +103,8 @@ export async function addManualMcp(
     const common = {
       id,
       name: input.name,
-      description: 'Manually configured MCP',
-      enabled: true,
+      description: input.description ?? 'Manually configured MCP',
+      enabled: input.enabled,
       environmentLiterals: {},
       secretBindings: {},
       headerBindings: {},
@@ -112,7 +125,7 @@ export async function addManualMcp(
               executionMode: 'docker',
               transport: 'stdio',
               image: input.image,
-              command: [],
+              command: input.containerCommand,
               arguments: input.args,
               portBindings: input.ports,
             }
@@ -134,9 +147,14 @@ export async function addManualMcp(
       );
     }
     const apply = async (operation: RegistryOperation) => {
+      signal?.throwIfAborted();
       const preview = await hub.preview(operation, owner);
+      signal?.throwIfAborted();
       const job = await hub.apply(preview.id, owner);
-      await hub.drain();
+      // Wait for this mutation only. Existing capability discovery can keep
+      // running while new connectors and their credentials are copied.
+      while (['queued', 'running'].includes(hub.job(job.id, owner).state))
+        await new Promise<void>((resolve) => setImmediate(resolve));
       if (hub.job(job.id, owner).state !== 'succeeded')
         throw new HubError(
           'unavailable',
@@ -157,9 +175,10 @@ export async function addManualMcp(
         location,
         values,
         input.type === 'docker' ? 'docker' : 'windows',
+        signal,
       );
     }
-    if (input.approveExecution) {
+    if (input.approveExecution && input.enabled) {
       const state = await hub.inventory(),
         connector = state.connectors.find((item) => item.id === id)!;
       await apply({
@@ -175,7 +194,7 @@ export async function addManualMcp(
     return {
       connectorId: id,
       state: 'saved' as const,
-      requiresApproval: !input.approveExecution,
+      requiresApproval: !input.approveExecution || !input.enabled,
       authenticationVerified: false,
       sync,
     };

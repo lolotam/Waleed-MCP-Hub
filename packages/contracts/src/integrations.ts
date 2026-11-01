@@ -98,8 +98,11 @@ export const AgentChangeSchema = z.strictObject({
 export const ManualMcpSchema = z.strictObject({
   expectedRevision: z.number().int().nonnegative(),
   name: z.string().trim().min(1).max(100),
+  description: z.string().max(1000).optional(),
+  enabled: z.boolean().default(true),
   type: z.enum(['stdio', 'docker', 'streamable_http', 'sse']),
   command: z.string().max(1024).default(''),
+  containerCommand: z.array(z.string().max(4096)).max(128).default([]),
   args: z.array(z.string().max(4096)).max(128).default([]),
   image: z.string().max(256).default(''),
   url: z.string().max(2048).default(''),

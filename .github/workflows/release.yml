@@ -1,0 +1,114 @@
+name: Publish verified Windows release
+
+on:
+  workflow_run:
+    workflows: [CI, Security]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-main-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Admit only the current verified main commit
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $current = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify main.' }
+          $runs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs?head_sha=$env:SOURCE_SHA&event=push&per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify CI and Security.' }
+          $verified = $current -eq $env:SOURCE_SHA
+          foreach ($name in @('CI', 'Security')) {
+            $run = @($runs.workflow_runs | Where-Object { $_.name -eq $name -and $_.head_branch -eq 'main' } | Sort-Object created_at -Descending)[0]
+            if (-not $run -or $run.status -ne 'completed' -or $run.conclusion -ne 'success') { $verified = $false }
+          }
+          "current=$verified".ToLowerInvariant() >> $env:GITHUB_OUTPUT
+      - name: Choose an idempotent stable release version
+        if: steps.head.outputs.current == 'true'
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | Out-File -LiteralPath "$env:RUNNER_TEMP/releases.json" -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read releases.' }
+          node scripts/release-version.mjs "$env:RUNNER_TEMP/releases.json" $env:SOURCE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot choose a release version.' }
+      - name: Install locked build dependencies
+        if: steps.head.outputs.current == 'true' && steps.version.outputs.skip == 'false'
+        run: npm ci --ignore-scripts
+      - name: Set the artifact version
+        if: steps.head.outputs.current == 'true' && steps.version.outputs.skip == 'false'
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        shell: pwsh
+        run: |
+          node --input-type=module -e "import fs from 'node:fs'; const version=process.env.RELEASE_VERSION; if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Invalid version'); for(const file of ['package.json','package-lock.json']){const data=JSON.parse(fs.readFileSync(file,'utf8'));data.version=version;if(data.packages?.[''])data.packages[''].version=version;fs.writeFileSync(file,JSON.stringify(data,null,2));}"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot set the artifact version.' }
+      - name: Build the offline Windows installer
+        if: steps.head.outputs.current == 'true' && steps.version.outputs.skip == 'false'
+        run: npm run package:installer
+      - name: Publish complete assets from a draft
+        if: steps.head.outputs.current == 'true' && steps.version.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: pwsh
+        run: |
+          $current = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot recheck main.' }
+          if ($current -ne $env:SOURCE_SHA) { Write-Output 'A newer main superseded this build.'; exit 0 }
+          $runs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs?head_sha=$env:SOURCE_SHA&event=push&per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot recheck CI and Security.' }
+          foreach ($name in @('CI', 'Security')) {
+            $run = @($runs.workflow_runs | Where-Object { $_.name -eq $name -and $_.head_branch -eq 'main' } | Sort-Object created_at -Descending)[0]
+            if (-not $run -or $run.status -ne 'completed' -or $run.conclusion -ne 'success') { Write-Output 'CI or Security is not currently successful.'; exit 0 }
+          }
+          $metadata = Get-ChildItem desktop-builds -Filter release.json -Recurse | Select-Object -First 1
+          if (-not $metadata) { throw 'Release metadata is missing.' }
+          $release = Get-Content -LiteralPath $metadata.FullName -Raw | ConvertFrom-Json
+          if ($release.sourceRevision -ne $env:SOURCE_SHA) { throw 'Artifact source mismatch.' }
+          $folder = $metadata.Directory.FullName
+          $assets = @((Join-Path $folder 'Waleed-MCP-Hub-Setup.exe'), (Join-Path $folder 'SHA256SUMS.txt'), $metadata.FullName)
+          foreach ($asset in $assets) { if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw 'Release asset is missing.' } }
+          $expected = ((Get-Content -LiteralPath $assets[1] -Raw).Split(' '))[0]
+          if ((Get-FileHash -LiteralPath $assets[0] -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Installer checksum mismatch.' }
+          gh release create $env:RELEASE_TAG --draft --target $env:SOURCE_SHA --title "Waleed MCP Hub $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE -ne 0) {
+            $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $existing.target_commitish -ne $env:SOURCE_SHA -or -not $existing.draft) { throw 'Release tag is not an owned draft for this commit.' }
+          }
+          gh release upload $env:RELEASE_TAG @assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft.' }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

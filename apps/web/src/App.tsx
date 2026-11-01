@@ -18,6 +18,8 @@ import { latestRunner, untilAborted } from './latest.js';
 import { Icon } from './Icon.js';
 import { ProfileDialog } from './ProfileDialog.js';
 import { DiscoveryPanel } from './DiscoveryPanel.js';
+import { AgentCloning } from './AgentCloning.js';
+import { UpdateNotice } from './UpdateNotice.js';
 import { ImportDialog } from './ImportDialog.js';
 import {
   OperationDialog,
@@ -328,6 +330,14 @@ export function App() {
             </div>
           ) : (
             <>
+              {bootstrap?.capabilities.appUpdates && <UpdateNotice />}
+              {bootstrap?.capabilities.agentCloning && (
+                <AgentCloning
+                  disabled={recoveryBlocked}
+                  refresh={refresh}
+                  openManual={() => setManual(true)}
+                />
+              )}
               {bootstrap?.capabilities.discovery && (
                 <DiscoveryPanel
                   snapshot={discovery}

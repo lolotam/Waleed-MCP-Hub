@@ -23,6 +23,10 @@ import {
 } from './runtime/registry.js';
 import { createRuntimeChecks } from './runtime/checks.js';
 import {
+  createAgentCloning,
+  type AgentCloning,
+} from './integrations/cloning.js';
+import {
   MaterializationFault,
   type Materializer,
   type MaterializationPlan,
@@ -138,6 +142,7 @@ export function createLifecycle(
     profile.dockerProfileId = external.record?.dockerProfileId ?? null;
   };
   let packages: PackageService | null = null;
+  let cloning: AgentCloning | undefined;
   // The removal hook of a committed mutation: an install folder that no
   // connector references any more is deleted in the background. The mutation
   // never waits for the deletion and never fails because of it.
@@ -504,6 +509,7 @@ export function createLifecycle(
       await checks.drain();
     },
     async close() {
+      await cloning?.close();
       // The package jobs finish first: their save needs the lifecycle, so the
       // lifecycle stays open until they reported their real outcome.
       await packages?.close();
@@ -536,6 +542,9 @@ export function createLifecycle(
     };
     packages = createPackageService(host, adapters.packages);
   }
-  return { ...lifecycle, packages };
+  const host = { ...lifecycle, packages };
+  if (adapters.integrations)
+    cloning = createAgentCloning(host, adapters.integrations, process.env, now);
+  return { ...host, cloning };
 }
 export type HubLifecycle = ReturnType<typeof createLifecycle>;

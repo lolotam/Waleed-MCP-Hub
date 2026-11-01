@@ -15,6 +15,7 @@ import {
   ImportSavePreviewRequestSchema,
   SecretDeleteSchema,
   IntegrationAgentIdSchema,
+  ClonePrepareSchema,
 } from '@waleed/contracts';
 import {
   HubError,
@@ -26,6 +27,7 @@ import {
   type DiscoveryService,
   addManualMcp,
   PackageFault,
+  type UpdateChecker,
 } from '@waleed/hub-core';
 import { createSessions } from './security.js';
 
@@ -36,6 +38,7 @@ export interface ServerOptions {
   webRoot?: string;
   now?: () => number;
   shutdown?: () => void;
+  updates?: UpdateChecker;
 }
 
 export async function createHubServer(options: ServerOptions) {
@@ -345,6 +348,7 @@ export async function createHubServer(options: ServerOptions) {
     csrfToken: sessions.get(request.cookies.waleed_hub_session)!.csrf,
   }));
   app.post('/api/session/logout', async (request, reply) => {
+    options.lifecycle.cloning?.revoke(request.cookies.waleed_hub_session!);
     options.lifecycle.auth.revokeSession(request.cookies.waleed_hub_session!);
     imports.revoke(request.cookies.waleed_hub_session!);
     sessions.revoke(request.cookies.waleed_hub_session!);
@@ -365,6 +369,8 @@ export async function createHubServer(options: ServerOptions) {
         materialization: options.lifecycle.capabilities.materialization,
         secrets: options.lifecycle.capabilities.secrets,
         agentApply: options.lifecycle.capabilities.agentApply,
+        agentCloning: !!options.lifecycle.cloning,
+        appUpdates: !!options.updates,
         desktop: !!options.shutdown,
         startup: false,
       },
@@ -381,6 +387,78 @@ export async function createHubServer(options: ServerOptions) {
     observations: await options.lifecycle.checks.observations(),
     discovering: options.lifecycle.checks.discovering(),
   }));
+  app.get('/api/updates', async () => {
+    if (!options.updates)
+      throw new HubError('unavailable', 'Release checking is unavailable.');
+    return options.updates.status();
+  });
+  app.post('/api/updates/check', async (request) => {
+    if (
+      !request.body ||
+      typeof request.body !== 'object' ||
+      Array.isArray(request.body) ||
+      Object.keys(request.body).length
+    )
+      throw new HubError(
+        'invalid',
+        'Release checking accepts only an empty object.',
+      );
+    if (!options.updates)
+      throw new HubError('unavailable', 'Release checking is unavailable.');
+    return options.updates.check();
+  });
+  const cloning = () => {
+    if (!options.lifecycle.cloning)
+      throw new HubError(
+        'unavailable',
+        'Agent importing is unavailable on this installation.',
+      );
+    return options.lifecycle.cloning;
+  };
+  app.post('/api/agent-cloning/scan', async (request) => {
+    if (
+      !request.body ||
+      typeof request.body !== 'object' ||
+      Array.isArray(request.body) ||
+      Object.keys(request.body).length
+    )
+      throw new HubError('invalid', 'Scanning accepts only an empty object.');
+    return cloning().scan(request.cookies.waleed_hub_session!);
+  });
+  app.get<{ Params: { id: string } }>(
+    '/api/agent-cloning/:id',
+    async (request) =>
+      cloning().job(
+        IdSchema.parse(request.params.id),
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/agent-cloning/:id/prepare',
+    async (request) =>
+      cloning().prepare(
+        IdSchema.parse(request.params.id),
+        ClonePrepareSchema.parse(request.body).keys,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/agent-cloning/:id/copy',
+    async (request) =>
+      cloning().copy(
+        IdSchema.parse(request.params.id),
+        request.body,
+        request.cookies.waleed_hub_session!,
+      ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/agent-cloning/:id/cancel',
+    async (request) =>
+      cloning().cancel(
+        IdSchema.parse(request.params.id),
+        request.cookies.waleed_hub_session!,
+      ),
+  );
   app.post<{ Params: { id: string } }>(
     '/api/connectors/:id/tool-policies',
     async (request) => {
@@ -914,6 +992,7 @@ export async function createHubServer(options: ServerOptions) {
     });
   }
   app.addHook('onClose', async () => {
+    await options.updates?.close();
     imports.close();
     sessions.clear();
     await options.discovery?.close();

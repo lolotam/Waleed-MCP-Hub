@@ -59,6 +59,29 @@ export function managedEntry(
   }
   return value;
 }
+
+// Source MCP extraction shares the strict parser used for owned edits. No
+// project search, executable config or credential-cache loading occurs here.
+export function agentServers(
+  text: string,
+  format: AgentFormat,
+): Record<string, unknown> {
+  const root = document(text.replace(/^\uFEFF/, ''), format);
+  const map =
+    format === 'codex'
+      ? root.mcp_servers
+      : format === 'vscode'
+        ? root.servers
+        : format === 'opencode'
+          ? (object(root.mcp)?.servers ?? root.mcp)
+          : format === 'kilo'
+            ? root.mcp
+            : root.mcpServers;
+  if (map === undefined) return {};
+  const result = object(map);
+  if (!result) throw conflict();
+  return result;
+}
 export function agentEntry(
   format: AgentFormat,
   node: string,

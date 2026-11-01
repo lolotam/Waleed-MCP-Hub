@@ -1397,3 +1397,56 @@ dialog h2 {
     gap: 8px;
   }
 }
+.agent-cloning .clone-content {
+  padding: 20px;
+}
+.clone-agent {
+  margin-block: 16px;
+  border-block-start: 1px solid var(--border);
+  padding-block: 12px;
+}
+.clone-entries {
+  padding: 0;
+  list-style: none;
+}
+.clone-entries > li {
+  display: grid;
+  gap: 10px;
+  padding: 16px 0;
+  border-block-end: 1px solid var(--border);
+}
+.clone-entries label,
+.clone-select-agent,
+.clone-consent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.clone-entries input:not([type='checkbox']) {
+  min-width: 0;
+  max-width: 100%;
+}
+.clone-consent {
+  margin-block: 20px;
+}
+.clone-entries pre {
+  max-width: 100%;
+  overflow: auto;
+}
+.clone-package {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.update-notice {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-block: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
