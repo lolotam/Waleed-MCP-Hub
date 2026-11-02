@@ -78,7 +78,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         shell: pwsh
         run: |
-          node --input-type=module -e "import fs from 'node:fs'; const version=process.env.RELEASE_VERSION; if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Invalid version'); for(const file of ['package.json','package-lock.json']){const data=JSON.parse(fs.readFileSync(file,'utf8'));data.version=version;if(data.packages?.[''])data.packages[''].version=version;fs.writeFileSync(file,JSON.stringify(data,null,2));}"
+          node --input-type=module -e "import fs from 'node:fs'; const version=process.env.RELEASE_VERSION; if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Invalid version'); for(const file of ['package.json','package-lock.json','packages/hub-core/package.json']){const data=JSON.parse(fs.readFileSync(file,'utf8'));data.version=version;for(const key of ['','packages/hub-core'])if(data.packages?.[key])data.packages[key].version=version;fs.writeFileSync(file,JSON.stringify(data,null,2));}"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot set the artifact version.' }
       - name: Build the offline Windows installer
         if: steps.head.outputs.current == 'true' && steps.version.outputs.skip == 'false'

@@ -1,5 +1,10 @@
 import { lstat, open } from 'node:fs/promises';
-import { constants as fsConstants, watchFile, unwatchFile } from 'node:fs';
+import {
+  constants as fsConstants,
+  readFileSync,
+  watchFile,
+  unwatchFile,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -63,6 +68,13 @@ import {
 import { packagesRoot } from '../packages/store.js';
 import { createPackageVerifier } from '../packages/verify.js';
 import {
+  bridgeNotices,
+  registerGuide,
+  shortInstructions,
+  type BridgeNotice,
+  type RefusalCode,
+} from './agent-guide.js';
+import {
   parseToolCatalog,
   writeToolCatalogFile,
   type CatalogEntry,
@@ -83,11 +95,11 @@ export function toolPolicy(connector: Connector, name: string) {
   return parsed.success ? parsed.data : 'block';
 }
 class ToolPolicyRefused extends Error {
-  constructor(readonly code: string) {
+  constructor(readonly code: RefusalCode | BridgeNotice) {
     super(code);
   }
 }
-const policyRefusal = (code: string): CallToolResult => ({
+const policyRefusal = (code: RefusalCode | BridgeNotice): CallToolResult => ({
   isError: true,
   content: [{ type: 'text', text: code }],
 });
@@ -105,14 +117,6 @@ export interface BridgePeer {
   beginOperation?(): void;
   endOperation?(): void;
 }
-
-// The three texts an agent ever receives. No diagnostic, argument, result or
-// server output ever reaches the agent.
-const registryUnavailableText =
-  'The managed hub registry is unavailable. Inspect local recovery.';
-const refreshToolsText = 'Refresh the hub tool list before using this tool.';
-const connectorUnavailableText =
-  'The connector is unavailable, changed, disabled, or requires authentication. Inspect the hub and refresh tools.';
 
 // The operation deadlines of the spec: a call may take a minute, a listing
 // twenty seconds per connector.
@@ -417,7 +421,7 @@ interface PooledPeer {
 // The registry could not be read: the bridge fails closed.
 class RegistryUnavailable extends Error {
   constructor() {
-    super(registryUnavailableText);
+    super(bridgeNotices.registryUnavailable);
   }
 }
 
@@ -1222,6 +1226,17 @@ const whenAborted = (signal: AbortSignal) =>
         once: true,
       });
   });
+// The release job stamps this package's manifest. It sits two levels above
+// the module in the source tree, the build and the portable folder alike,
+// while the root manifest does not. An unreadable version stops the bridge.
+function hubVersion() {
+  const { version } = JSON.parse(
+    readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+  ) as { version?: unknown };
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version))
+    throw new Error('The hub version is unreadable.');
+  return version;
+}
 export function createAgentBridge(
   read: () => Promise<HubState>,
   connect: BridgeConnect,
@@ -1231,9 +1246,17 @@ export function createAgentBridge(
   toolSeparator: '__' | '_' = '__',
 ) {
   const server = new Server(
-    { name: 'waleed-mcp-hub', version: '0.1.0' },
-    { capabilities: { tools: { listChanged: true } } },
+    { name: 'waleed-mcp-hub', version: hubVersion() },
+    {
+      capabilities: {
+        tools: { listChanged: true },
+        resources: {},
+        prompts: {},
+      },
+      instructions: shortInstructions(toolSeparator),
+    },
   );
+  registerGuide(server, toolSeparator);
   const names = new Map<
     string,
     { connectorId: string; hash: string; name: string }
@@ -1246,12 +1269,12 @@ export function createAgentBridge(
     try {
       return await read();
     } catch {
-      throw new Error(registryUnavailableText);
+      throw new Error(bridgeNotices.registryUnavailable);
     }
   };
   const admitted = async <T>(action: () => Promise<T>) => {
-    if (closing) throw new Error(connectorUnavailableText);
-    if (active >= 2) throw new Error('Hub request concurrency limit reached.');
+    if (closing) throw new Error(bridgeNotices.connectorUnavailable);
+    if (active >= 2) throw new Error(bridgeNotices.concurrencyLimit);
     active++;
     try {
       return await action();
@@ -1430,7 +1453,7 @@ export function createAgentBridge(
   const refresh = (): Promise<Tool[]> => {
     refreshing ??= (async () => {
       try {
-        if (closing) throw new Error(connectorUnavailableText);
+        if (closing) throw new Error(bridgeNotices.connectorUnavailable);
         // The deadline runs on the session timers, like the retry below.
         const deadline = new AbortController();
         const timer = session?.setTimer(() => deadline.abort(), 45000);
@@ -1494,7 +1517,7 @@ export function createAgentBridge(
           content: [
             {
               type: 'text' as const,
-              text: refreshToolsText,
+              text: bridgeNotices.refreshTools,
             },
           ],
         };
@@ -1509,10 +1532,10 @@ export function createAgentBridge(
         );
         if (!connector || !connector.enabled || !approved(connector)) {
           await bridge?.reconcile();
-          throw new ToolPolicyRefused(connectorUnavailableText);
+          throw new ToolPolicyRefused(bridgeNotices.connectorUnavailable);
         }
         if (definitionHash(connector) !== target.hash)
-          throw new ToolPolicyRefused(refreshToolsText);
+          throw new ToolPolicyRefused(bridgeNotices.refreshTools);
         const policy = toolPolicy(connector, target.name);
         if (policy === 'block') throw new ToolPolicyRefused('tool_blocked');
         let confirmed = false;
@@ -1588,7 +1611,7 @@ export function createAgentBridge(
         return policyRefusal(
           error instanceof ToolPolicyRefused
             ? error.code
-            : registryUnavailableText,
+            : bridgeNotices.registryUnavailable,
         );
       }
       if (bridge) {
@@ -1605,7 +1628,7 @@ export function createAgentBridge(
             content: [
               {
                 type: 'text' as const,
-                text: refreshToolsText,
+                text: bridgeNotices.refreshTools,
               },
             ],
           };
@@ -1641,10 +1664,10 @@ export function createAgentBridge(
                   type: 'text' as const,
                   text:
                     error instanceof RegistryUnavailable
-                      ? registryUnavailableText
+                      ? bridgeNotices.registryUnavailable
                       : error instanceof StaleTool
-                        ? refreshToolsText
-                        : connectorUnavailableText,
+                        ? bridgeNotices.refreshTools
+                        : bridgeNotices.connectorUnavailable,
                 },
               ],
             };
@@ -1701,7 +1724,7 @@ export function createAgentBridge(
           content: [
             {
               type: 'text' as const,
-              text: connectorUnavailableText,
+              text: bridgeNotices.connectorUnavailable,
             },
           ],
         };

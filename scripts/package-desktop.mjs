@@ -55,6 +55,9 @@ while (queue.length) {
   const pkg = JSON.parse(await readFile(manifest, 'utf8'));
   const source = dirname(manifest);
   const workspace = pkg.name?.startsWith('@waleed/');
+  // The bridge reports this manifest's version to every agent.
+  if (pkg.name === '@waleed/hub-core' && pkg.version !== version)
+    throw new Error('The hub-core version does not match the release version.');
   // The bundled npm keeps its dependencies inside its own folder, so it ships
   // whole and none of its dependencies is queued.
   const bundled = pkg.name === 'npm';

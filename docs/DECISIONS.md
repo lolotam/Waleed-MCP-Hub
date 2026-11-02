@@ -861,6 +861,40 @@ Residuals:
   the hub does not write Grok's compat or disabled-server settings.
 - Both installed builds share `~/.grok`; one integration covers both.
 
+## D027 — Agent guidance from the bridge (2026-11-02)
+
+**Decision.** The bridge guides every connected agent with static text from `packages/hub-core/src/integrations/agent-guide.ts`, sent three ways:
+
+- the MCP `instructions` on `initialize`, at most 1,200 characters;
+- the `hub://guide` resource (`text/markdown`);
+- the `hub-guide` prompt, for clients that support prompts but not resources.
+
+The hub writes nothing into the agents' own folders.
+
+**Why.** When the hub itself refuses or fails a call, agents see only 4 refusal codes and 4 notice texts; a connector's own results pass through unchanged and are marked untrusted. Without guidance they retry blocked calls, guess tool names, or edit hub files to clear an error. Shipping the text inside the bridge keeps it in step with the installed version.
+
+**Security.** The guidance never includes a connector name, tool name, description or argument. The tool separator is the only variable. Otherwise any upstream MCP server could inject instructions into every connected agent. `tests/agent-guide.test.ts` checks all three surfaces after discovery.
+
+**Drift check.** The guidance table is a `Record` over every agent-visible value, and `ToolPolicyRefused` accepts only those values. A new code without an entry fails `npm run typecheck`.
+
+**Version.** `serverInfo.version` is read from the hub-core manifest, which the release job stamps. The bridge does not start without it.
+
+**9-CLI trial (pending).** A one-time trial, run with a throwaway probe server and per-run configs only, will record which clients pass `instructions`, resources and prompts to their model. It runs only when free commit memory is above 20 GB, one CLI at a time. A CLI with no per-run config is recorded as "not trialled".
+
+| CLI            | instructions | resources | prompts |
+| -------------- | ------------ | --------- | ------- |
+| Claude Code    | pending      | pending   | pending |
+| Codex          | pending      | pending   | pending |
+| Grok           | pending      | pending   | pending |
+| OpenCode       | pending      | pending   | pending |
+| Antigravity    | pending      | pending   | pending |
+| Kimi           | pending      | pending   | pending |
+| Kilo           | pending      | pending   | pending |
+| Cursor         | pending      | pending   | pending |
+| Claude Desktop | pending      | pending   | pending |
+
+**Deferred.** An opt-in `SKILL.md` per agent, only for a CLI that receives none of the three, needs its own decision.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint
