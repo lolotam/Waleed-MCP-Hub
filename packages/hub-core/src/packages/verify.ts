@@ -186,12 +186,25 @@ async function manifestLines(
   return lines;
 }
 
-// The installed-file manifest: one line per regular file, sorted, hashed
-// together.
-export async function buildManifest(
+const sameDirectory = (before: BigIntStats, named: BigIntStats) =>
+  named.isDirectory() &&
+  !named.isSymbolicLink() &&
+  named.dev === before.dev &&
+  named.ino === before.ino &&
+  named.mtimeNs === before.mtimeNs &&
+  named.ctimeNs === before.ctimeNs;
+
+// The identity of every file and folder a successful hash pass read, keyed by
+// the relative file name and the folder path.
+interface TreeIdentity {
+  files: Map<string, BigIntStats>;
+  directories: Map<string, BigIntStats>;
+}
+
+async function hashTree(
   installDir: string,
   signal?: AbortSignal,
-): Promise<PackageManifest> {
+): Promise<{ manifest: PackageManifest; identity: TreeIdentity }> {
   const root = await lstat(installDir);
   if (!root.isDirectory() || root.isSymbolicLink()) throw modified();
   const { files, directories, bytes } = await listInstalledFiles(
@@ -204,33 +217,75 @@ export async function buildManifest(
   for (const directory of directories) {
     throwIfAborted(signal);
     const named = await lstat(directory.path, { bigint: true });
-    const before = directory.identity;
-    if (
-      !named.isDirectory() ||
-      named.isSymbolicLink() ||
-      named.dev !== before.dev ||
-      named.ino !== before.ino ||
-      named.mtimeNs !== before.mtimeNs ||
-      named.ctimeNs !== before.ctimeNs
-    )
-      throw modified();
+    if (!sameDirectory(directory.identity, named)) throw modified();
   }
   // The last stat may have completed after the caller gave up.
   throwIfAborted(signal);
   lines.sort();
   return {
-    hash: createHash('sha256').update(lines.join('\n')).digest('hex'),
-    files: lines.length,
-    bytes,
+    manifest: {
+      hash: createHash('sha256').update(lines.join('\n')).digest('hex'),
+      files: lines.length,
+      bytes,
+    },
+    identity: {
+      files: new Map(files.map((file) => [file.relative, file.identity])),
+      directories: new Map(
+        directories.map((directory) => [directory.path, directory.identity]),
+      ),
+    },
   };
 }
+
+// The installed-file manifest: one line per regular file, sorted, hashed
+// together.
+export async function buildManifest(
+  installDir: string,
+  signal?: AbortSignal,
+): Promise<PackageManifest> {
+  return (await hashTree(installDir, signal)).manifest;
+}
+
+// True when a fresh walk finds exactly the files and folders a hash pass read,
+// each with the same identity. Any new, missing or changed entry is a miss.
+const unchanged = (
+  known: TreeIdentity,
+  walked: Awaited<ReturnType<typeof listInstalledFiles>>,
+): boolean =>
+  walked.files.length === known.files.size &&
+  walked.directories.length === known.directories.size &&
+  walked.files.every((file) => {
+    const before = known.files.get(file.relative);
+    return before !== undefined && sameFile(before, file.identity);
+  }) &&
+  walked.directories.every((directory) => {
+    const before = known.directories.get(directory.path);
+    return before !== undefined && sameDirectory(before, directory.identity);
+  });
+
+type ManifestCheck = (
+  installDir: string,
+  manifestHash: string,
+  signal?: AbortSignal,
+) => Promise<void>;
+
+const hashManifest: ManifestCheck = async (
+  installDir,
+  manifestHash,
+  signal,
+) => {
+  if ((await buildManifest(installDir, signal)).hash !== manifestHash)
+    throw modified();
+};
+
 const samePath = (left: string, right: string): boolean =>
   win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
 
 // The launch verification of a managed connector. It never starts a process
 // and it never resolves a secret: it only decides whether the install folder
 // is still the one the hub approved.
-export async function verifyPackageFiles(
+async function verifyWith(
+  checkManifest: ManifestCheck,
   connector: Connector,
   packagesDir: string,
   signal?: AbortSignal,
@@ -262,8 +317,7 @@ export async function verifyPackageFiles(
     } finally {
       bytes.fill(0);
     }
-    if ((await buildManifest(installDir, signal)).hash !== pkg.manifestHash)
-      throw modified();
+    await checkManifest(installDir, pkg.manifestHash, signal);
     // Node resolves bare imports by walking up the parent folders, so no parent
     // of the install may hold a node_modules entry.
     let parent = resolve(packagesDir);
@@ -280,5 +334,44 @@ export async function verifyPackageFiles(
   }
 }
 
+// Hashes every installed file. Verify files, Test capabilities and every
+// launch outside a bridge use it.
+export const verifyPackageFiles = (
+  connector: Connector,
+  packagesDir: string,
+  signal?: AbortSignal,
+): Promise<void> => verifyWith(hashManifest, connector, packagesDir, signal);
+
 // The name the launch points use.
 export const verifyPackage = verifyPackageFiles;
+
+// The verification of one bridge process. The first verification of an
+// install hashes every file, as verifyPackageFiles does. Later ones walk the
+// tree and compare each file and folder identity (device, file id, size,
+// write and change times, one link) with the ones that hash pass read; only a
+// difference hashes again. A same-user process that rewrites a file and
+// restores all of these is not seen until the next bridge process (D024
+// amendment, 2026-11-02).
+export function createPackageVerifier() {
+  const verified = new Map<string, TreeIdentity & { manifestHash: string }>();
+  const remembered: ManifestCheck = async (
+    installDir,
+    manifestHash,
+    signal,
+  ) => {
+    const known = verified.get(installDir);
+    if (
+      known?.manifestHash === manifestHash &&
+      unchanged(known, await listInstalledFiles(installDir, signal))
+    ) {
+      throwIfAborted(signal);
+      return;
+    }
+    verified.delete(installDir);
+    const { manifest, identity } = await hashTree(installDir, signal);
+    if (manifest.hash !== manifestHash) throw modified();
+    verified.set(installDir, { ...identity, manifestHash });
+  };
+  return (connector: Connector, packagesDir: string, signal?: AbortSignal) =>
+    verifyWith(remembered, connector, packagesDir, signal);
+}

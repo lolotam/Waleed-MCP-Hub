@@ -61,7 +61,7 @@ import {
   type DockerOwnership,
 } from './docker-ownership.js';
 import { packagesRoot } from '../packages/store.js';
-import { verifyPackage } from '../packages/verify.js';
+import { createPackageVerifier } from '../packages/verify.js';
 import {
   parseToolCatalog,
   writeToolCatalogFile,
@@ -1842,6 +1842,9 @@ export async function runAgentBridge(
   const safetyPath = join(directory, 'safety.json');
   const bootPath = join(directory, 'boot.json');
   const catalogPath = join(directory, `tool-catalog-${agentId}.json`);
+  // One verifier per bridge: an install hashed once is re-checked by its file
+  // identities on every later launch and reused-peer operation.
+  const verifyPackage = createPackageVerifier();
   const read = async () => {
     assertLedgerOpen(
       SafetyStateSchema.parse(await readProtectedJson(safetyPath)),

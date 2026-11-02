@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BigIntStats } from 'node:fs';
@@ -11,6 +11,7 @@ import {
 } from '../packages/hub-core/src/packages/store.js';
 import {
   buildManifest,
+  createPackageVerifier,
   verifyPackageFiles,
 } from '../packages/hub-core/src/packages/verify.js';
 import { packageArguments } from '../packages/hub-core/src/runtime/registry.js';
@@ -267,6 +268,91 @@ describe('cancellable package verification', () => {
       verifyPackageFiles(connector, packagesDir, controller.signal),
     ).resolves.toBeUndefined();
     expect(plan.closed).toBe(plan.opened);
+  });
+});
+
+describe('remembered verification of a bridge', () => {
+  const distOf = (packagesDir: string, connector: NativeConnector) =>
+    join(
+      installDirectory(packagesDir, connector.package!.installId),
+      'node_modules',
+      '@scope',
+      'srv',
+      'dist',
+    );
+
+  it('re-verifies an unchanged install without reading a file', async () => {
+    const { packagesDir, connector } = await createInstall({ files: 3 });
+    const verify = createPackageVerifier();
+    await verify(connector, packagesDir);
+    plan.opened = 0;
+
+    await expect(verify(connector, packagesDir)).resolves.toBeUndefined();
+    expect(plan.opened).toBe(0);
+  });
+
+  it('keeps hashing every file on each Verify files call', async () => {
+    const { packagesDir, connector } = await createInstall({ files: 3 });
+    await verifyPackageFiles(connector, packagesDir);
+    plan.opened = 0;
+
+    await verifyPackageFiles(connector, packagesDir);
+    expect(plan.opened).toBeGreaterThan(0);
+  });
+
+  it.each([
+    {
+      change: 'a size-preserving content edit',
+      apply: (dist: string) =>
+        writeFile(join(dist, 'file-0.txt'), 'y'.repeat(256)),
+      outcome: 'package_modified',
+    },
+    {
+      change: 'an added file',
+      apply: (dist: string) => writeFile(join(dist, 'extra.js'), 'evil'),
+      outcome: 'package_modified',
+    },
+    {
+      change: 'new file times on the same content',
+      apply: (dist: string) =>
+        utimes(
+          join(dist, 'file-0.txt'),
+          new Date(2030, 0, 1),
+          new Date(2030, 0, 1),
+        ),
+      outcome: undefined,
+    },
+  ])('hashes again after $change', async ({ apply, outcome }) => {
+    const { packagesDir, connector } = await createInstall({ files: 3 });
+    const verify = createPackageVerifier();
+    await verify(connector, packagesDir);
+    await apply(distOf(packagesDir, connector));
+    plan.opened = 0;
+
+    const result = verify(connector, packagesDir);
+    if (outcome)
+      await expect(result).rejects.toMatchObject({ reason: outcome });
+    else await expect(result).resolves.toBeUndefined();
+    expect(plan.opened).toBeGreaterThan(0);
+  });
+
+  it('stops the identity walk when the signal aborts', async () => {
+    const { packagesDir, connector } = await createInstall({ files: 3 });
+    const verify = createPackageVerifier();
+    await verify(connector, packagesDir);
+    plan.opened = 0;
+    plan.statCounts.clear();
+    const controller = new AbortController();
+    plan.abortOnStat = {
+      path: distOf(packagesDir, connector),
+      nth: 1,
+      controller,
+    };
+
+    await expect(
+      verify(connector, packagesDir, controller.signal),
+    ).rejects.toMatchObject({ reason: 'cancelled' });
+    expect(plan.opened).toBe(0);
   });
 });
 
