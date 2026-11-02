@@ -61,7 +61,7 @@ import {
   type DockerOwnership,
 } from './docker-ownership.js';
 import { packagesRoot } from '../packages/store.js';
-import { verifyPackage } from '../packages/verify.js';
+import { createPackageVerifier } from '../packages/verify.js';
 import {
   parseToolCatalog,
   writeToolCatalogFile,
@@ -1337,11 +1337,12 @@ export function createAgentBridge(
   // Every enabled, approved connector's listing under the definition it was
   // listed with. Package verification and process startup used to consume
   // the whole deadline before later healthy peers were visited, so at most
-  // four peers start at once, in registry order, within one shared deadline
-  // and the 256-tool cap. A connector that could not list maps to undefined,
-  // and so does one the deadline ended the discovery before reaching. A
-  // connector the catalog lacks is visited first, so a slow startup cannot
-  // keep starving the last ones of the registry.
+  // four peers start at once, in registry order, within one shared deadline;
+  // the 256-tool cap is applied later, by the catalog merge and by publish. A
+  // connector that could not list maps to undefined, and so does one the
+  // deadline ended the discovery before reaching. A connector the catalog
+  // lacks is visited first, so a slow startup cannot keep starving the last
+  // ones of the registry.
   const discoverAll = async (signal: AbortSignal, cached?: ToolCatalog) => {
     const snapshot = bridge ? await bridge.snapshot() : undefined;
     const state = snapshot ? snapshot.state : await readState();
@@ -1351,9 +1352,8 @@ export function createAgentBridge(
       .filter((item) => item.enabled && approved(item))
       .sort((left, right) => listed(left) - listed(right));
     const found = new Map<string, CatalogEntry | undefined>();
-    let count = 0;
     for (let offset = 0; offset < connectors.length; offset += 4) {
-      if (signal.aborted || count >= 256) break;
+      if (signal.aborted) break;
       const batch = connectors.slice(offset, offset + 4);
       // Each connector lists up to the whole cap: the order of the visits is
       // not the order of the registry, so the cap is shared out in registry
@@ -1367,11 +1367,10 @@ export function createAgentBridge(
           connector.id,
           tools && { hash: definitionHash(connector), tools },
         );
-        count += tools?.length ?? 0;
       }
     }
-    // Only the deadline leaves connectors unreached as failures: the tool cap
-    // ends the discovery on purpose.
+    // Every connector is visited until the deadline, even past 256 tools: one
+    // that was never reached counts as a failure, so it is retried.
     if (signal.aborted)
       for (const connector of connectors)
         if (!found.has(connector.id)) found.set(connector.id, undefined);
@@ -1842,6 +1841,9 @@ export async function runAgentBridge(
   const safetyPath = join(directory, 'safety.json');
   const bootPath = join(directory, 'boot.json');
   const catalogPath = join(directory, `tool-catalog-${agentId}.json`);
+  // One verifier per bridge: an install hashed once is re-checked by its file
+  // identities on every later launch and reused-peer operation.
+  const verifyPackage = createPackageVerifier();
   const read = async () => {
     assertLedgerOpen(
       SafetyStateSchema.parse(await readProtectedJson(safetyPath)),
