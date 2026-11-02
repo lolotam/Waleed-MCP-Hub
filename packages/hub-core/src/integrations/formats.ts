@@ -6,19 +6,16 @@ import { HubError } from '../errors.js';
 export const managedName = 'waleed-mcp-hub';
 export type AgentFormat =
   'opencode' | 'codex' | 'mcpServers' | 'vscode' | 'kilo';
-const pathFor = (format: AgentFormat) =>
-  format === 'opencode'
-    ? ['mcp', 'servers', managedName]
-    : [
-        format === 'codex'
-          ? 'mcp_servers'
-          : format === 'vscode'
-            ? 'servers'
-            : format === 'kilo'
-              ? 'mcp'
-              : 'mcpServers',
-        managedName,
-      ];
+const pathFor = (format: AgentFormat) => [
+  format === 'codex'
+    ? 'mcp_servers'
+    : format === 'vscode'
+      ? 'servers'
+      : format === 'opencode' || format === 'kilo'
+        ? 'mcp'
+        : 'mcpServers',
+  managedName,
+];
 const conflict = () =>
   new HubError(
     'conflict',
