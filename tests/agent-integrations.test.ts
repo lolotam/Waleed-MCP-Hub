@@ -143,6 +143,10 @@ describe('comment-preserving managed agent entries', () => {
       expect(receipt.agent.status).toBe('integrated');
       expect(backups[0]).toBe(original);
       const integrated = contents.get(target.paths[0]!)!;
+      if (target.format === 'codex')
+        expect(managedEntry(integrated, target.format)).toMatchObject({
+          startup_timeout_sec: 90,
+        });
       expect(integrated.toLowerCase()).toContain('preserve');
       if (target.id === 'codex')
         expect(integrated).toContain('node_repl = true');
@@ -324,16 +328,319 @@ describe('comment-preserving managed agent entries', () => {
     expect(hashData(managedEntry(document, 'opencode'))).toBe(hashData(entry));
     expect(hashBytes(document)).toHaveLength(64);
   });
-  // Regression 2026-11-02: the hub wrote `mcp.servers["waleed-mcp-hub"]`, which
-  // OpenCode 2.2.5 never loads; it reads each server from `mcp.<name>`.
-  it('writes the OpenCode entry directly under mcp, beside the existing servers', () => {
-    const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
-    const existing = { other: { type: 'local', command: ['other.exe'] } };
-    const document = JSON.parse(
-      editAgentDocument(JSON.stringify({ mcp: existing }), 'opencode', entry),
-    ) as unknown;
-    expect(document).toEqual({ mcp: { ...existing, [managedName]: entry } });
+  // Regression 2026-11-02: the workstation's V1-format OpenCode configuration
+  // needs the direct map. Native V2 wrapper configurations are covered below.
+  it.each([
+    { other: { type: 'local', command: ['other.exe'] } },
+    { servers: { enabled: false } },
+    { timeout: 5000 },
+    {
+      timeout: { startup: 45000 },
+      servers: { type: 'local', command: ['other.exe'] },
+    },
+  ])(
+    'writes a direct OpenCode entry beside existing V1 servers (%j)',
+    (existing) => {
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      const document = JSON.parse(
+        editAgentDocument(JSON.stringify({ mcp: existing }), 'opencode', entry),
+      ) as unknown;
+      expect(document).toEqual({ mcp: { ...existing, [managedName]: entry } });
+    },
+  );
+  it.each([
+    {},
+    { other: { type: 'local', command: ['other.exe'] } },
+    ...['type', 'command', 'url', 'enabled', 'disabled'].map((name) => ({
+      [name]: { type: 'local', command: ['other.exe'] },
+    })),
+  ])(
+    'integrates, updates and disconnects inside an existing OpenCode V2 wrapper (%j)',
+    (servers) => {
+      const original = { mcp: { servers, timeout: 5000 }, theme: 'existing' };
+      const raw = '// keep V2 settings\n' + JSON.stringify(original);
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      const integrated = editAgentDocument(raw, 'opencode', entry);
+      expect(
+        JSON.parse(integrated.replace('// keep V2 settings\n', '')),
+      ).toEqual({
+        ...original,
+        mcp: { ...original.mcp, servers: { ...servers, [managedName]: entry } },
+      });
+      expect(managedEntry(integrated, 'opencode')).toEqual(entry);
+      const replacement = {
+        ...entry,
+        command: ['new-node', 'bridge', 'state', 'opencode'],
+      };
+      const updated = editAgentDocument(
+        integrated,
+        'opencode',
+        replacement,
+        hashData(entry),
+      );
+      expect(managedEntry(updated, 'opencode')).toEqual(replacement);
+      const disconnected = editAgentDocument(
+        updated,
+        'opencode',
+        undefined,
+        hashData(replacement),
+      );
+      expect(disconnected).toContain('// keep V2 settings');
+      expect(
+        JSON.parse(disconnected.replace('// keep V2 settings\n', '')),
+      ).toEqual(original);
+    },
+  );
+  it.each([
+    { type: 'local', command: 'node server.js' },
+    { type: 'local', command: [] },
+    { type: 'remote', url: 'file:///private/file' },
+    {
+      type: 'local',
+      command: 'node server.js',
+      headers: { type: 'remote', url: 'https://example.test/mcp' },
+    },
+  ])(
+    'never nests the hub inside a malformed direct server named servers (%j)',
+    (servers) => {
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      expect(() =>
+        editAgentDocument(
+          JSON.stringify({ mcp: { servers } }),
+          'opencode',
+          entry,
+        ),
+      ).toThrowError(expect.objectContaining({ code: 'conflict' }));
+    },
+  );
+  it.each(['type', 'command', 'url', 'enabled', 'disabled'])(
+    'removes an owned wrapped entry while preserving a malformed %s sibling',
+    (name) => {
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      const siblings = {
+        [name]: null,
+        healthy: { type: 'local', command: ['other.exe'] },
+      };
+      const raw =
+        '// keep malformed sibling\n' +
+        JSON.stringify({
+          mcp: { servers: { ...siblings, [managedName]: entry } },
+        });
+      expect(() =>
+        editAgentDocument(
+          raw,
+          'opencode',
+          undefined,
+          hashData({ foreign: true }),
+        ),
+      ).toThrowError(expect.objectContaining({ code: 'conflict' }));
+      const removed = editAgentDocument(
+        raw,
+        'opencode',
+        undefined,
+        hashData(entry),
+      );
+      expect(removed).toContain('// keep malformed sibling');
+      expect(managedEntry(removed, 'opencode')).toBeUndefined();
+      expect(
+        JSON.parse(removed.replace('// keep malformed sibling\n', '')),
+      ).toEqual({
+        mcp: { servers: siblings },
+      });
+    },
+  );
+  it('disconnects the owned wrapper entry after an unrelated sibling becomes malformed', async () => {
+    const { hub, contents } = setup();
+    const path = targets.find((target) => target.id === 'opencode')!.paths[0]!;
+    const healthy = { type: 'local', command: ['other.exe'] };
+    contents.set(path, JSON.stringify({ mcp: { servers: { healthy } } }));
+    try {
+      const before = (await hub.integrations.scan()).agents.find(
+        (agent) => agent.agentId === 'opencode',
+      )!;
+      await hub.integrations.integrate('opencode', {
+        expectedRevision: 0,
+        fingerprint: before.fingerprint,
+        confirmConfigurationChange: true,
+      });
+      const parsed = JSON.parse(contents.get(path)!);
+      parsed.mcp.servers.command = null;
+      contents.set(path, JSON.stringify(parsed));
+      const observed = (await hub.integrations.scan()).agents.find(
+        (agent) => agent.agentId === 'opencode',
+      )!;
+      expect(observed.status).toBe('integrated');
+      const disconnected = await hub.integrations.disconnect('opencode', {
+        expectedRevision: 1,
+        fingerprint: observed.fingerprint,
+        confirmConfigurationChange: true,
+      });
+      expect(disconnected.changed).toBe(true);
+      expect(disconnected.agent.status).toBe('not_integrated');
+      expect(JSON.parse(contents.get(path)!)).toEqual({
+        mcp: { servers: { healthy, command: null } },
+      });
+      expect(
+        (await hub.inventory()).integrations?.find(
+          (record) => record.agentId === 'opencode',
+        ),
+      ).toBeUndefined();
+      const after = (await hub.integrations.scan()).agents.find(
+        (agent) => agent.agentId === 'opencode',
+      )!;
+      expect(after.status).toBe('not_integrated');
+      await expect(
+        hub.integrations.integrate('opencode', {
+          expectedRevision: 2,
+          fingerprint: after.fingerprint,
+          confirmConfigurationChange: true,
+        }),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    } finally {
+      await hub.close();
+    }
   });
+  it('edits an owned direct OpenCode entry in place beside an existing wrapper', () => {
+    const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
+    const servers = { other: { type: 'local', command: ['other.exe'] } };
+    const original = { mcp: { servers, [managedName]: entry }, theme: 'keep' };
+    const raw = '// keep mixed config\n' + JSON.stringify(original);
+    expect(managedEntry(raw, 'opencode')).toEqual(entry);
+    expect(() => editAgentDocument(raw, 'opencode', entry)).toThrow();
+    expect(() =>
+      editAgentDocument(raw, 'opencode', entry, hashData({ foreign: true })),
+    ).toThrow();
+    const replacement = {
+      ...entry,
+      command: ['new-node', 'bridge', 'state', 'opencode'],
+    };
+    const updated = editAgentDocument(
+      raw,
+      'opencode',
+      replacement,
+      hashData(entry),
+    );
+    expect(updated).toContain('// keep mixed config');
+    expect(JSON.parse(updated.replace('// keep mixed config\n', ''))).toEqual({
+      mcp: { servers, [managedName]: replacement },
+      theme: 'keep',
+    });
+    expect(managedEntry(updated, 'opencode')).toEqual(replacement);
+  });
+  it.each([{}, { other: { type: 'local', command: ['other.exe'] } }])(
+    'disconnects an owned direct OpenCode entry beside its wrapper (%j)',
+    async (servers) => {
+      const { hub, contents } = setup();
+      const target = targets.find((target) => target.id === 'opencode')!;
+      const path = target.paths[0]!;
+      contents.set(path, JSON.stringify({ mcp: { servers } }));
+      try {
+        const before = (await hub.integrations.scan()).agents.find(
+          (agent) => agent.agentId === 'opencode',
+        )!;
+        await hub.integrations.integrate('opencode', {
+          expectedRevision: 0,
+          fingerprint: before.fingerprint,
+          confirmConfigurationChange: true,
+        });
+        const parsed = JSON.parse(contents.get(path)!);
+        const entry = parsed.mcp.servers[managedName];
+        delete parsed.mcp.servers[managedName];
+        parsed.mcp[managedName] = entry;
+        contents.set(path, JSON.stringify(parsed));
+        const mixed = (await hub.integrations.scan()).agents.find(
+          (agent) => agent.agentId === 'opencode',
+        )!;
+        const disconnected = await hub.integrations.disconnect('opencode', {
+          expectedRevision: 1,
+          fingerprint: mixed.fingerprint,
+          confirmConfigurationChange: true,
+        });
+        expect(disconnected).toMatchObject({
+          changed: true,
+          agent: { status: 'not_integrated' },
+        });
+        expect(JSON.parse(contents.get(path)!)).toEqual({ mcp: { servers } });
+        expect(mixed.status).toBe('integrated');
+        expect(
+          (await hub.inventory()).integrations?.find(
+            (record) => record.agentId === 'opencode',
+          ),
+        ).toBeUndefined();
+      } finally {
+        await hub.close();
+      }
+    },
+  );
+  it.each([{}, { other: { type: 'local', command: ['other.exe'] } }])(
+    'refuses duplicate owned names in both OpenCode map locations with siblings (%j)',
+    (siblings) => {
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      const raw = JSON.stringify({
+        mcp: {
+          servers: { [managedName]: entry },
+          [managedName]: entry,
+          ...siblings,
+        },
+      });
+      expect(() => managedEntry(raw, 'opencode')).toThrow();
+      expect(() =>
+        editAgentDocument(raw, 'opencode', entry, hashData(entry)),
+      ).toThrow();
+    },
+  );
+  it.each(['opencode', 'mcpServers', 'vscode', 'kilo'] as const)(
+    'preserves a BOM while editing a %s config',
+    (format) => {
+      const raw = '\uFEFF{\n// keep comment\n"other":true\n}';
+      const entry = agentEntry(format, 'node', 'bridge', 'state', format);
+      const integrated = editAgentDocument(raw, format, entry);
+      expect(integrated.startsWith('\uFEFF')).toBe(true);
+      expect(integrated).toContain('// keep comment');
+      expect(managedEntry(integrated, format)).toEqual(entry);
+      const disconnected = editAgentDocument(
+        integrated,
+        format,
+        undefined,
+        hashData(entry),
+      );
+      expect(disconnected.startsWith('\uFEFF')).toBe(true);
+      expect(managedEntry(disconnected, format)).toBeUndefined();
+      expect(
+        JSON.parse(disconnected.slice(1).replace('// keep comment\n', '')),
+      ).toMatchObject({ other: true });
+    },
+  );
   it('adds the Grok entry to a Grok config.toml and keeps every other setting', () => {
     // The shape of a real Grok config.toml: tables, an array of tables, keys.
     const grok = [
@@ -362,7 +669,7 @@ describe('comment-preserving managed agent entries', () => {
     expect(managedEntry(document, 'codex')).toEqual({
       command: 'C:\\Node24\\node.exe',
       args: ['C:\\Hub\\bridge.js', 'C:\\Runtime\\state.json', 'grok'],
-      startup_timeout_sec: 30,
+      startup_timeout_sec: 90,
     });
     const removed = editAgentDocument(
       document,

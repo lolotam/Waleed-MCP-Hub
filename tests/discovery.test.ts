@@ -347,6 +347,173 @@ describe('read-only environment discovery', () => {
       hubEntries: ['gateway', 'chrome'],
     });
   });
+  it.each([
+    { mcp: { timeout: 5000 }, count: 0 },
+    { mcp: { timeout: { startup: 45000 } }, count: 0 },
+    {
+      mcp: {
+        timeout: { startup: 45000 },
+        other: { type: 'local', command: ['never-run'] },
+      },
+      count: 1,
+    },
+    {
+      mcp: {
+        timeout: 5000,
+        servers: { type: 'local', command: ['never-run'] },
+      },
+      count: 1,
+    },
+    { mcp: { servers: { enabled: false } }, count: 1 },
+    {
+      mcp: {
+        servers: { wrapped: { type: 'local', command: ['never-run'] } },
+        direct: { type: 'remote', url: 'https://example.test/mcp' },
+      },
+      count: 2,
+    },
+    {
+      mcp: {
+        servers: { enabled: false },
+        sibling: { type: 'remote', url: 'https://example.test/mcp' },
+      },
+      count: 2,
+    },
+    {
+      mcp: {
+        servers: {
+          local: { type: 'local', command: ['never-run'] },
+          remote: { type: 'remote', url: 'https://example.test/mcp' },
+        },
+      },
+      count: 2,
+    },
+  ])(
+    'reads enabled-only, wrapped and mixed OpenCode servers (%j)',
+    ({ mcp, count }) => {
+      const file = inspectAgentFile(
+        'C:\\Synthetic\\opencode.json',
+        {
+          status: 'read',
+          fingerprint: 'a'.repeat(64),
+          text: JSON.stringify({ mcp }),
+        },
+        'jsonc',
+        'opencode',
+        settings.profileId,
+        'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+      );
+      expect(file).toMatchObject({
+        status: 'read',
+        binding: 'absent',
+        entryCount: count,
+      });
+    },
+  );
+  it.each(['unrelated', 'servers'])(
+    'counts a direct OpenCode server named %s',
+    (name) => {
+      const file = inspectAgentFile(
+        'C:\\Synthetic\\opencode.json',
+        {
+          status: 'read',
+          fingerprint: 'a'.repeat(64),
+          text: JSON.stringify({
+            mcp: { [name]: { type: 'local', command: ['never-run'] } },
+          }),
+        },
+        'jsonc',
+        'opencode',
+        settings.profileId,
+        'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+      );
+      expect(file).toMatchObject({
+        status: 'read',
+        binding: 'absent',
+        entryCount: 1,
+      });
+    },
+  );
+  it.each([
+    '{env:MCP_URL}',
+    '{file:./endpoint.txt}',
+    '{env:MCP_BASE_URL}/mcp',
+    '{file:./base.txt}/v1',
+    '{env:MCP_BASE_URL}/mcp?key={env:KEY}',
+    '{env:MCP_BASE_URL}{env:MCP_PATH}/mcp',
+    'https://example.test/mcp?key={env:KEY}',
+    '{env:SCHEME}://example.test/mcp',
+    '{env:SCHEME}example.test:8443/mcp',
+    '{env:SCHEME}example.test:{env:PORT}/mcp',
+    '{env:SCHEME}://intranet:8443/mcp',
+    'https://{env:HOST}:{env:PORT}/mcp',
+    '{env:SCHEME}localhost:8443/mcp',
+    '{env:SCHEME}127.0.0.1:8443/mcp',
+    '{env:SCHEME}[::1]:8443/mcp',
+    'https://example.test:{env:PORT}/mcp',
+  ])('counts an unexpanded OpenCode remote URL %s', (endpoint) => {
+    const file = inspectAgentFile(
+      'C:\\Synthetic\\opencode.json',
+      {
+        status: 'read',
+        fingerprint: 'a'.repeat(64),
+        text: JSON.stringify({
+          mcp: { remote: { type: 'remote', url: endpoint } },
+        }),
+      },
+      'jsonc',
+      'opencode',
+      settings.profileId,
+      'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+    );
+    expect(file).toMatchObject({
+      status: 'read',
+      entryCount: 1,
+      hubEntries: [],
+    });
+  });
+  it.each([
+    [],
+    12,
+    { unrelated: null },
+    { broken: { type: 'local', command: 12 } },
+    { broken: { type: 'local', command: [] } },
+    { broken: { type: 'remote', url: 12 } },
+    { broken: { type: 'remote', url: 'not-a-url' } },
+    { broken: { type: 'remote', url: '://' } },
+    { broken: { type: 'remote', url: 'file:///private/file' } },
+    { broken: { type: 'remote', url: 'javascript:{env:X}' } },
+    { broken: { type: 'remote', url: 'file:///{file:./endpoint.txt}' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}file:///tmp' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}javascript:alert(1)' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}javascript:123' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}file:123' } },
+    { broken: { type: 'remote', url: '{env:A}{env:B}javascript:{env:PORT}' } },
+    { broken: { type: 'remote', url: '{env:A}{env:B}file:///tmp' } },
+    { broken: { type: 'remote', url: '{env:A}fi{env:B}le:///tmp' } },
+    { broken: { type: 'remote', url: '{env:A}fi\tle:///tmp' } },
+    { broken: { type: 'remote', url: '{env:A}fi\r\nle:///tmp' } },
+    { timeout: { type: 'local', command: [] } },
+    {
+      servers: { good: { type: 'local', command: ['healthy.exe'] } },
+      timeout: { type: 'local', command: [] },
+    },
+    { broken: { command: ['x'] } },
+  ])('rejects malformed OpenCode MCP maps (%j)', (mcp) => {
+    const file = inspectAgentFile(
+      'C:\\Synthetic\\opencode.json',
+      {
+        status: 'read',
+        fingerprint: 'a'.repeat(64),
+        text: JSON.stringify({ mcp }),
+      },
+      'jsonc',
+      'opencode',
+      settings.profileId,
+      'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+    );
+    expect(file).toMatchObject({ status: 'invalid', entryCount: null });
+  });
   it('reports unsupported legacy OpenCode layers rather than calling them an empty configuration', async () => {
     const file = inspectAgentFile(
       'C:\\Synthetic\\opencode.json',
@@ -354,7 +521,7 @@ describe('read-only environment discovery', () => {
         status: 'read',
         fingerprint: 'a'.repeat(64),
         text: JSON.stringify({
-          mcp: { unrelated: { type: 'local', command: ['never-run'] } },
+          mcpServers: { unrelated: { type: 'local', command: ['never-run'] } },
         }),
       },
       'jsonc',
@@ -371,7 +538,7 @@ describe('read-only environment discovery', () => {
     fixture.put(
       win32.join(settings.home, '.config', 'opencode', 'opencode.jsonc'),
       JSON.stringify({
-        mcp: { unrelated: { type: 'local', command: ['never-run'] } },
+        mcpServers: { unrelated: { type: 'local', command: ['never-run'] } },
       }),
     );
     expect(

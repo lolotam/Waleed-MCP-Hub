@@ -203,7 +203,7 @@ to one of the eight products, not extra agents. Versions come from verified
 installed package manifests where available; unsupported native/wrapper versions
 remain unknown rather than launching a potentially stateful CLI. Adapter support,
 effective configuration, live MCP discovery, and reconnect state remain pending.
-OpenCode V2 `mcp.servers` is read as JSONC; Codex TOML respects `CODEX_HOME`.
+OpenCode V1 `mcp.<name>` and V2 `mcp.servers.<name>` are read as JSONC; Codex TOML respects `CODEX_HOME`.
 Known Claude/Cursor/Antigravity user files are observed narrowly. Grok/Kilo/Kimi
 configuration scopes and unsupported overrides remain pending instead of guessing
 legacy formats. Account/plugin/project layers are not claimed as effective state.
@@ -491,10 +491,22 @@ Correction (2026-11-02): the installed OpenCode CLI 2.2.5 reads each server from
 lists them. The super admin reported that the hub entry at
 `mcp.servers["waleed-mcp-hub"]` did not work and moved it by hand to
 `mcp["waleed-mcp-hub"]`; after the move, `opencode run` called a hub tool and saw
-256 tools. The hub now writes OpenCode the way it writes Kilo, at
+256 tools. PR #18 initially changed the OpenCode writer to use the same direct map as Kilo, at
 `mcp["waleed-mcp-hub"]`. Import still accepts an `mcp.servers` wrapper. Discovery
-still expects `mcp.servers` (D015); that is issue #17.
+still expected `mcp.servers` (D015); that was issue #17.
 
+Follow-up (PR #20): the workstation observation above proves the direct V1-format
+configuration worked; it does not establish that native V2 wrappers are unsupported
+by every OpenCode 2.2.5 configuration. The official V2 migration guide explicitly
+supports both V1 and native V2 formats. Discovery and import now share their map
+classifier, combining direct and wrapped siblings without shadowing duplicates.
+Managed edits preserve the location of any existing hub entry; new/direct configurations
+keep the V1 path, and a new entry in an existing wrapper uses the wrapped path.
+Mixed files are not migrated implicitly. Duplicate hub entries are refused in every
+layout; updates and disconnects require the saved ownership hash.
+The CLI layout probes did not load either disposable profile, so they are
+inconclusive; the one-time live client trial remains pending and is not replaced
+by parser or writer tests. Source: https://opencode.ai/v2/docs/migrate-v1/ .
 Sources: https://opencode.ai/v2/docs/mcp-servers ;
 https://code.visualstudio.com/docs/agents/reference/mcp-configuration.md ;
 https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html ;
