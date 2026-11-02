@@ -418,6 +418,9 @@ describe('read-only environment discovery', () => {
     { broken: { type: 'local', command: 12 } },
     { broken: { type: 'local', command: [] } },
     { broken: { type: 'remote', url: 12 } },
+    { broken: { type: 'remote', url: 'not-a-url' } },
+    { broken: { type: 'remote', url: '://' } },
+    { broken: { type: 'remote', url: 'file:///private/file' } },
     { broken: { command: ['x'] } },
   ])('rejects malformed OpenCode MCP maps (%j)', (mcp) => {
     const file = inspectAgentFile(

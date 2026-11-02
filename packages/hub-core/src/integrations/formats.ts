@@ -10,16 +10,21 @@ import { HubError } from '../errors.js';
 export const managedName = 'waleed-mcp-hub';
 export type AgentFormat =
   'opencode' | 'codex' | 'mcpServers' | 'vscode' | 'kilo';
-const pathFor = (format: AgentFormat) => [
-  format === 'codex'
-    ? 'mcp_servers'
-    : format === 'vscode'
-      ? 'servers'
-      : format === 'opencode' || format === 'kilo'
-        ? 'mcp'
-        : 'mcpServers',
-  managedName,
-];
+const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
+  const mcp = object(root.mcp);
+  if (format === 'opencode' && mcp && openCodeServers(mcp) !== mcp)
+    return ['mcp', 'servers', managedName];
+  return [
+    format === 'codex'
+      ? 'mcp_servers'
+      : format === 'vscode'
+        ? 'servers'
+        : format === 'opencode' || format === 'kilo'
+          ? 'mcp'
+          : 'mcpServers',
+    managedName,
+  ];
+};
 const conflict = () =>
   new HubError(
     'conflict',
@@ -52,8 +57,9 @@ export function managedEntry(
   format: AgentFormat,
 ): unknown {
   if (text === null) return undefined;
-  let value: unknown = document(text.replace(/^\uFEFF/, ''), format);
-  for (const key of pathFor(format)) {
+  const root = document(text.replace(/^\uFEFF/, ''), format);
+  let value: unknown = root;
+  for (const key of pathFor(format, root)) {
     if (!object(value)) throw conflict();
     value = (value as Record<string, unknown>)[key];
     if (value === undefined) return undefined;
@@ -156,7 +162,7 @@ export function editAgentDocument(
   } else {
     result = applyEdits(
       raw,
-      modify(raw, pathFor(format), entry, {
+      modify(raw, pathFor(format, document(raw, format)), entry, {
         formattingOptions: {
           insertSpaces: true,
           tabSize: 2,
@@ -178,7 +184,7 @@ export function editAgentDocument(
   // Verify semantics outside the owned entry instead of trusting an edit library.
   const without = (value: string) => {
     const doc = document(value.replace(/^\uFEFF/, ''), format);
-    const path = pathFor(format);
+    const path = pathFor(format, doc);
     let parent = doc;
     for (const key of path.slice(0, -1)) {
       const next = object(parent[key]);

@@ -51,11 +51,7 @@ function validOpenCodeEntry(entry: Record<string, unknown>) {
     const command = strings(entry.command);
     return Boolean(command?.length && command[0]?.trim());
   }
-  return (
-    entry.type === 'remote' &&
-    typeof entry.url === 'string' &&
-    Boolean(entry.url.trim())
-  );
+  return entry.type === 'remote' && url(entry.url) !== null;
 }
 export const hash = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');

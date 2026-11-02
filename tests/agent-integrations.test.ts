@@ -330,14 +330,68 @@ describe('comment-preserving managed agent entries', () => {
   });
   // Regression 2026-11-02: the hub wrote `mcp.servers["waleed-mcp-hub"]`, which
   // OpenCode 2.2.5 never loads; it reads each server from `mcp.<name>`.
-  it('writes the OpenCode entry directly under mcp, beside the existing servers', () => {
-    const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
-    const existing = { other: { type: 'local', command: ['other.exe'] } };
-    const document = JSON.parse(
-      editAgentDocument(JSON.stringify({ mcp: existing }), 'opencode', entry),
-    ) as unknown;
-    expect(document).toEqual({ mcp: { ...existing, [managedName]: entry } });
-  });
+  it.each([
+    { other: { type: 'local', command: ['other.exe'] } },
+    { servers: { enabled: false } },
+  ])(
+    'writes a direct OpenCode entry beside existing V1 servers (%j)',
+    (existing) => {
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      const document = JSON.parse(
+        editAgentDocument(JSON.stringify({ mcp: existing }), 'opencode', entry),
+      ) as unknown;
+      expect(document).toEqual({ mcp: { ...existing, [managedName]: entry } });
+    },
+  );
+  it.each([{}, { other: { type: 'local', command: ['other.exe'] } }])(
+    'integrates, updates and disconnects inside an existing OpenCode V2 wrapper (%j)',
+    (servers) => {
+      const original = { mcp: { servers, timeout: 5000 }, theme: 'existing' };
+      const raw = '// keep V2 settings\n' + JSON.stringify(original);
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      const integrated = editAgentDocument(raw, 'opencode', entry);
+      expect(
+        JSON.parse(integrated.replace('// keep V2 settings\n', '')),
+      ).toEqual({
+        ...original,
+        mcp: { ...original.mcp, servers: { ...servers, [managedName]: entry } },
+      });
+      expect(managedEntry(integrated, 'opencode')).toEqual(entry);
+      const replacement = {
+        ...entry,
+        command: ['new-node', 'bridge', 'state', 'opencode'],
+      };
+      const updated = editAgentDocument(
+        integrated,
+        'opencode',
+        replacement,
+        hashData(entry),
+      );
+      expect(managedEntry(updated, 'opencode')).toEqual(replacement);
+      const disconnected = editAgentDocument(
+        updated,
+        'opencode',
+        undefined,
+        hashData(replacement),
+      );
+      expect(disconnected).toContain('// keep V2 settings');
+      expect(
+        JSON.parse(disconnected.replace('// keep V2 settings\n', '')),
+      ).toEqual(original);
+    },
+  );
   it('adds the Grok entry to a Grok config.toml and keeps every other setting', () => {
     // The shape of a real Grok config.toml: tables, an array of tables, keys.
     const grok = [
