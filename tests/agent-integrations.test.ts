@@ -328,8 +328,8 @@ describe('comment-preserving managed agent entries', () => {
     expect(hashData(managedEntry(document, 'opencode'))).toBe(hashData(entry));
     expect(hashBytes(document)).toHaveLength(64);
   });
-  // Regression 2026-11-02: the hub wrote `mcp.servers["waleed-mcp-hub"]`, which
-  // OpenCode 2.2.5 never loads; it reads each server from `mcp.<name>`.
+  // Regression 2026-11-02: the workstation's V1-format OpenCode configuration
+  // needs the direct map. Native V2 wrapper configurations are covered below.
   it.each([
     { other: { type: 'local', command: ['other.exe'] } },
     { servers: { enabled: false } },
@@ -390,6 +390,96 @@ describe('comment-preserving managed agent entries', () => {
       expect(
         JSON.parse(disconnected.replace('// keep V2 settings\n', '')),
       ).toEqual(original);
+    },
+  );
+  it('moves only an owned legacy direct entry into its existing V2 wrapper', () => {
+    const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
+    const servers = { other: { type: 'local', command: ['other.exe'] } };
+    const original = { mcp: { servers, [managedName]: entry }, theme: 'keep' };
+    const raw = '// keep mixed config\n' + JSON.stringify(original);
+    expect(managedEntry(raw, 'opencode')).toBeUndefined();
+    expect(() => editAgentDocument(raw, 'opencode', entry)).toThrow();
+    expect(() =>
+      editAgentDocument(raw, 'opencode', entry, hashData({ foreign: true })),
+    ).toThrow();
+    const migrated = editAgentDocument(raw, 'opencode', entry, hashData(entry));
+    expect(migrated).toContain('// keep mixed config');
+    expect(JSON.parse(migrated.replace('// keep mixed config\n', ''))).toEqual({
+      mcp: { servers: { ...servers, [managedName]: entry } },
+      theme: 'keep',
+    });
+    expect(managedEntry(migrated, 'opencode')).toEqual(entry);
+  });
+  it('reintegrates an owned mixed OpenCode file instead of treating it as already integrated', async () => {
+    const { hub, contents } = setup();
+    const target = targets.find((target) => target.id === 'opencode')!;
+    const path = target.paths[0]!;
+    const servers = { other: { type: 'local', command: ['other.exe'] } };
+    contents.set(path, JSON.stringify({ mcp: { servers } }));
+    try {
+      const before = (await hub.integrations.scan()).agents.find(
+        (agent) => agent.agentId === 'opencode',
+      )!;
+      await hub.integrations.integrate('opencode', {
+        expectedRevision: 0,
+        fingerprint: before.fingerprint,
+        confirmConfigurationChange: true,
+      });
+      const parsed = JSON.parse(contents.get(path)!);
+      const entry = parsed.mcp.servers[managedName];
+      delete parsed.mcp.servers[managedName];
+      parsed.mcp[managedName] = entry;
+      contents.set(path, JSON.stringify(parsed));
+      const mixed = (await hub.integrations.scan()).agents.find(
+        (agent) => agent.agentId === 'opencode',
+      )!;
+      expect(mixed.status).toBe('not_integrated');
+      const receipt = await hub.integrations.integrate('opencode', {
+        expectedRevision: 1,
+        fingerprint: mixed.fingerprint,
+        confirmConfigurationChange: true,
+      });
+      expect(receipt).toMatchObject({
+        changed: true,
+        agent: { status: 'integrated' },
+      });
+      expect(JSON.parse(contents.get(path)!)).toEqual({
+        mcp: { servers: { ...servers, [managedName]: entry } },
+      });
+    } finally {
+      await hub.close();
+    }
+  });
+  it('refuses duplicate owned names in both OpenCode map locations', () => {
+    const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
+    const raw = JSON.stringify({
+      mcp: { servers: { [managedName]: entry }, [managedName]: entry },
+    });
+    expect(() => managedEntry(raw, 'opencode')).toThrow();
+    expect(() =>
+      editAgentDocument(raw, 'opencode', entry, hashData(entry)),
+    ).toThrow();
+  });
+  it.each(['opencode', 'mcpServers', 'vscode', 'kilo'] as const)(
+    'preserves a BOM while editing a %s config',
+    (format) => {
+      const raw = '\uFEFF{\n// keep comment\n"other":true\n}';
+      const entry = agentEntry(format, 'node', 'bridge', 'state', format);
+      const integrated = editAgentDocument(raw, format, entry);
+      expect(integrated.startsWith('\uFEFF')).toBe(true);
+      expect(integrated).toContain('// keep comment');
+      expect(managedEntry(integrated, format)).toEqual(entry);
+      const disconnected = editAgentDocument(
+        integrated,
+        format,
+        undefined,
+        hashData(entry),
+      );
+      expect(disconnected.startsWith('\uFEFF')).toBe(true);
+      expect(managedEntry(disconnected, format)).toBeUndefined();
+      expect(
+        JSON.parse(disconnected.slice(1).replace('// keep comment\n', '')),
+      ).toMatchObject({ other: true });
     },
   );
   it('adds the Grok entry to a Grok config.toml and keeps every other setting', () => {

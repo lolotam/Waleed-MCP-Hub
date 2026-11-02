@@ -3,11 +3,12 @@ import {
   parseDocument,
   object,
   openCodeServers,
+  managedName,
 } from '../discovery/metadata.js';
 import { hashData } from '../runtime/registry.js';
 import { HubError } from '../errors.js';
 
-export const managedName = 'waleed-mcp-hub';
+export { managedName };
 export type AgentFormat =
   'opencode' | 'codex' | 'mcpServers' | 'vscode' | 'kilo';
 const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
@@ -31,6 +32,7 @@ const conflict = () =>
     'Agent configuration is invalid, ambiguous or contains a conflicting managed entry.',
   );
 function document(text: string, format: AgentFormat) {
+  const source = text.replace(/^\uFEFF/, '');
   if (format !== 'codex') {
     const walk = (node: Node) => {
       if (node.type === 'object') {
@@ -42,12 +44,12 @@ function document(text: string, format: AgentFormat) {
       }
       for (const child of node.children ?? []) walk(child);
     };
-    const tree = parseTree(text);
+    const tree = parseTree(source);
     if (!tree) throw conflict();
     walk(tree);
   }
   try {
-    return parseDocument(text, format === 'codex' ? 'toml' : 'jsonc');
+    return parseDocument(source, format === 'codex' ? 'toml' : 'jsonc');
   } catch {
     throw conflict();
   }
@@ -58,8 +60,16 @@ export function managedEntry(
 ): unknown {
   if (text === null) return undefined;
   const root = document(text.replace(/^\uFEFF/, ''), format);
+  const path = pathFor(format, root);
+  const mcp = object(root.mcp);
+  if (
+    path.length === 3 &&
+    mcp?.[managedName] !== undefined &&
+    object(mcp.servers)?.[managedName] !== undefined
+  )
+    throw conflict();
   let value: unknown = root;
-  for (const key of pathFor(format, root)) {
+  for (const key of path) {
     if (!object(value)) throw conflict();
     value = (value as Record<string, unknown>)[key];
     if (value === undefined) return undefined;
@@ -129,6 +139,18 @@ export function editAgentDocument(
   )
     throw conflict();
   const raw = text ?? (format === 'codex' ? '' : '{}\n');
+  const root = document(raw, format);
+  const path = pathFor(format, root);
+  const legacy =
+    format === 'opencode' && path.length === 3
+      ? object(root.mcp)?.[managedName]
+      : undefined;
+  // Moving an old owned entry is an edit, not adoption of a foreign entry.
+  if (
+    legacy !== undefined &&
+    (!expectedEntryHash || hashData(legacy) !== expectedEntryHash)
+  )
+    throw conflict();
   let result: string;
   if (format === 'codex') {
     const start = raw.indexOf(begin),
@@ -160,9 +182,13 @@ export function editAgentDocument(
         ].join(eol);
     }
   } else {
+    const editable =
+      legacy === undefined
+        ? raw
+        : applyEdits(raw, modify(raw, ['mcp', managedName], undefined, {}));
     result = applyEdits(
-      raw,
-      modify(raw, pathFor(format, document(raw, format)), entry, {
+      editable,
+      modify(editable, path, entry, {
         formattingOptions: {
           insertSpaces: true,
           tabSize: 2,
@@ -185,6 +211,8 @@ export function editAgentDocument(
   const without = (value: string) => {
     const doc = document(value.replace(/^\uFEFF/, ''), format);
     const path = pathFor(format, doc);
+    if (format === 'opencode' && path.length === 3)
+      delete object(doc.mcp)![managedName];
     let parent = doc;
     for (const key of path.slice(0, -1)) {
       const next = object(parent[key]);

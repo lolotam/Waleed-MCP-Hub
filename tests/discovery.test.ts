@@ -412,6 +412,31 @@ describe('read-only environment discovery', () => {
     },
   );
   it.each([
+    '{env:MCP_URL}',
+    '{file:./endpoint.txt}',
+    'https://example.test/mcp?key={env:KEY}',
+  ])('counts an unexpanded OpenCode remote URL %s', (endpoint) => {
+    const file = inspectAgentFile(
+      'C:\\Synthetic\\opencode.json',
+      {
+        status: 'read',
+        fingerprint: 'a'.repeat(64),
+        text: JSON.stringify({
+          mcp: { remote: { type: 'remote', url: endpoint } },
+        }),
+      },
+      'jsonc',
+      'opencode',
+      settings.profileId,
+      'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+    );
+    expect(file).toMatchObject({
+      status: 'read',
+      entryCount: 1,
+      hubEntries: [],
+    });
+  });
+  it.each([
     [],
     12,
     { unrelated: null },

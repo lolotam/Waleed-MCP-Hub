@@ -9,6 +9,8 @@ import type {
 } from '@waleed/contracts';
 import type { ReadResult } from './ports.js';
 
+export const managedName = 'waleed-mcp-hub';
+
 export function object(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     return null;
@@ -29,12 +31,18 @@ export const strings = (value: unknown): string[] | null =>
 export function openCodeServers(value: unknown) {
   const mcp = object(value);
   const nested = object(mcp?.servers);
+  const direct =
+    nested &&
+    ((nested.type === 'local' && Object.hasOwn(nested, 'command')) ||
+      (nested.type === 'remote' && Object.hasOwn(nested, 'url')) ||
+      (Object.keys(nested).length === 1 &&
+        typeof nested.enabled === 'boolean'));
   return mcp &&
     nested &&
-    Object.keys(mcp).every((key) => ['servers', 'timeout'].includes(key)) &&
-    !['type', 'command', 'url', 'enabled', 'disabled'].some(
-      (key) => Object.hasOwn(nested, key) && !object(nested[key]),
-    )
+    Object.keys(mcp).every((key) =>
+      ['servers', 'timeout', managedName].includes(key),
+    ) &&
+    !direct
     ? nested
     : mcp;
 }
@@ -51,7 +59,12 @@ function validOpenCodeEntry(entry: Record<string, unknown>) {
     const command = strings(entry.command);
     return Boolean(command?.length && command[0]?.trim());
   }
-  return entry.type === 'remote' && url(entry.url) !== null;
+  return (
+    entry.type === 'remote' &&
+    typeof entry.url === 'string' &&
+    entry.url.length <= 4096 &&
+    (url(entry.url) !== null || /\{(?:env|file):[^{}\r\n]+\}/.test(entry.url))
+  );
 }
 export const hash = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');

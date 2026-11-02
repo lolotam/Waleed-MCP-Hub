@@ -141,6 +141,18 @@ it('distinguishes OpenCode wrappers from a direct MCP named servers', () => {
     ),
   ).toEqual({ ...servers, broken: null });
 });
+it.each(['enabled', 'disabled', 'type'])(
+  'retains healthy wrapped siblings beside a malformed %s record',
+  (name) => {
+    const servers = {
+      [name]: null,
+      good: { type: 'remote', url: 'https://example.test/mcp' },
+    };
+    expect(
+      agentServers(JSON.stringify({ mcp: { servers } }), 'opencode'),
+    ).toEqual(servers);
+  },
+);
 it('groups sanitized candidates by agent, omits the Hub and copies only selected entries with exact protected credentials', async () => {
   const f = fixture(),
     before = new Map(f.files);

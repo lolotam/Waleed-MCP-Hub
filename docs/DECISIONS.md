@@ -491,10 +491,20 @@ Correction (2026-11-02): the installed OpenCode CLI 2.2.5 reads each server from
 lists them. The super admin reported that the hub entry at
 `mcp.servers["waleed-mcp-hub"]` did not work and moved it by hand to
 `mcp["waleed-mcp-hub"]`; after the move, `opencode run` called a hub tool and saw
-256 tools. The hub now writes OpenCode the way it writes Kilo, at
+256 tools. PR #18 initially changed the OpenCode writer to use the same direct map as Kilo, at
 `mcp["waleed-mcp-hub"]`. Import still accepts an `mcp.servers` wrapper. Discovery
-still expects `mcp.servers` (D015); that is issue #17.
+still expected `mcp.servers` (D015); that was issue #17.
 
+Follow-up (PR #20): the workstation observation above proves the direct V1-format
+configuration worked; it does not establish that native V2 wrappers are unsupported
+by every OpenCode 2.2.5 configuration. The official V2 migration guide explicitly
+supports both V1 and native V2 formats. Discovery and import now share their map
+classifier. Managed edits preserve an existing wrapper; new/direct configurations
+keep the V1 path. A legacy mixed file can move the direct hub entry into its wrapper
+only when its saved ownership hash matches, and duplicate hub entries are refused.
+The CLI layout probes did not load either disposable profile, so they are
+inconclusive; the one-time live client trial remains pending and is not replaced
+by parser or writer tests. Source: https://opencode.ai/v2/docs/migrate-v1/ .
 Sources: https://opencode.ai/v2/docs/mcp-servers ;
 https://code.visualstudio.com/docs/agents/reference/mcp-configuration.md ;
 https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html ;
