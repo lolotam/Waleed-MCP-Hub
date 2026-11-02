@@ -80,7 +80,9 @@ export function managedEntry(
 ): unknown {
   if (text === null) return undefined;
   const root = document(text.replace(/^\uFEFF/, ''), format);
-  const path = pathFor(format, root);
+  return entryAtPath(root, pathFor(format, root));
+}
+function entryAtPath(root: Record<string, unknown>, path: string[]): unknown {
   let value: unknown = root;
   for (const key of path) {
     if (!object(value)) throw conflict();
@@ -197,7 +199,7 @@ export function editAgentDocument(
       }),
     );
   }
-  const actual = managedEntry(result, format);
+  const actual = entryAtPath(document(result, format), path);
   if (
     entry === undefined
       ? actual !== undefined

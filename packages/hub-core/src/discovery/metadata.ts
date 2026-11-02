@@ -107,7 +107,13 @@ function validOpenCodeUrl(value: unknown) {
   const reference = /\{(?:env|file):[^{}\r\n]+\}/g;
   const tokens = value.match(reference);
   if (tokens?.length === 1 && tokens[0] === value) return true;
-  if (unsupportedLiteralProtocol(value, reference)) return false;
+  // WHATWG parsing ignores tabs/newlines; placeholders must not hide a literal scheme.
+  const normalized = value.replace(/[\t\r\n]/g, '').trimStart();
+  const protocol = literalOpenCodeProtocol(normalized, reference);
+  const hostPort = referenceHostPort(normalized, reference);
+  if (protocol && !['http:', 'https:'].includes(protocol) && !hostPort)
+    return false;
+  if (hostPort) return url(`https://${hostPort}`) !== null;
   const masked = value.replace(reference, (token: string, offset: number) => {
     if (offset !== 0) return '1';
     // A leading reference can supply the scheme or the whole base URL.
@@ -117,18 +123,19 @@ function validOpenCodeUrl(value: unknown) {
   });
   return url(masked) !== null;
 }
-function unsupportedLiteralProtocol(value: string, reference: RegExp) {
-  // WHATWG parsing ignores tabs/newlines; placeholders must not hide a literal scheme.
-  const normalized = value.replace(/[\t\r\n]/g, '').trimStart();
-  const literal = normalized.replace(reference, '');
-  const hostPort = /^[^/?#:\s]+:\d+(?:[/?#]|$)/.test(
-    normalized.replace(reference, '1'),
-  );
-  return (
-    !hostPort &&
-    /^[a-z][a-z\d+.-]*:/i.test(literal) &&
-    !/^https?:/i.test(literal)
-  );
+function literalOpenCodeProtocol(value: string, reference: RegExp) {
+  const literal = value.replace(reference, '');
+  return /^[a-z][a-z\d+.-]*:/i.exec(literal)?.[0].toLowerCase() ?? null;
+}
+function referenceHostPort(value: string, reference: RegExp) {
+  const leading = new RegExp(`^(?:${reference.source})+`).exec(value)?.[0];
+  if (!leading) return null;
+  const authority = value.slice(leading.length).replace(reference, '1');
+  return /^(?:localhost|[a-z\d-]+(?:\.[a-z\d-]+)+|\[[a-f\d:.]+\]):\d+(?:[/?#]|$)/i.test(
+    authority,
+  )
+    ? authority
+    : null;
 }
 export const hash = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');

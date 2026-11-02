@@ -445,6 +445,9 @@ describe('read-only environment discovery', () => {
     '{env:SCHEME}://example.test/mcp',
     '{env:SCHEME}example.test:8443/mcp',
     '{env:SCHEME}example.test:{env:PORT}/mcp',
+    '{env:SCHEME}localhost:8443/mcp',
+    '{env:SCHEME}127.0.0.1:8443/mcp',
+    '{env:SCHEME}[::1]:8443/mcp',
     'https://example.test:{env:PORT}/mcp',
   ])('counts an unexpanded OpenCode remote URL %s', (endpoint) => {
     const file = inspectAgentFile(
@@ -481,6 +484,9 @@ describe('read-only environment discovery', () => {
     { broken: { type: 'remote', url: 'file:///{file:./endpoint.txt}' } },
     { broken: { type: 'remote', url: '{env:PREFIX}file:///tmp' } },
     { broken: { type: 'remote', url: '{env:PREFIX}javascript:alert(1)' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}javascript:123' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}file:123' } },
+    { broken: { type: 'remote', url: '{env:A}{env:B}javascript:{env:PORT}' } },
     { broken: { type: 'remote', url: '{env:A}{env:B}file:///tmp' } },
     { broken: { type: 'remote', url: '{env:A}fi{env:B}le:///tmp' } },
     { broken: { type: 'remote', url: '{env:A}fi\tle:///tmp' } },
