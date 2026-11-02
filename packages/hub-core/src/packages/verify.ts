@@ -194,6 +194,21 @@ const sameDirectory = (before: BigIntStats, named: BigIntStats) =>
   named.mtimeNs === before.mtimeNs &&
   named.ctimeNs === before.ctimeNs;
 
+// Directory names must still refer to the tree that was walked: a folder
+// replaced, or turned into a link, after the walk passed it fails here.
+async function assertWalkedDirectories(
+  directories: InstalledDirectory[],
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const directory of directories) {
+    throwIfAborted(signal);
+    const named = await lstat(directory.path, { bigint: true });
+    if (!sameDirectory(directory.identity, named)) throw modified();
+  }
+  // The last stat may have completed after the caller gave up.
+  throwIfAborted(signal);
+}
+
 // The identity of every file and folder a successful hash pass read, keyed by
 // the relative file name and the folder path.
 interface TreeIdentity {
@@ -212,15 +227,7 @@ async function hashTree(
     signal,
   );
   const lines = await manifestLines(files, signal);
-  // Directory names must still refer to the tree we walked, including paths
-  // that might otherwise have been replaced with links while files were read.
-  for (const directory of directories) {
-    throwIfAborted(signal);
-    const named = await lstat(directory.path, { bigint: true });
-    if (!sameDirectory(directory.identity, named)) throw modified();
-  }
-  // The last stat may have completed after the caller gave up.
-  throwIfAborted(signal);
+  await assertWalkedDirectories(directories, signal);
   lines.sort();
   return {
     manifest: {
@@ -347,31 +354,37 @@ export const verifyPackage = verifyPackageFiles;
 
 // The verification of one bridge process. The first verification of an
 // install hashes every file, as verifyPackageFiles does. Later ones walk the
-// tree and compare each file and folder identity (device, file id, size,
-// write and change times, one link) with the ones that hash pass read; only a
-// difference hashes again. A same-user process that rewrites a file and
-// restores all of these is not seen until the next bridge process (D024
-// amendment, 2026-11-02).
+// tree, compare each file and folder identity (device, file id, size, write
+// and change times, one link) with the ones that hash pass read, and stat
+// every folder name again; only a difference hashes again. A same-user
+// process that rewrites a file and restores all of these is not seen until
+// the next bridge process (D024 amendment, 2026-11-02).
 export function createPackageVerifier() {
-  const verified = new Map<string, TreeIdentity & { manifestHash: string }>();
-  const remembered: ManifestCheck = async (
-    installDir,
-    manifestHash,
-    signal,
-  ) => {
-    const known = verified.get(installDir);
-    if (
-      known?.manifestHash === manifestHash &&
-      unchanged(known, await listInstalledFiles(installDir, signal))
-    ) {
-      throwIfAborted(signal);
-      return;
-    }
-    verified.delete(installDir);
-    const { manifest, identity } = await hashTree(installDir, signal);
-    if (manifest.hash !== manifestHash) throw modified();
-    verified.set(installDir, { ...identity, manifestHash });
-  };
+  // One entry per connector, so a reinstall drops the identities of the
+  // install it replaced.
+  const verified = new Map<
+    string,
+    TreeIdentity & { installDir: string; manifestHash: string }
+  >();
+  const remembered =
+    (connectorId: string): ManifestCheck =>
+    async (installDir, manifestHash, signal) => {
+      const known = verified.get(connectorId);
+      if (
+        known?.installDir === installDir &&
+        known.manifestHash === manifestHash
+      ) {
+        const walked = await listInstalledFiles(installDir, signal);
+        if (unchanged(known, walked)) {
+          await assertWalkedDirectories(walked.directories, signal);
+          return;
+        }
+      }
+      verified.delete(connectorId);
+      const { manifest, identity } = await hashTree(installDir, signal);
+      if (manifest.hash !== manifestHash) throw modified();
+      verified.set(connectorId, { ...identity, installDir, manifestHash });
+    };
   return (connector: Connector, packagesDir: string, signal?: AbortSignal) =>
-    verifyWith(remembered, connector, packagesDir, signal);
+    verifyWith(remembered(connector.id), connector, packagesDir, signal);
 }

@@ -646,7 +646,10 @@ outcome of the newest call.
    install. Later launches and reused-peer operations in the same bridge
    process walk the folder and compare every file's and folder's device, file
    id, size, write time and change time (and the single link) with what that
-   hash pass read; any difference hashes the whole install again. A same-user
+   hash pass read, then stat every folder name again, as the hash pass does,
+   so a folder swapped after the walk passed it is rejected; any difference
+   hashes the whole install again. Each bridge remembers one install per
+   connector, so a reinstall replaces the identities it held. A same-user
    process that rewrites a file and restores all of those values passes until
    the next bridge process, which hashes again. Same threat model as 1. Verify
    files, Test capabilities and launches outside a bridge still hash every
