@@ -349,7 +349,13 @@ describe('comment-preserving managed agent entries', () => {
       expect(document).toEqual({ mcp: { ...existing, [managedName]: entry } });
     },
   );
-  it.each([{}, { other: { type: 'local', command: ['other.exe'] } }])(
+  it.each([
+    {},
+    { other: { type: 'local', command: ['other.exe'] } },
+    ...['type', 'command', 'url', 'enabled', 'disabled'].map((name) => ({
+      [name]: { type: 'local', command: ['other.exe'] },
+    })),
+  ])(
     'integrates, updates and disconnects inside an existing OpenCode V2 wrapper (%j)',
     (servers) => {
       const original = { mcp: { servers, timeout: 5000 }, theme: 'existing' };

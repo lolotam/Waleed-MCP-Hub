@@ -23,8 +23,10 @@ const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
     // Read-only import can salvage siblings; new writes require an unambiguous layout.
     if (
       nested &&
-      ['type', 'command', 'url', 'enabled', 'disabled'].some((key) =>
-        Object.hasOwn(nested, key),
+      ['type', 'command', 'url', 'enabled', 'disabled'].some(
+        (key) =>
+          Object.hasOwn(nested, key) &&
+          !validOpenCodeEntry(object(nested[key]) ?? {}),
       ) &&
       !validOpenCodeEntry(nested)
     )

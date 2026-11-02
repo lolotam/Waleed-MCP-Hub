@@ -421,6 +421,9 @@ describe('read-only environment discovery', () => {
   it.each([
     '{env:MCP_URL}',
     '{file:./endpoint.txt}',
+    '{env:MCP_BASE_URL}/mcp',
+    '{file:./base.txt}/v1',
+    '{env:MCP_BASE_URL}/mcp?key={env:KEY}',
     'https://example.test/mcp?key={env:KEY}',
     '{env:SCHEME}://example.test/mcp',
     'https://example.test:{env:PORT}/mcp',

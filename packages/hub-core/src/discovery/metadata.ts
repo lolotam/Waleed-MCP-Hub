@@ -95,9 +95,13 @@ function validOpenCodeUrl(value: unknown) {
   const reference = /\{(?:env|file):[^{}\r\n]+\}/g;
   const tokens = value.match(reference);
   if (tokens?.length === 1 && tokens[0] === value) return true;
-  const masked = value.replace(reference, (token: string, offset: number) =>
-    offset === 0 && value.slice(token.length).startsWith(':') ? 'https' : '1',
-  );
+  const masked = value.replace(reference, (token: string, offset: number) => {
+    if (offset !== 0) return '1';
+    // A leading reference can supply the scheme or the whole base URL.
+    return value.slice(token.length).startsWith(':')
+      ? 'https'
+      : 'https://placeholder.invalid';
+  });
   return url(masked) !== null;
 }
 export const hash = (value: unknown) =>
