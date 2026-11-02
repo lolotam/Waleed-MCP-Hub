@@ -107,20 +107,7 @@ function validOpenCodeUrl(value: unknown) {
   const reference = /\{(?:env|file):[^{}\r\n]+\}/g;
   const tokens = value.match(reference);
   if (tokens?.length === 1 && tokens[0] === value) return true;
-  const leadingToken = tokens?.[0];
-  const suffix =
-    leadingToken && value.startsWith(leadingToken)
-      ? value.slice(leadingToken.length)
-      : '';
-  const hostPort = /^[^/?#:\s]+:\d+(?:[/?#]|$)/.test(
-    suffix.replace(reference, '1'),
-  );
-  if (
-    !hostPort &&
-    /^[a-z][a-z\d+.-]*:/i.test(suffix) &&
-    !/^https?:/i.test(suffix)
-  )
-    return false;
+  if (unsupportedLiteralProtocol(value, reference)) return false;
   const masked = value.replace(reference, (token: string, offset: number) => {
     if (offset !== 0) return '1';
     // A leading reference can supply the scheme or the whole base URL.
@@ -129,6 +116,19 @@ function validOpenCodeUrl(value: unknown) {
       : 'https://placeholder.invalid';
   });
   return url(masked) !== null;
+}
+function unsupportedLiteralProtocol(value: string, reference: RegExp) {
+  // WHATWG parsing ignores tabs/newlines; placeholders must not hide a literal scheme.
+  const normalized = value.replace(/[\t\r\n]/g, '').trimStart();
+  const literal = normalized.replace(reference, '');
+  const hostPort = /^[^/?#:\s]+:\d+(?:[/?#]|$)/.test(
+    normalized.replace(reference, '1'),
+  );
+  return (
+    !hostPort &&
+    /^[a-z][a-z\d+.-]*:/i.test(literal) &&
+    !/^https?:/i.test(literal)
+  );
 }
 export const hash = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');

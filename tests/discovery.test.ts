@@ -440,6 +440,7 @@ describe('read-only environment discovery', () => {
     '{env:MCP_BASE_URL}/mcp',
     '{file:./base.txt}/v1',
     '{env:MCP_BASE_URL}/mcp?key={env:KEY}',
+    '{env:MCP_BASE_URL}{env:MCP_PATH}/mcp',
     'https://example.test/mcp?key={env:KEY}',
     '{env:SCHEME}://example.test/mcp',
     '{env:SCHEME}example.test:8443/mcp',
@@ -480,6 +481,10 @@ describe('read-only environment discovery', () => {
     { broken: { type: 'remote', url: 'file:///{file:./endpoint.txt}' } },
     { broken: { type: 'remote', url: '{env:PREFIX}file:///tmp' } },
     { broken: { type: 'remote', url: '{env:PREFIX}javascript:alert(1)' } },
+    { broken: { type: 'remote', url: '{env:A}{env:B}file:///tmp' } },
+    { broken: { type: 'remote', url: '{env:A}fi{env:B}le:///tmp' } },
+    { broken: { type: 'remote', url: '{env:A}fi\tle:///tmp' } },
+    { broken: { type: 'remote', url: '{env:A}fi\r\nle:///tmp' } },
     { timeout: { type: 'local', command: [] } },
     {
       servers: { good: { type: 'local', command: ['healthy.exe'] } },

@@ -193,10 +193,14 @@ it.each(['__proto__', 'constructor', 'prototype'])(
     expect(extracted.wrapped).toEqual(wrapped);
   },
 );
-it('retains a healthy wrapped sibling beside a remote marker with a forbidden literal protocol', () => {
+it.each([
+  'javascript:{env:X}',
+  '{env:A}{env:B}file:///tmp',
+  '{env:A}fi\tle:///tmp',
+])('retains a healthy wrapped sibling beside a forbidden URL %s', (url) => {
   const servers = {
     type: 'remote',
-    url: 'javascript:{env:X}',
+    url,
     good: { type: 'local', command: ['healthy.exe'] },
   };
   expect(
