@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Connector } from '@waleed/contracts';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { ProcessRequest } from '../packages/hub-core/src/ports.js';
 import { syntheticConnector } from './fixtures/native-connector.js';
 import { definitionHash } from '../packages/hub-core/src/runtime/registry.js';
 import {
@@ -11,7 +13,11 @@ import {
   nativeExecutable,
 } from '../packages/hub-core/src/adapters/mcp/runtime.js';
 
-const ports = vi.hoisted(() => ({ verify: vi.fn(), runner: vi.fn() }));
+const ports = vi.hoisted(() => ({
+  verify: vi.fn(),
+  runner: vi.fn(),
+  run: vi.fn(),
+}));
 vi.mock('../packages/hub-core/src/packages/verify.js', () => ({
   verifyPackage: ports.verify,
 }));
@@ -24,11 +30,15 @@ vi.mock(
     ...(await original<
       typeof import('../packages/hub-core/src/runtime/capabilities.js')
     >()),
-    enumerateCapabilities: vi.fn(async () => ({
-      tools: [],
-      resourceCount: 0,
-      promptCount: 0,
-    })),
+    enumerateCapabilities: vi.fn(async (transport: Transport) => {
+      await transport.start();
+      await transport.close();
+      return {
+        tools: [],
+        resourceCount: 0,
+        promptCount: 0,
+      };
+    }),
   }),
 );
 
@@ -58,7 +68,19 @@ beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'wmh-managed-runtime-'));
   vi.clearAllMocks();
   ports.verify.mockResolvedValue(undefined);
-  ports.runner.mockResolvedValue({});
+  ports.run.mockImplementation(
+    (request: ProcessRequest) =>
+      new Promise((resolve) => {
+        request.stream?.started(() => undefined);
+        request.signal.addEventListener(
+          'abort',
+          () =>
+            resolve({ outcome: 'exited', exitCode: 0, stdout: '', stderr: '' }),
+          { once: true },
+        );
+      }),
+  );
+  ports.runner.mockResolvedValue({ run: ports.run });
 });
 afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
@@ -81,6 +103,9 @@ it.skipIf(process.platform !== 'win32')(
     );
     expect(ports.runner).toHaveBeenCalledWith(
       expect.objectContaining({ allowedExecutables: [process.execPath] }),
+    );
+    expect(ports.run).toHaveBeenCalledWith(
+      expect.objectContaining({ executable: process.execPath }),
     );
     expect(connector).toEqual(saved);
     expect(definitionHash(connector)).toBe(hash);

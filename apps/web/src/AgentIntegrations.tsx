@@ -37,21 +37,21 @@ export function AgentIntegrations({
       setBusy(false);
     }
   }
-  async function change(agent: AgentIntegration) {
+  async function change(
+    agent: AgentIntegration,
+    action: 'integrate' | 'disconnect',
+  ) {
     setBusy(true);
     setError('');
     try {
       const result = await api<{
         agent: AgentIntegration;
         backup: string | null;
-      }>(
-        `/api/agents/${agent.agentId}/${agent.status === 'integrated' ? 'disconnect' : 'integrate'}`,
-        {
-          expectedRevision: revision,
-          fingerprint: agent.fingerprint,
-          confirmConfigurationChange: true,
-        },
-      );
+      }>(`/api/agents/${agent.agentId}/${action}`, {
+        expectedRevision: revision,
+        fingerprint: agent.fingerprint,
+        confirmConfigurationChange: true,
+      });
       setAgents((items) =>
         items.map((item) =>
           item.agentId === agent.agentId ? result.agent : item,
@@ -93,7 +93,8 @@ export function AgentIntegrations({
           Scan known user configuration scopes without starting agents or a
           model turn. Integrate adds one managed hub launcher; Disconnect
           removes only that owned entry. Your pilot entries, plugins and
-          policies stay in place.
+          policies stay in place. After upgrading or moving the hub, use Refresh
+          launcher before reconnecting the agent.
         </p>
         <label className="import-check">
           <input
@@ -164,13 +165,28 @@ export function AgentIntegrations({
                     !agent.detected
                   }
                   onClick={() => {
-                    void change(agent);
+                    void change(
+                      agent,
+                      agent.status === 'integrated'
+                        ? 'disconnect'
+                        : 'integrate',
+                    );
                   }}
                 >
                   {agent.status === 'integrated'
                     ? 'Disconnect'
                     : '1-Click Integrate'}
                 </button>
+                {agent.status === 'integrated' && (
+                  <button
+                    disabled={busy || blocked || !consent || !agent.detected}
+                    onClick={() => {
+                      void change(agent, 'integrate');
+                    }}
+                  >
+                    Refresh launcher
+                  </button>
+                )}
               </div>
               {agent.reason !== 'none' && (
                 <p className="notice">

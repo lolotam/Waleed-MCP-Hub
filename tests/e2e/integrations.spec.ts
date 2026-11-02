@@ -62,6 +62,12 @@ test('scan, integrate, manual save/auto-sync and scoped disconnect preserve othe
   await expect(
     row.getByText('Integrated · configuration only', { exact: true }),
   ).toBeVisible();
+  await row
+    .getByRole('button', { name: 'Refresh launcher', exact: true })
+    .click();
+  await expect(
+    row.getByRole('button', { name: 'Refresh launcher', exact: true }),
+  ).toBeEnabled();
   for (const width of [1440, 1024, 768, 390]) {
     await page.setViewportSize({ width, height: 950 });
     expect(
