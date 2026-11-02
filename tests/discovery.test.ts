@@ -422,6 +422,8 @@ describe('read-only environment discovery', () => {
     '{env:MCP_URL}',
     '{file:./endpoint.txt}',
     'https://example.test/mcp?key={env:KEY}',
+    '{env:SCHEME}://example.test/mcp',
+    'https://example.test:{env:PORT}/mcp',
   ])('counts an unexpanded OpenCode remote URL %s', (endpoint) => {
     const file = inspectAgentFile(
       'C:\\Synthetic\\opencode.json',
@@ -453,6 +455,12 @@ describe('read-only environment discovery', () => {
     { broken: { type: 'remote', url: 'not-a-url' } },
     { broken: { type: 'remote', url: '://' } },
     { broken: { type: 'remote', url: 'file:///private/file' } },
+    { broken: { type: 'remote', url: 'javascript:{env:X}' } },
+    { broken: { type: 'remote', url: 'file:///{file:./endpoint.txt}' } },
+    {
+      servers: { good: { type: 'local', command: ['healthy.exe'] } },
+      timeout: { type: 'local', command: [] },
+    },
     { broken: { command: ['x'] } },
   ])('rejects malformed OpenCode MCP maps (%j)', (mcp) => {
     const file = inspectAgentFile(

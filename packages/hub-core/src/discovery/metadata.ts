@@ -33,7 +33,8 @@ export function openCodeServers(value: unknown) {
   if (!mcp || !nested || openCodeServerRecord(nested)) return mcp;
   const siblings = Object.entries(mcp).filter(
     ([name, entry]) =>
-      name !== 'servers' && (name !== 'timeout' || openCodeServerRecord(entry)),
+      name !== 'servers' &&
+      (name !== 'timeout' || !openCodeTimeoutSetting(entry)),
   );
   if (!siblings.length) return nested;
   for (const [name] of siblings) {
@@ -44,9 +45,37 @@ export function openCodeServers(value: unknown) {
 }
 function openCodeServerRecord(value: unknown) {
   const entry = object(value);
-  return entry !== null && validOpenCodeEntry(entry);
+  if (!entry) return false;
+  if (validOpenCodeEntry(entry)) return true;
+  const wrappedSibling = Object.values(entry).some((candidate) => {
+    const child = object(candidate);
+    return child !== null && validOpenCodeEntry(child);
+  });
+  // A malformed direct record must not become a destination for new servers.
+  // A healthy child distinguishes a wrapper with malformed reserved names.
+  return (
+    !wrappedSibling &&
+    ['type', 'command', 'url', 'enabled', 'disabled'].some((key) =>
+      Object.hasOwn(entry, key),
+    )
+  );
 }
-function validOpenCodeEntry(entry: Record<string, unknown>) {
+function openCodeTimeoutSetting(value: unknown) {
+  if (typeof value === 'number')
+    return Number.isSafeInteger(value) && value > 0;
+  const settings = object(value);
+  return (
+    settings !== null &&
+    Object.entries(settings).every(
+      ([key, milliseconds]) =>
+        ['startup', 'catalog', 'execution'].includes(key) &&
+        typeof milliseconds === 'number' &&
+        Number.isSafeInteger(milliseconds) &&
+        milliseconds > 0,
+    )
+  );
+}
+export function validOpenCodeEntry(entry: Record<string, unknown>) {
   if (Object.keys(entry).length === 1 && typeof entry.enabled === 'boolean')
     return true;
   if (
@@ -59,12 +88,17 @@ function validOpenCodeEntry(entry: Record<string, unknown>) {
     const command = strings(entry.command);
     return Boolean(command?.length && command[0]?.trim());
   }
-  return (
-    entry.type === 'remote' &&
-    typeof entry.url === 'string' &&
-    entry.url.length <= 4096 &&
-    (url(entry.url) !== null || /\{(?:env|file):[^{}\r\n]+\}/.test(entry.url))
+  return entry.type === 'remote' && validOpenCodeUrl(entry.url);
+}
+function validOpenCodeUrl(value: unknown) {
+  if (typeof value !== 'string' || value.length > 4096) return false;
+  const reference = /\{(?:env|file):[^{}\r\n]+\}/g;
+  const tokens = value.match(reference);
+  if (tokens?.length === 1 && tokens[0] === value) return true;
+  const masked = value.replace(reference, (token: string, offset: number) =>
+    offset === 0 && value.slice(token.length).startsWith(':') ? 'https' : '1',
   );
+  return url(masked) !== null;
 }
 export const hash = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');

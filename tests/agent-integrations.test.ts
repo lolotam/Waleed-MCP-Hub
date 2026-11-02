@@ -392,6 +392,34 @@ describe('comment-preserving managed agent entries', () => {
       ).toEqual(original);
     },
   );
+  it.each([
+    { type: 'local', command: 'node server.js' },
+    { type: 'local', command: [] },
+    { type: 'remote', url: 'file:///private/file' },
+    {
+      type: 'local',
+      command: 'node server.js',
+      headers: { type: 'remote', url: 'https://example.test/mcp' },
+    },
+  ])(
+    'never nests the hub inside a malformed direct server named servers (%j)',
+    (servers) => {
+      const entry = agentEntry(
+        'opencode',
+        'node',
+        'bridge',
+        'state',
+        'opencode',
+      );
+      expect(() =>
+        editAgentDocument(
+          JSON.stringify({ mcp: { servers } }),
+          'opencode',
+          entry,
+        ),
+      ).toThrowError(expect.objectContaining({ code: 'conflict' }));
+    },
+  );
   it('edits an owned direct OpenCode entry in place beside an existing wrapper', () => {
     const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
     const servers = { other: { type: 'local', command: ['other.exe'] } };

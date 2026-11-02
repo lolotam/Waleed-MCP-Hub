@@ -3,6 +3,7 @@ import {
   parseDocument,
   object,
   openCodeServers,
+  validOpenCodeEntry,
 } from '../discovery/metadata.js';
 import { hashData } from '../runtime/registry.js';
 import { HubError } from '../errors.js';
@@ -17,8 +18,18 @@ const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
     const wrapped = Object.hasOwn(object(mcp.servers) ?? {}, managedName);
     if (direct && wrapped) throw conflict();
     if (direct) return ['mcp', managedName];
-    if (wrapped || openCodeServers(mcp) !== mcp)
-      return ['mcp', 'servers', managedName];
+    if (wrapped) return ['mcp', 'servers', managedName];
+    const nested = object(mcp.servers);
+    // Read-only import can salvage siblings; new writes require an unambiguous layout.
+    if (
+      nested &&
+      ['type', 'command', 'url', 'enabled', 'disabled'].some((key) =>
+        Object.hasOwn(nested, key),
+      ) &&
+      !validOpenCodeEntry(nested)
+    )
+      throw conflict();
+    if (openCodeServers(mcp) !== mcp) return ['mcp', 'servers', managedName];
   }
   return [
     format === 'codex'

@@ -193,6 +193,38 @@ it.each(['__proto__', 'constructor', 'prototype'])(
     expect(extracted.wrapped).toEqual(wrapped);
   },
 );
+it('retains a healthy wrapped sibling beside a remote marker with a forbidden literal protocol', () => {
+  const servers = {
+    type: 'remote',
+    url: 'javascript:{env:X}',
+    good: { type: 'local', command: ['healthy.exe'] },
+  };
+  expect(
+    agentServers(JSON.stringify({ mcp: { servers } }), 'opencode'),
+  ).toEqual(servers);
+});
+it.each([
+  { type: 'local', command: [] },
+  { type: 'remote', url: 12 },
+])('retains a malformed mixed server named timeout (%j)', (timeout) => {
+  const wrapped = { type: 'local', command: ['healthy.exe'] };
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { wrapped }, timeout } }),
+      'opencode',
+    ),
+  ).toEqual({ wrapped, timeout });
+});
+it('omits documented V2 timeout settings from extracted server records', () => {
+  const wrapped = { type: 'local', command: ['healthy.exe'] };
+  const timeout = { startup: 45000, catalog: 30000, execution: 600000 };
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { wrapped }, timeout } }),
+      'opencode',
+    ),
+  ).toEqual({ wrapped });
+});
 it('extracts both direct and wrapped OpenCode siblings without shadowing duplicates', () => {
   const wrapped = { type: 'local', command: ['wrapped.exe'] };
   const direct = { type: 'remote', url: 'https://example.test/mcp' };
