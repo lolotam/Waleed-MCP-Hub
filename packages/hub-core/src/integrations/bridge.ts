@@ -69,6 +69,8 @@ import { packagesRoot } from '../packages/store.js';
 import { createPackageVerifier } from '../packages/verify.js';
 import {
   bridgeNotices,
+  registerGuide,
+  shortInstructions,
   type BridgeNotice,
   type RefusalCode,
 } from './agent-guide.js';
@@ -1245,8 +1247,16 @@ export function createAgentBridge(
 ) {
   const server = new Server(
     { name: 'waleed-mcp-hub', version: hubVersion() },
-    { capabilities: { tools: { listChanged: true } } },
+    {
+      capabilities: {
+        tools: { listChanged: true },
+        resources: {},
+        prompts: {},
+      },
+      instructions: shortInstructions(toolSeparator),
+    },
   );
+  registerGuide(server, toolSeparator);
   const names = new Map<
     string,
     { connectorId: string; hash: string; name: string }
