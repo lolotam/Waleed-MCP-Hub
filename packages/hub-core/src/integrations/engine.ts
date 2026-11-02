@@ -181,10 +181,9 @@ export function createIntegrationEngine(
           'Agent scan is stale, unsupported, conflicted or not installed.',
         );
       if (
-        (remove &&
-          current.status === 'not_integrated' &&
-          !before.integrations?.some((item) => item.agentId === id)) ||
-        (!remove && current.status === 'integrated')
+        remove &&
+        current.status === 'not_integrated' &&
+        !before.integrations?.some((item) => item.agentId === id)
       )
         return { agent: current, backup: null, changed: false };
       const text = await options.files.read(current.configPath);
@@ -208,6 +207,12 @@ export function createIntegrationEngine(
               remove ? undefined : entry,
               record?.entryHash,
             );
+      if (
+        !remove &&
+        current.status === 'integrated' &&
+        hashData(managedEntry(after, target.format)) === record?.entryHash
+      )
+        return { agent: current, backup: null, changed: false };
       const next = structuredClone(before);
       next.integrations = (next.integrations ?? []).filter(
         (item) => item.agentId !== id,

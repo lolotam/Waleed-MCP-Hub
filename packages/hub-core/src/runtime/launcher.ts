@@ -4,7 +4,7 @@ import { ConnectorSchema, StateSchema, SafetyStateSchema } from '@waleed/contrac
 import { assertNoLinks } from '../adapters/managed-files.js';
 import { approved, definitionHash, hashBytes } from './registry.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
-import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
+import { isolatedNativeArguments, nativeExecutable } from '../adapters/mcp/runtime.js';
 import { dirname, join } from 'node:path';
 import { windowsSecretStore } from '../adapters/secrets/windows.js';
 import { createBindingResolver, type SecretLease } from '../auth/bindings.js';
@@ -37,14 +37,15 @@ export async function runNativeLauncher(manifestUrl: URL, expectedHash: string) 
     // the target process is started.
     if (current.package) await verifyPackage(current, packagesRoot(dirname(manifest.registryPath)));
     if (Object.keys(current.secretBindings).length) lease = await createBindingResolver({ windows: await windowsSecretStore(join(dirname(manifest.registryPath), 'credentials'), true) }, async () => state)(current, stop.signal);
-    await assertNoLinks(current.executable);
-    const runner = await createWindowsProcessRunner({ allowedExecutables: [current.executable], workingDirectory: dirname(path), concurrency: 1 });
+    const executable = await nativeExecutable(current);
+    await assertNoLinks(executable);
+    const runner = await createWindowsProcessRunner({ allowedExecutables: [executable], workingDirectory: dirname(path), concurrency: 1 });
     process.stdin.setEncoding('utf8'); let send: ((data: string) => void) | undefined;
     process.stdin.pause();
     const input = (data: string) => { if (send) { for (let offset = 0; offset < data.length; offset += 4096) send(data.slice(offset, offset + 4096)); } };
     process.stdin.on('data', input); process.stdin.once('end', () => stop.abort());
     process.once('SIGINT', () => stop.abort()); process.once('SIGTERM', () => stop.abort());
-    const result = await runner.run({ executable: current.executable, arguments: isolatedNativeArguments(current), environment: { ...(current.environmentLiterals ?? {}), ...lease?.environment }, timeoutMs: 120_000, outputLimitBytes: 1024 * 1024, signal: stop.signal, stream: { started(write) { send = write; process.stdin.resume(); }, stdout(data) { process.stdout.write(data); } } });
+    const result = await runner.run({ executable, arguments: isolatedNativeArguments(current), environment: { ...(current.environmentLiterals ?? {}), ...lease?.environment }, timeoutMs: 120_000, outputLimitBytes: 1024 * 1024, signal: stop.signal, stream: { started(write) { send = write; process.stdin.resume(); }, stdout(data) { process.stdout.write(data); } } });
     process.stdin.off('data', input); process.stdin.pause();
     if (result.outcome !== 'exited' && result.outcome !== 'cancelled') process.exitCode = 1;
   } catch { process.stderr.write('The approved native launcher is stale, disabled, unsafe, or unavailable. Re-preview its managed profile.\n'); process.exitCode = 1; stop.abort(); }

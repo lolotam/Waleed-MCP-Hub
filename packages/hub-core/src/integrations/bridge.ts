@@ -45,7 +45,10 @@ import {
 } from '../adapters/mcp/http.js';
 import { ContainedStdioTransport } from '../adapters/mcp/stdio.js';
 import { createWindowsProcessRunner } from '../adapters/native/process-runner.js';
-import { isolatedNativeArguments } from '../adapters/mcp/runtime.js';
+import {
+  isolatedNativeArguments,
+  nativeExecutable,
+} from '../adapters/mcp/runtime.js';
 import { approved, definitionHash, hashData } from '../runtime/registry.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
 import { readBootRecord, readInstallRecord } from '../runtime/boot.js';
@@ -2049,8 +2052,9 @@ export async function runAgentBridge(
           );
         }
       } else {
+        const executable = await nativeExecutable(connector);
         const runner = await createWindowsProcessRunner({
-          allowedExecutables: [connector.executable],
+          allowedExecutables: [executable],
           workingDirectory: directory,
           concurrency: 1,
           // A pooled peer keeps its process for the whole session.
@@ -2060,7 +2064,7 @@ export async function runAgentBridge(
         const transport = new ContainedStdioTransport(
           runner,
           {
-            executable: connector.executable,
+            executable,
             arguments: isolatedNativeArguments(connector),
             environment: {
               ...connector.environmentLiterals,

@@ -16,6 +16,7 @@ import {
   type AgentFormat,
 } from '../packages/hub-core/src/integrations/formats.js';
 import type { AgentFiles } from '../packages/hub-core/src/integrations/files.js';
+import type { IntegrationAdapters } from '../packages/hub-core/src/integrations/engine.js';
 import { memoryStore } from './helpers/memory-store.js';
 import { emptyState } from '@waleed/hub-core';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -89,41 +90,121 @@ function setup() {
   };
   const store = memoryStore(emptyState()),
     safety = createMemorySafetyLedger();
-  const hub = createLifecycle(store, Date.now, safety, {
-    integrations: {
-      targets,
-      files,
-      registry: 'C:\\Runtime\\state.json',
-      node: 'C:\\Node24\\node.exe',
-      bridge: 'C:\\Hub\\bridge.js',
-      discovery: {
-        async find() {
-          return ['C:\\Node24\\agent.exe'];
-        },
-        async read(path) {
-          const target = targets.find(
-            (item) => item.packageName && path.includes(item.packageName),
-          );
-          return target
-            ? {
-                status: 'read',
-                text: JSON.stringify({
-                  name: target.packageName,
-                  version: '2.0.0',
-                }),
-                fingerprint: '0'.repeat(64),
-              }
-            : { status: 'missing' };
-        },
-        async run() {
-          throw new Error('Scanning must not execute agents.');
-        },
+  const adapters: IntegrationAdapters = {
+    targets,
+    files,
+    registry: 'C:\\Runtime\\state.json',
+    node: 'C:\\Node24\\node.exe',
+    bridge: 'C:\\Hub\\bridge.js',
+    discovery: {
+      async find() {
+        return ['C:\\Node24\\agent.exe'];
+      },
+      async read(path) {
+        const target = targets.find(
+          (item) => item.packageName && path.includes(item.packageName),
+        );
+        return target
+          ? {
+              status: 'read',
+              text: JSON.stringify({
+                name: target.packageName,
+                version: '2.0.0',
+              }),
+              fingerprint: '0'.repeat(64),
+            }
+          : { status: 'missing' };
+      },
+      async run() {
+        throw new Error('Scanning must not execute agents.');
       },
     },
+  };
+  const hub = createLifecycle(store, Date.now, safety, {
+    integrations: adapters,
   });
-  return { hub, contents, backups, files, safety };
+  return { hub, contents, backups, files, safety, store, adapters };
 }
 describe('comment-preserving managed agent entries', () => {
+  it.each(targets)(
+    '$name refreshes its owned launcher after an install move',
+    async (target) => {
+      const f = setup();
+      const initial = (await f.hub.integrations.scan()).agents.find(
+        (a) => a.agentId === target.id,
+      )!;
+      await f.hub.integrations.integrate(target.id, {
+        expectedRevision: 0,
+        fingerprint: initial.fingerprint,
+        confirmConfigurationChange: true,
+      });
+      const oldText = f.contents.get(target.paths[0]!)!;
+      await f.hub.close();
+      const moved = createLifecycle(f.store, Date.now, f.safety, {
+        integrations: {
+          ...f.adapters,
+          node: 'C:\\NewInstall\\node.exe',
+          bridge: 'C:\\NewInstall\\bridge.js',
+        },
+      });
+      try {
+        const observed = (await moved.integrations.scan()).agents.find(
+          (a) => a.agentId === target.id,
+        )!;
+        expect(observed.status).toBe('integrated');
+        const input = {
+          expectedRevision: 1,
+          fingerprint: observed.fingerprint,
+          confirmConfigurationChange: true,
+        };
+        await expect(
+          moved.integrations.integrate(target.id, {
+            ...input,
+            confirmConfigurationChange: false,
+          }),
+        ).rejects.toThrow();
+        const result = await moved.integrations.integrate(target.id, input);
+        expect(result.changed).toBe(true);
+        expect(result.agent.status).toBe('integrated');
+        const refreshed = f.contents.get(target.paths[0]!)!;
+        expect(managedEntry(refreshed, target.format)).toMatchObject(
+          agentEntry(
+            target.format,
+            'C:\\NewInstall\\node.exe',
+            'C:\\NewInstall\\bridge.js',
+            f.adapters.registry,
+            target.id,
+          ),
+        );
+        expect(refreshed.toLowerCase()).toContain('preserve');
+        expect(f.backups.at(-1)).toBe(oldText);
+        const repeated = await moved.integrations.integrate(target.id, {
+          expectedRevision: 2,
+          fingerprint: result.agent.fingerprint,
+          confirmConfigurationChange: true,
+        });
+        expect(repeated.changed).toBe(false);
+        expect((await moved.inventory()).revision).toBe(2);
+        // A modified managed entry must not be adopted by the refresh operation.
+        f.contents.set(
+          target.paths[0]!,
+          refreshed.replace('NewInstall', 'ExternalEdit'),
+        );
+        const changed = (await moved.integrations.scan()).agents.find(
+          (a) => a.agentId === target.id,
+        )!;
+        await expect(
+          moved.integrations.integrate(target.id, {
+            expectedRevision: 2,
+            fingerprint: changed.fingerprint,
+            confirmConfigurationChange: true,
+          }),
+        ).rejects.toMatchObject({ code: 'conflict' });
+      } finally {
+        await moved.close();
+      }
+    },
+  );
   it.each(targets)(
     '$name integrates/disconnects without changing unrelated configuration',
     async (target) => {
