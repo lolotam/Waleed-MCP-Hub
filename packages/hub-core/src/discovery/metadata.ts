@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
-import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
+import { parseTree, getNodeValue, type ParseError } from 'jsonc-parser';
 import { parse as parseToml } from 'smol-toml';
 import type {
   AdoptionCandidate,
@@ -8,6 +8,7 @@ import type {
   DiscoverySnapshot,
 } from '@waleed/contracts';
 import type { ReadResult } from './ports.js';
+import { HubError } from '../errors.js';
 
 export function object(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -23,6 +24,119 @@ export const strings = (value: unknown): string[] | null =>
   value.every((item) => typeof item === 'string' && item.length <= 4096)
     ? (value as string[])
     : null;
+// V1 names servers directly under mcp; V2 wraps them under mcp.servers.
+// A direct server called servers (including an enabled-only V1 override)
+// keeps its own fields instead of being mistaken for the wrapper.
+export function openCodeServerLayout(value: unknown) {
+  const mcp = object(value);
+  const nested = object(mcp?.servers);
+  const wrapper = nested && !openCodeServerRecord(nested) ? nested : null;
+  const siblings = Object.entries(mcp ?? {}).filter(
+    ([name, entry]) =>
+      (name !== 'servers' || !wrapper) &&
+      (name !== 'timeout' || !openCodeTimeoutSetting(entry)),
+  );
+  if (!wrapper)
+    return {
+      servers: mcp ? Object.fromEntries(siblings) : null,
+      wrapped: false,
+    };
+  for (const [name] of siblings) {
+    if (Object.hasOwn(wrapper, name))
+      throw new HubError('conflict', 'Conflicting OpenCode server maps.');
+  }
+  return {
+    servers: siblings.length
+      ? { ...wrapper, ...Object.fromEntries(siblings) }
+      : wrapper,
+    wrapped: true,
+  };
+}
+export function openCodeServers(value: unknown) {
+  return openCodeServerLayout(value).servers;
+}
+function openCodeServerRecord(value: unknown) {
+  const entry = object(value);
+  if (!entry) return false;
+  if (validOpenCodeEntry(entry)) return true;
+  const wrappedSibling = Object.values(entry).some((candidate) => {
+    const child = object(candidate);
+    return child !== null && validOpenCodeEntry(child);
+  });
+  // A malformed direct record must not become a destination for new servers.
+  // A healthy child distinguishes a wrapper with malformed reserved names.
+  return (
+    !wrappedSibling &&
+    ['type', 'command', 'url', 'enabled', 'disabled'].some((key) =>
+      Object.hasOwn(entry, key),
+    )
+  );
+}
+function openCodeTimeoutSetting(value: unknown) {
+  if (typeof value === 'number')
+    return Number.isSafeInteger(value) && value > 0;
+  const settings = object(value);
+  return (
+    settings !== null &&
+    Object.entries(settings).every(
+      ([key, milliseconds]) =>
+        ['startup', 'catalog', 'execution'].includes(key) &&
+        typeof milliseconds === 'number' &&
+        Number.isSafeInteger(milliseconds) &&
+        milliseconds > 0,
+    )
+  );
+}
+export function validOpenCodeEntry(entry: Record<string, unknown>) {
+  if (Object.keys(entry).length === 1 && typeof entry.enabled === 'boolean')
+    return true;
+  if (
+    ['enabled', 'disabled'].some(
+      (key) => entry[key] !== undefined && typeof entry[key] !== 'boolean',
+    )
+  )
+    return false;
+  if (entry.type === 'local') {
+    const command = strings(entry.command);
+    return Boolean(command?.length && command[0]?.trim());
+  }
+  return entry.type === 'remote' && validOpenCodeUrl(entry.url);
+}
+function validOpenCodeUrl(value: unknown) {
+  if (typeof value !== 'string' || value.length > 4096) return false;
+  const reference = /\{(?:env|file):[^{}\r\n]+\}/g;
+  const tokens = value.match(reference);
+  if (tokens?.length === 1 && tokens[0] === value) return true;
+  // WHATWG parsing ignores tabs/newlines; placeholders must not hide a literal scheme.
+  const normalized = value.replace(/[\t\r\n]/g, '').trimStart();
+  const protocol = literalOpenCodeProtocol(normalized, reference);
+  const hostPort = referenceHostPort(normalized, reference);
+  if (protocol && !['http:', 'https:'].includes(protocol) && !hostPort)
+    return false;
+  if (hostPort) return url(`https://${hostPort}`) !== null;
+  const masked = value.replace(reference, (token: string, offset: number) => {
+    if (offset !== 0) return '1';
+    // A leading reference can supply the scheme or the whole base URL.
+    return value.slice(token.length).startsWith(':')
+      ? 'https'
+      : 'https://placeholder.invalid';
+  });
+  return url(masked) !== null;
+}
+function literalOpenCodeProtocol(value: string, reference: RegExp) {
+  const literal = value.replace(reference, '');
+  return /^[a-z][a-z\d+.-]*:/i.exec(literal)?.[0].toLowerCase() ?? null;
+}
+function referenceHostPort(value: string, reference: RegExp) {
+  const leading = new RegExp(`^(?:${reference.source})+`).exec(value)?.[0];
+  if (!leading) return null;
+  const authority = value.slice(leading.length).replace(reference, '1');
+  return /^(?:localhost|[a-z\d-]+(?:\.[a-z\d-]+)+|\[[a-f\d:.]+\]):\d+(?:[/?#]|$)/i.test(
+    authority,
+  )
+    ? authority
+    : null;
+}
 export const hash = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function parseDocument(
@@ -34,11 +148,14 @@ export function parseDocument(
   else if (format === 'json') value = JSON.parse(text);
   else {
     const errors: ParseError[] = [];
-    value = parseJsonc(text, errors, {
+    const tree = parseTree(text, errors, {
       allowTrailingComma: true,
       disallowComments: false,
     });
-    if (errors.length) throw new Error('Invalid JSONC.');
+    if (errors.length || !tree) throw new Error('Invalid JSONC.');
+    // AST materialization uses null-prototype objects, preserving literal
+    // property names such as __proto__ without invoking inherited setters.
+    value = getNodeValue(tree);
   }
   const result = object(value);
   if (!result) throw new Error('Expected an object.');
@@ -287,19 +404,16 @@ export function inspectAgentFile(
     if (shape === 'opencode') {
       if (document.mcp !== undefined && !object(document.mcp))
         throw new Error('Malformed MCP object.');
-      const mcp = object(document.mcp);
-      if (
-        document.mcpServers !== undefined ||
-        (mcp &&
-          Object.keys(mcp).some((key) => !['servers', 'timeout'].includes(key)))
-      ) {
+      if (document.mcpServers !== undefined) {
         observation.status = 'unsupported';
         return observation;
       }
     }
     const rawMap =
       shape === 'opencode'
-        ? object(document.mcp)?.servers
+        ? document.mcp === undefined
+          ? undefined
+          : openCodeServers(document.mcp)
         : shape === 'codex'
           ? document.mcp_servers
           : document.mcpServers;
@@ -313,6 +427,8 @@ export function inspectAgentFile(
     for (const [name, value] of entries) {
       const entry = object(value);
       if (!entry) throw new Error('Invalid MCP entry.');
+      if (shape === 'opencode' && !validOpenCodeEntry(entry))
+        throw new Error('Invalid OpenCode MCP entry.');
       const match = pointer(entry, profileId, chromeLauncher);
       const expected =
         name === 'hub-pilot'

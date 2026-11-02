@@ -1,27 +1,60 @@
 import { applyEdits, modify, parseTree, type Node } from 'jsonc-parser';
-import { parseDocument, object } from '../discovery/metadata.js';
+import {
+  parseDocument,
+  object,
+  openCodeServers,
+  openCodeServerLayout,
+  validOpenCodeEntry,
+} from '../discovery/metadata.js';
 import { hashData } from '../runtime/registry.js';
 import { HubError } from '../errors.js';
 
 export const managedName = 'waleed-mcp-hub';
 export type AgentFormat =
   'opencode' | 'codex' | 'mcpServers' | 'vscode' | 'kilo';
-const pathFor = (format: AgentFormat) => [
-  format === 'codex'
-    ? 'mcp_servers'
-    : format === 'vscode'
-      ? 'servers'
-      : format === 'opencode' || format === 'kilo'
-        ? 'mcp'
-        : 'mcpServers',
-  managedName,
-];
+const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
+  const mcp = object(root.mcp);
+  if (format === 'opencode' && mcp) {
+    const direct = Object.hasOwn(mcp, managedName);
+    const wrapped = Object.hasOwn(object(mcp.servers) ?? {}, managedName);
+    if (direct && wrapped) throw conflict();
+    if (direct) return ['mcp', managedName];
+    if (wrapped) return ['mcp', 'servers', managedName];
+    if (openCodeServerLayout(mcp).wrapped)
+      return ['mcp', 'servers', managedName];
+  }
+  return [
+    format === 'codex'
+      ? 'mcp_servers'
+      : format === 'vscode'
+        ? 'servers'
+        : format === 'opencode' || format === 'kilo'
+          ? 'mcp'
+          : 'mcpServers',
+    managedName,
+  ];
+};
 const conflict = () =>
   new HubError(
     'conflict',
     'Agent configuration is invalid, ambiguous or contains a conflicting managed entry.',
   );
+function assertOpenCodeWriteLayout(root: Record<string, unknown>) {
+  const nested = object(object(root.mcp)?.servers);
+  // Read-only import can salvage siblings; new writes require an unambiguous layout.
+  if (
+    nested &&
+    ['type', 'command', 'url', 'enabled', 'disabled'].some(
+      (key) =>
+        Object.hasOwn(nested, key) &&
+        !validOpenCodeEntry(object(nested[key]) ?? {}),
+    ) &&
+    !validOpenCodeEntry(nested)
+  )
+    throw conflict();
+}
 function document(text: string, format: AgentFormat) {
+  const source = text.replace(/^\uFEFF/, '');
   if (format !== 'codex') {
     const walk = (node: Node) => {
       if (node.type === 'object') {
@@ -33,12 +66,12 @@ function document(text: string, format: AgentFormat) {
       }
       for (const child of node.children ?? []) walk(child);
     };
-    const tree = parseTree(text);
+    const tree = parseTree(source);
     if (!tree) throw conflict();
     walk(tree);
   }
   try {
-    return parseDocument(text, format === 'codex' ? 'toml' : 'jsonc');
+    return parseDocument(source, format === 'codex' ? 'toml' : 'jsonc');
   } catch {
     throw conflict();
   }
@@ -48,8 +81,12 @@ export function managedEntry(
   format: AgentFormat,
 ): unknown {
   if (text === null) return undefined;
-  let value: unknown = document(text.replace(/^\uFEFF/, ''), format);
-  for (const key of pathFor(format)) {
+  const root = document(text.replace(/^\uFEFF/, ''), format);
+  return entryAtPath(root, pathFor(format, root));
+}
+function entryAtPath(root: Record<string, unknown>, path: string[]): unknown {
+  let value: unknown = root;
+  for (const key of path) {
     if (!object(value)) throw conflict();
     value = (value as Record<string, unknown>)[key];
     if (value === undefined) return undefined;
@@ -64,29 +101,19 @@ export function agentServers(
   format: AgentFormat,
 ): Record<string, unknown> {
   const root = document(text.replace(/^\uFEFF/, ''), format);
-  const mcp = object(root.mcp);
-  const nestedServers = object(mcp?.servers);
   // A direct server named "servers" must not hide its siblings. The optional
   // wrapper contains server records, rather than a server's own fields: a
-  // server always has a string or list `command` or `url`. A malformed record
+  // server has its own fields, including enabled-only V1 overrides. A malformed record
   // inside the wrapper is rejected on its own and never hides its siblings.
-  const wrappedServers =
-    nestedServers &&
-    Object.keys(mcp!).length === 1 &&
-    !['command', 'url'].some(
-      (field) =>
-        typeof nestedServers[field] === 'string' ||
-        Array.isArray(nestedServers[field]),
-    );
   const map =
     format === 'codex'
       ? root.mcp_servers
       : format === 'vscode'
         ? root.servers
         : format === 'opencode'
-          ? wrappedServers
-            ? nestedServers
-            : root.mcp
+          ? root.mcp === undefined
+            ? undefined
+            : openCodeServers(root.mcp)
           : format === 'kilo'
             ? root.mcp
             : root.mcpServers;
@@ -123,12 +150,17 @@ export function editAgentDocument(
   expectedEntryHash?: string,
 ) {
   const current = managedEntry(text, format);
+  // An existing owned entry stays in its own location; foreign entries are not adopted.
   if (
     current !== undefined &&
     (!expectedEntryHash || hashData(current) !== expectedEntryHash)
   )
     throw conflict();
   const raw = text ?? (format === 'codex' ? '' : '{}\n');
+  const root = document(raw, format);
+  if (format === 'opencode' && current === undefined && entry !== undefined)
+    assertOpenCodeWriteLayout(root);
+  const path = pathFor(format, root);
   let result: string;
   if (format === 'codex') {
     const start = raw.indexOf(begin),
@@ -154,7 +186,7 @@ export function editAgentDocument(
           `[mcp_servers.${managedName}]`,
           `command = ${JSON.stringify(entry.command)}`,
           `args = ${JSON.stringify(entry.args)}`,
-          'startup_timeout_sec = 30',
+          'startup_timeout_sec = 90',
           end,
           '',
         ].join(eol);
@@ -162,7 +194,7 @@ export function editAgentDocument(
   } else {
     result = applyEdits(
       raw,
-      modify(raw, pathFor(format), entry, {
+      modify(raw, path, entry, {
         formattingOptions: {
           insertSpaces: true,
           tabSize: 2,
@@ -171,20 +203,19 @@ export function editAgentDocument(
       }),
     );
   }
-  const actual = managedEntry(result, format);
+  const actual = entryAtPath(document(result, format), path);
   if (
     entry === undefined
       ? actual !== undefined
       : hashData(actual) !==
         hashData(
-          format === 'codex' ? { ...entry, startup_timeout_sec: 30 } : entry,
+          format === 'codex' ? { ...entry, startup_timeout_sec: 90 } : entry,
         )
   )
     throw conflict();
   // Verify semantics outside the owned entry instead of trusting an edit library.
   const without = (value: string) => {
     const doc = document(value.replace(/^\uFEFF/, ''), format);
-    const path = pathFor(format);
     let parent = doc;
     for (const key of path.slice(0, -1)) {
       const next = object(parent[key]);

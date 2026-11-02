@@ -110,6 +110,12 @@ it('omits alternate-name Hub entries with raw Windows arguments and array comman
   }
 });
 it('distinguishes OpenCode wrappers from a direct MCP named servers', () => {
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { enabled: false } } }),
+      'opencode',
+    ),
+  ).toEqual({ servers: { enabled: false } });
   const servers = {
     servers: { type: 'local', command: ['node', 'server.js'] },
     sibling: { type: 'remote', url: 'https://example.test/mcp' },
@@ -134,6 +140,117 @@ it('distinguishes OpenCode wrappers from a direct MCP named servers', () => {
       'opencode',
     ),
   ).toEqual({ ...servers, broken: null });
+});
+it.each(['enabled', 'disabled', 'type'])(
+  'retains healthy wrapped siblings beside a malformed %s record',
+  (name) => {
+    const servers = {
+      [name]: null,
+      good: { type: 'remote', url: 'https://example.test/mcp' },
+    };
+    expect(
+      agentServers(JSON.stringify({ mcp: { servers } }), 'opencode'),
+    ).toEqual(servers);
+  },
+);
+it.each([
+  {
+    type: 'local',
+    command: null,
+    good: { type: 'remote', url: 'https://example.test/mcp' },
+  },
+  {
+    type: 'local',
+    command: { type: 'remote', url: 'https://example.test/mcp' },
+  },
+  { type: 'remote', url: { type: 'local', command: ['healthy.exe'] } },
+  {
+    type: 'remote',
+    url: null,
+    good: { type: 'local', command: ['healthy.exe'] },
+  },
+])(
+  'retains wrapped siblings when reserved fields do not form a valid server (%j)',
+  (servers) => {
+    expect(
+      agentServers(JSON.stringify({ mcp: { servers } }), 'opencode'),
+    ).toEqual(servers);
+  },
+);
+it.each(['__proto__', 'constructor', 'prototype'])(
+  'keeps a mixed OpenCode server named %s as an own data property',
+  (name) => {
+    const wrapped = { type: 'local', command: ['wrapped.exe'] };
+    const direct = { type: 'remote', url: 'https://example.test/mcp' };
+    const mcp = Object.fromEntries([
+      ['servers', { wrapped }],
+      [name, direct],
+    ]);
+    const extracted = agentServers(JSON.stringify({ mcp }), 'opencode');
+    expect(Object.hasOwn(extracted, name)).toBe(true);
+    expect(extracted[name]).toEqual(direct);
+    expect(Object.getPrototypeOf(extracted)).toBe(Object.prototype);
+    expect(extracted.wrapped).toEqual(wrapped);
+  },
+);
+it.each([
+  'javascript:{env:X}',
+  '{env:A}{env:B}file:///tmp',
+  '{env:A}fi\tle:///tmp',
+])('retains a healthy wrapped sibling beside a forbidden URL %s', (url) => {
+  const servers = {
+    type: 'remote',
+    url,
+    good: { type: 'local', command: ['healthy.exe'] },
+  };
+  expect(
+    agentServers(JSON.stringify({ mcp: { servers } }), 'opencode'),
+  ).toEqual(servers);
+});
+it.each([
+  { type: 'local', command: [] },
+  { type: 'remote', url: 12 },
+])('retains a malformed mixed server named timeout (%j)', (timeout) => {
+  const wrapped = { type: 'local', command: ['healthy.exe'] };
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { wrapped }, timeout } }),
+      'opencode',
+    ),
+  ).toEqual({ wrapped, timeout });
+});
+it.each(['wrapped', 'direct', 'empty'])(
+  'omits documented timeout settings from %s server maps',
+  (layout) => {
+    const healthy = { type: 'local', command: ['healthy.exe'] };
+    const timeout = { startup: 45000, catalog: 30000, execution: 600000 };
+    const servers = layout === 'empty' ? {} : { healthy };
+    const mcp =
+      layout === 'wrapped' ? { servers, timeout } : { ...servers, timeout };
+    expect(agentServers(JSON.stringify({ mcp }), 'opencode')).toEqual(servers);
+  },
+);
+it('extracts both direct and wrapped OpenCode siblings without shadowing duplicates', () => {
+  const wrapped = { type: 'local', command: ['wrapped.exe'] };
+  const direct = { type: 'remote', url: 'https://example.test/mcp' };
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { wrapped }, direct } }),
+      'opencode',
+    ),
+  ).toEqual({ wrapped, direct });
+  expect(() =>
+    agentServers(
+      JSON.stringify({ mcp: { servers: { direct }, direct } }),
+      'opencode',
+    ),
+  ).toThrow(HubError);
+  expect(() =>
+    agentServers(
+      JSON.stringify({ mcp: { servers: { direct }, direct } }),
+      'opencode',
+    ),
+  ).toThrowError(expect.objectContaining({ code: 'conflict' }));
 });
 it('groups sanitized candidates by agent, omits the Hub and copies only selected entries with exact protected credentials', async () => {
   const f = fixture(),
