@@ -359,7 +359,7 @@ This task has no runtime test. Its test is `npm run typecheck`: `guidance` is a 
     ListToolsRequestSchema,
     type Tool,
   } from '@modelcontextprotocol/sdk/types.js';
-  import { createAgentBridge, definitionHash } from '@waleed/hub-core';
+  import { createAgentBridge } from '@waleed/hub-core';
   import type { HubState } from '@waleed/contracts';
   import { profileState } from './helpers/runtime.js';
 
@@ -591,7 +591,7 @@ This task has no runtime test. Its test is `npm run typecheck`: `guidance` is a 
   });
   ```
 
-  Move the new `import` to the top of the file with the other imports. The connector name legitimately reaches the tool names through `readablePrefix`, so the test never checks the tool list for the injected strings. It only checks the three guidance surfaces.
+  Move the new `import` to the top of the file with the other imports, and add `definitionHash` to the `@waleed/hub-core` import. The connector name legitimately reaches the tool names through `readablePrefix`, so the test never checks the tool list for the injected strings. It only checks the three guidance surfaces.
 
 - [ ] **Step 2: Run them and confirm they fail.**
 

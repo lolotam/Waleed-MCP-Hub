@@ -1,5 +1,10 @@
 import { lstat, open } from 'node:fs/promises';
-import { constants as fsConstants, watchFile, unwatchFile } from 'node:fs';
+import {
+  constants as fsConstants,
+  readFileSync,
+  watchFile,
+  unwatchFile,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -1219,6 +1224,17 @@ const whenAborted = (signal: AbortSignal) =>
         once: true,
       });
   });
+// The release job stamps this package's manifest. It sits two levels above
+// the module in the source tree, the build and the portable folder alike,
+// while the root manifest does not. An unreadable version stops the bridge.
+function hubVersion() {
+  const { version } = JSON.parse(
+    readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+  ) as { version?: unknown };
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version))
+    throw new Error('The hub version is unreadable.');
+  return version;
+}
 export function createAgentBridge(
   read: () => Promise<HubState>,
   connect: BridgeConnect,
@@ -1228,7 +1244,7 @@ export function createAgentBridge(
   toolSeparator: '__' | '_' = '__',
 ) {
   const server = new Server(
-    { name: 'waleed-mcp-hub', version: '0.1.0' },
+    { name: 'waleed-mcp-hub', version: hubVersion() },
     { capabilities: { tools: { listChanged: true } } },
   );
   const names = new Map<
