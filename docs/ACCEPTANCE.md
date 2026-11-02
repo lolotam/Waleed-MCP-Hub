@@ -130,7 +130,7 @@ synthetic OAuth fixture, metadata-only Docker check, or same-user wrong-scope te
 ### P7 configuration-only enabled subset
 
 - [x] Nine disposable Windows scopes integrate/disconnect with private timestamped backups, atomic writes and exact read-back.
-- [x] OpenCode V2 `mcp.servers`; Codex TOML/comments/`node_repl`; Claude Desktop/Code `mcpServers`; Antigravity; VS Code user `mcp.json`/`servers`; Cursor; current Kimi Code; Kilo CLI shapes tested.
+- [x] OpenCode `mcp.<name>` (corrected 2026-11-02 from `mcp.servers`, see D021); Codex TOML/comments/`node_repl`; Claude Desktop/Code `mcpServers`; Antigravity; VS Code user `mcp.json`/`servers`; Cursor; current Kimi Code; Kilo CLI shapes tested.
 - [x] JSONC comments, plugins, denylist and newer unrelated settings/comments survive managed-entry changes.
 - [x] Duplicate keys, foreign entries, ambiguous layers, stale revisions/fingerprints and links fail closed.
 - [x] Protected scan/integrate/disconnect/status/sync routes share session/Origin/CSRF policy.

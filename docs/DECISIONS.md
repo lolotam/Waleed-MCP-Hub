@@ -486,6 +486,15 @@ Kilo CLI uses `~/.config/kilo/kilo.json` with `mcp.<name>`. Multiple supported f
 are ambiguous, not merged by guessing. Custom `CLAUDE_CONFIG_DIR` is blocked.
 OpenCode V2 uses `mcp.servers`, not V1's direct `mcp` map.
 
+Correction (2026-11-02): the installed OpenCode CLI 2.2.5 reads each server from
+`mcp.<name>`. The user's config holds 19 servers that way, and `opencode mcp list`
+lists them. The super admin reported that the hub entry at
+`mcp.servers["waleed-mcp-hub"]` did not work and moved it by hand to
+`mcp["waleed-mcp-hub"]`; after the move, `opencode run` called a hub tool and saw
+256 tools. The hub now writes OpenCode the way it writes Kilo, at
+`mcp["waleed-mcp-hub"]`. Import still accepts an `mcp.servers` wrapper. Discovery
+still expects `mcp.servers` (D015); that is issue #17.
+
 Sources: https://opencode.ai/v2/docs/mcp-servers ;
 https://code.visualstudio.com/docs/agents/reference/mcp-configuration.md ;
 https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html ;

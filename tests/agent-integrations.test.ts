@@ -12,6 +12,7 @@ import {
   editAgentDocument,
   managedEntry,
   agentEntry,
+  managedName,
   type AgentFormat,
 } from '../packages/hub-core/src/integrations/formats.js';
 import type { AgentFiles } from '../packages/hub-core/src/integrations/files.js';
@@ -322,6 +323,16 @@ describe('comment-preserving managed agent entries', () => {
     const document = editAgentDocument('{}', 'opencode', entry);
     expect(hashData(managedEntry(document, 'opencode'))).toBe(hashData(entry));
     expect(hashBytes(document)).toHaveLength(64);
+  });
+  // Regression 2026-11-02: the hub wrote `mcp.servers["waleed-mcp-hub"]`, which
+  // OpenCode 2.2.5 never loads; it reads each server from `mcp.<name>`.
+  it('writes the OpenCode entry directly under mcp, beside the existing servers', () => {
+    const entry = agentEntry('opencode', 'node', 'bridge', 'state', 'opencode');
+    const existing = { other: { type: 'local', command: ['other.exe'] } };
+    const document = JSON.parse(
+      editAgentDocument(JSON.stringify({ mcp: existing }), 'opencode', entry),
+    ) as unknown;
+    expect(document).toEqual({ mcp: { ...existing, [managedName]: entry } });
   });
   it('adds the Grok entry to a Grok config.toml and keeps every other setting', () => {
     // The shape of a real Grok config.toml: tables, an array of tables, keys.
