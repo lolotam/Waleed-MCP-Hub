@@ -3,6 +3,7 @@ import {
   parseDocument,
   object,
   openCodeServers,
+  openCodeServerLayout,
   validOpenCodeEntry,
 } from '../discovery/metadata.js';
 import { hashData } from '../runtime/registry.js';
@@ -31,7 +32,8 @@ const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
       !validOpenCodeEntry(nested)
     )
       throw conflict();
-    if (openCodeServers(mcp) !== mcp) return ['mcp', 'servers', managedName];
+    if (openCodeServerLayout(mcp).wrapped)
+      return ['mcp', 'servers', managedName];
   }
   return [
     format === 'codex'

@@ -27,21 +27,33 @@ export const strings = (value: unknown): string[] | null =>
 // V1 names servers directly under mcp; V2 wraps them under mcp.servers.
 // A direct server called servers (including an enabled-only V1 override)
 // keeps its own fields instead of being mistaken for the wrapper.
-export function openCodeServers(value: unknown) {
+export function openCodeServerLayout(value: unknown) {
   const mcp = object(value);
   const nested = object(mcp?.servers);
-  if (!mcp || !nested || openCodeServerRecord(nested)) return mcp;
-  const siblings = Object.entries(mcp).filter(
+  const wrapper = nested && !openCodeServerRecord(nested) ? nested : null;
+  const siblings = Object.entries(mcp ?? {}).filter(
     ([name, entry]) =>
-      name !== 'servers' &&
+      (name !== 'servers' || !wrapper) &&
       (name !== 'timeout' || !openCodeTimeoutSetting(entry)),
   );
-  if (!siblings.length) return nested;
+  if (!wrapper)
+    return {
+      servers: mcp ? Object.fromEntries(siblings) : null,
+      wrapped: false,
+    };
   for (const [name] of siblings) {
-    if (Object.hasOwn(nested, name))
+    if (Object.hasOwn(wrapper, name))
       throw new HubError('conflict', 'Conflicting OpenCode server maps.');
   }
-  return { ...nested, ...Object.fromEntries(siblings) };
+  return {
+    servers: siblings.length
+      ? { ...wrapper, ...Object.fromEntries(siblings) }
+      : wrapper,
+    wrapped: true,
+  };
+}
+export function openCodeServers(value: unknown) {
+  return openCodeServerLayout(value).servers;
 }
 function openCodeServerRecord(value: unknown) {
   const entry = object(value);
@@ -95,6 +107,13 @@ function validOpenCodeUrl(value: unknown) {
   const reference = /\{(?:env|file):[^{}\r\n]+\}/g;
   const tokens = value.match(reference);
   if (tokens?.length === 1 && tokens[0] === value) return true;
+  const leadingToken = tokens?.[0];
+  const suffix =
+    leadingToken && value.startsWith(leadingToken)
+      ? value.slice(leadingToken.length)
+      : '';
+  if (/^[a-z][a-z\d+.-]*:/i.test(suffix) && !/^https?:/i.test(suffix))
+    return false;
   const masked = value.replace(reference, (token: string, offset: number) => {
     if (offset !== 0) return '1';
     // A leading reference can supply the scheme or the whole base URL.

@@ -215,16 +215,17 @@ it.each([
     ),
   ).toEqual({ wrapped, timeout });
 });
-it('omits documented V2 timeout settings from extracted server records', () => {
-  const wrapped = { type: 'local', command: ['healthy.exe'] };
-  const timeout = { startup: 45000, catalog: 30000, execution: 600000 };
-  expect(
-    agentServers(
-      JSON.stringify({ mcp: { servers: { wrapped }, timeout } }),
-      'opencode',
-    ),
-  ).toEqual({ wrapped });
-});
+it.each(['wrapped', 'direct', 'empty'])(
+  'omits documented timeout settings from %s server maps',
+  (layout) => {
+    const healthy = { type: 'local', command: ['healthy.exe'] };
+    const timeout = { startup: 45000, catalog: 30000, execution: 600000 };
+    const servers = layout === 'empty' ? {} : { healthy };
+    const mcp =
+      layout === 'wrapped' ? { servers, timeout } : { ...servers, timeout };
+    expect(agentServers(JSON.stringify({ mcp }), 'opencode')).toEqual(servers);
+  },
+);
 it('extracts both direct and wrapped OpenCode siblings without shadowing duplicates', () => {
   const wrapped = { type: 'local', command: ['wrapped.exe'] };
   const direct = { type: 'remote', url: 'https://example.test/mcp' };

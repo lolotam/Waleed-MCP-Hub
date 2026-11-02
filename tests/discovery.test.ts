@@ -348,6 +348,22 @@ describe('read-only environment discovery', () => {
     });
   });
   it.each([
+    { mcp: { timeout: 5000 }, count: 0 },
+    { mcp: { timeout: { startup: 45000 } }, count: 0 },
+    {
+      mcp: {
+        timeout: { startup: 45000 },
+        other: { type: 'local', command: ['never-run'] },
+      },
+      count: 1,
+    },
+    {
+      mcp: {
+        timeout: 5000,
+        servers: { type: 'local', command: ['never-run'] },
+      },
+      count: 1,
+    },
     { mcp: { servers: { enabled: false } }, count: 1 },
     {
       mcp: {
@@ -460,6 +476,9 @@ describe('read-only environment discovery', () => {
     { broken: { type: 'remote', url: 'file:///private/file' } },
     { broken: { type: 'remote', url: 'javascript:{env:X}' } },
     { broken: { type: 'remote', url: 'file:///{file:./endpoint.txt}' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}file:///tmp' } },
+    { broken: { type: 'remote', url: '{env:PREFIX}javascript:alert(1)' } },
+    { timeout: { type: 'local', command: [] } },
     {
       servers: { good: { type: 'local', command: ['healthy.exe'] } },
       timeout: { type: 'local', command: [] },

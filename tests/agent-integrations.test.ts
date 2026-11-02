@@ -333,6 +333,11 @@ describe('comment-preserving managed agent entries', () => {
   it.each([
     { other: { type: 'local', command: ['other.exe'] } },
     { servers: { enabled: false } },
+    { timeout: 5000 },
+    {
+      timeout: { startup: 45000 },
+      servers: { type: 'local', command: ['other.exe'] },
+    },
   ])(
     'writes a direct OpenCode entry beside existing V1 servers (%j)',
     (existing) => {
