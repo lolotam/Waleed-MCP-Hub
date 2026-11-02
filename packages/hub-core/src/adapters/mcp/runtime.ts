@@ -38,10 +38,19 @@ export function isolatedNativeArguments(
 // Package approvals describe the package and its saved definition. The Node
 // runtime belongs to the installation executing it, so upgrades never require
 // an obsolete install folder. Ordinary native commands keep their executable.
-export function nativeExecutable(
+export async function nativeExecutable(
   connector: Extract<Connector, { executionMode: 'native' }>,
 ) {
-  return connector.package ? process.execPath : connector.executable;
+  if (!connector.package) return connector.executable;
+  const executable = process.execPath;
+  if (
+    !process.versions.node.startsWith('24.') ||
+    !/^[a-z]:[\\/]/i.test(executable) ||
+    win32.extname(executable).toLowerCase() !== '.exe'
+  )
+    throw new RuntimeFault('invalid_configuration');
+  await assertNoLinks(executable);
+  return executable;
 }
 
 export function createCapabilityRuntime(options: {
@@ -126,7 +135,7 @@ export function createCapabilityRuntime(options: {
             ),
           );
         if (connector.executionMode === 'native') {
-          const executable = nativeExecutable(connector);
+          const executable = await nativeExecutable(connector);
           if (
             !/^[a-z]:[\\/]/i.test(executable) ||
             win32.extname(executable).toLowerCase() !== '.exe'

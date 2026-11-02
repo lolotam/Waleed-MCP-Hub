@@ -2052,8 +2052,9 @@ export async function runAgentBridge(
           );
         }
       } else {
+        const executable = await nativeExecutable(connector);
         const runner = await createWindowsProcessRunner({
-          allowedExecutables: [nativeExecutable(connector)],
+          allowedExecutables: [executable],
           workingDirectory: directory,
           concurrency: 1,
           // A pooled peer keeps its process for the whole session.
@@ -2063,7 +2064,7 @@ export async function runAgentBridge(
         const transport = new ContainedStdioTransport(
           runner,
           {
-            executable: nativeExecutable(connector),
+            executable,
             arguments: isolatedNativeArguments(connector),
             environment: {
               ...connector.environmentLiterals,

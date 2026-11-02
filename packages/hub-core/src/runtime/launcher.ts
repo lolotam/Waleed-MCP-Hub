@@ -37,7 +37,7 @@ export async function runNativeLauncher(manifestUrl: URL, expectedHash: string) 
     // the target process is started.
     if (current.package) await verifyPackage(current, packagesRoot(dirname(manifest.registryPath)));
     if (Object.keys(current.secretBindings).length) lease = await createBindingResolver({ windows: await windowsSecretStore(join(dirname(manifest.registryPath), 'credentials'), true) }, async () => state)(current, stop.signal);
-    const executable = nativeExecutable(current);
+    const executable = await nativeExecutable(current);
     await assertNoLinks(executable);
     const runner = await createWindowsProcessRunner({ allowedExecutables: [executable], workingDirectory: dirname(path), concurrency: 1 });
     process.stdin.setEncoding('utf8'); let send: ((data: string) => void) | undefined;

@@ -1,4 +1,5 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,13 +32,14 @@ vi.mock(
   }),
 );
 
+let directory = '';
 function managed(): Extract<Connector, { executionMode: 'native' }> {
   return {
     ...syntheticConnector,
     executionMode: 'native',
     transport: 'stdio',
     // Issue #21: the old installation has already been removed.
-    executable: join(tmpdir(), randomUUID(), 'runtime', 'node.exe'),
+    executable: join(directory, 'removed-install', 'runtime', 'node.exe'),
     arguments: ['--no-global-search-paths', 'C:\\Packages\\server\\index.js'],
     package: {
       ecosystem: 'npm',
@@ -52,10 +54,14 @@ function managed(): Extract<Connector, { executionMode: 'native' }> {
     },
   };
 }
-beforeEach(() => {
+beforeEach(async () => {
+  directory = await mkdtemp(join(tmpdir(), 'wmh-managed-runtime-'));
   vi.clearAllMocks();
   ports.verify.mockResolvedValue(undefined);
   ports.runner.mockResolvedValue({});
+});
+afterEach(async () => {
+  await rm(directory, { recursive: true, force: true });
 });
 
 it.skipIf(process.platform !== 'win32')(
@@ -64,7 +70,7 @@ it.skipIf(process.platform !== 'win32')(
     const connector = managed();
     const saved = structuredClone(connector);
     const hash = definitionHash(connector);
-    await createCapabilityRuntime({ workingDirectory: tmpdir() }).discover(
+    await createCapabilityRuntime({ workingDirectory: directory }).discover(
       connector,
       AbortSignal.timeout(5000),
     );
@@ -83,15 +89,15 @@ it.skipIf(process.platform !== 'win32')(
 it('refuses a modified package before opening a process runner (#21)', async () => {
   ports.verify.mockRejectedValue(new Error('modified package'));
   await expect(
-    createCapabilityRuntime({ workingDirectory: tmpdir() }).discover(
+    createCapabilityRuntime({ workingDirectory: directory }).discover(
       managed(),
       AbortSignal.timeout(5000),
     ),
   ).rejects.toThrow('modified package');
   expect(ports.runner).not.toHaveBeenCalled();
 });
-it('preserves arbitrary native executables instead of substituting Node', () => {
+it('preserves arbitrary native executables instead of substituting Node', async () => {
   const connector = managed();
   delete connector.package;
-  expect(nativeExecutable(connector)).toBe(connector.executable);
+  await expect(nativeExecutable(connector)).resolves.toBe(connector.executable);
 });
