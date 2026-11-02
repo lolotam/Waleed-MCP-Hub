@@ -20,18 +20,6 @@ const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
     if (direct && wrapped) throw conflict();
     if (direct) return ['mcp', managedName];
     if (wrapped) return ['mcp', 'servers', managedName];
-    const nested = object(mcp.servers);
-    // Read-only import can salvage siblings; new writes require an unambiguous layout.
-    if (
-      nested &&
-      ['type', 'command', 'url', 'enabled', 'disabled'].some(
-        (key) =>
-          Object.hasOwn(nested, key) &&
-          !validOpenCodeEntry(object(nested[key]) ?? {}),
-      ) &&
-      !validOpenCodeEntry(nested)
-    )
-      throw conflict();
     if (openCodeServerLayout(mcp).wrapped)
       return ['mcp', 'servers', managedName];
   }
@@ -51,6 +39,20 @@ const conflict = () =>
     'conflict',
     'Agent configuration is invalid, ambiguous or contains a conflicting managed entry.',
   );
+function assertOpenCodeWriteLayout(root: Record<string, unknown>) {
+  const nested = object(object(root.mcp)?.servers);
+  // Read-only import can salvage siblings; new writes require an unambiguous layout.
+  if (
+    nested &&
+    ['type', 'command', 'url', 'enabled', 'disabled'].some(
+      (key) =>
+        Object.hasOwn(nested, key) &&
+        !validOpenCodeEntry(object(nested[key]) ?? {}),
+    ) &&
+    !validOpenCodeEntry(nested)
+  )
+    throw conflict();
+}
 function document(text: string, format: AgentFormat) {
   const source = text.replace(/^\uFEFF/, '');
   if (format !== 'codex') {
@@ -156,6 +158,8 @@ export function editAgentDocument(
     throw conflict();
   const raw = text ?? (format === 'codex' ? '' : '{}\n');
   const root = document(raw, format);
+  if (format === 'opencode' && current === undefined && entry !== undefined)
+    assertOpenCodeWriteLayout(root);
   const path = pathFor(format, root);
   let result: string;
   if (format === 'codex') {

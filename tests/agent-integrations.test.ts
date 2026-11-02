@@ -465,6 +465,7 @@ describe('comment-preserving managed agent entries', () => {
         hashData(entry),
       );
       expect(removed).toContain('// keep malformed sibling');
+      expect(managedEntry(removed, 'opencode')).toBeUndefined();
       expect(
         JSON.parse(removed.replace('// keep malformed sibling\n', '')),
       ).toEqual({
@@ -499,6 +500,7 @@ describe('comment-preserving managed agent entries', () => {
         confirmConfigurationChange: true,
       });
       expect(disconnected.changed).toBe(true);
+      expect(disconnected.agent.status).toBe('not_integrated');
       expect(JSON.parse(contents.get(path)!)).toEqual({
         mcp: { servers: { healthy, command: null } },
       });
@@ -507,6 +509,17 @@ describe('comment-preserving managed agent entries', () => {
           (record) => record.agentId === 'opencode',
         ),
       ).toBeUndefined();
+      const after = (await hub.integrations.scan()).agents.find(
+        (agent) => agent.agentId === 'opencode',
+      )!;
+      expect(after.status).toBe('not_integrated');
+      await expect(
+        hub.integrations.integrate('opencode', {
+          expectedRevision: 2,
+          fingerprint: after.fingerprint,
+          confirmConfigurationChange: true,
+        }),
+      ).rejects.toMatchObject({ code: 'conflict' });
     } finally {
       await hub.close();
     }

@@ -445,6 +445,8 @@ describe('read-only environment discovery', () => {
     '{env:SCHEME}://example.test/mcp',
     '{env:SCHEME}example.test:8443/mcp',
     '{env:SCHEME}example.test:{env:PORT}/mcp',
+    '{env:SCHEME}://intranet:8443/mcp',
+    'https://{env:HOST}:{env:PORT}/mcp',
     '{env:SCHEME}localhost:8443/mcp',
     '{env:SCHEME}127.0.0.1:8443/mcp',
     '{env:SCHEME}[::1]:8443/mcp',
