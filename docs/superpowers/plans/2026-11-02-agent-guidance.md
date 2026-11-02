@@ -102,12 +102,10 @@ export const bridgeNotices: {
   readonly connectorUnavailable: 'The connector is unavailable, changed, disabled, or requires authentication. Inspect the hub and refresh tools.';
 };
 export type BridgeNotice = (typeof bridgeNotices)[keyof typeof bridgeNotices];
-export type ToolSeparator = '__' | '_';
-export const guideUri = 'hub://guide';
-export const guidePrompt = 'hub-guide';
-export function shortInstructions(separator: ToolSeparator): string;
-export function fullGuide(separator: ToolSeparator): string;
-export function registerGuide(server: Server, separator: ToolSeparator): void;
+export function shortInstructions(separator: '__' | '_'): string;
+export function registerGuide(server: Server, separator: '__' | '_'): void;
+// Module-private: ToolSeparator, guideUri ('hub://guide'),
+// guideName ('hub-guide'), fullGuide(separator).
 ```
 
 Two different unions, kept apart on purpose:
