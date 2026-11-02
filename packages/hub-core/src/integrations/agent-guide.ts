@@ -67,11 +67,12 @@ const guidance: Record<RefusalCode | keyof typeof bridgeNotices, Entry> = {
       'Say the connector or the hub configuration changed before the call ran.',
   },
   registryUnavailable: {
-    meaning: 'The hub cannot read its managed registry.',
+    meaning:
+      'The hub cannot read its managed registry right now. A hub save in progress causes this briefly.',
     action:
-      'Stop using hub tools. Never edit hub files, safety.json, locks or backups.',
+      'Wait a few seconds and retry once. If it repeats, stop using hub tools. Never edit hub files, safety.json, locks or backups.',
     tellUser:
-      'Ask the user to open Waleed MCP Hub and check its recovery status.',
+      'If it repeats, ask the user to open Waleed MCP Hub and check its recovery status.',
   },
   refreshTools: {
     meaning:

@@ -1,6 +1,6 @@
 # Agent guidance from the bridge: implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical record.** This plan was executed on 2026-11-02 and is kept as written. It is not a set of instructions. Review changes after execution added a fourth notice (`concurrencyLimit`) and a seventh test. The spec (`docs/superpowers/specs/2026-11-02-agent-guidance-design.md`), D027 in `docs/DECISIONS.md` and `agent-guide.ts` describe the shipped behaviour.
 
 **Goal:** Every agent that connects to `waleed-mcp-hub` receives static guidance through three channels: MCP `instructions`, a `hub://guide` resource and a `hub-guide` prompt. The bridge also reports its real version.
 
