@@ -267,6 +267,32 @@ it('visits first the connectors the catalog lacks, so a slow startup cannot star
   expect(open.connects.indexOf('connector-0')).toBe(2);
 });
 
+// Issue #13: a first batch that already reached 256 tools ended the discovery,
+// and the connectors after it were neither listed nor marked for a retry.
+it('visits every connector even after an earlier one filled the tool cap', async () => {
+  const state = profileState([
+    'native',
+    'native',
+    'native',
+    'native',
+    'native',
+  ]);
+  open = await createHarness({
+    state,
+    listing: (id) =>
+      id === 'connector-0'
+        ? Array.from({ length: 256 }, (_, index) => tool(`full${index}`))
+        : [tool('read')],
+  });
+
+  await names(open.agent);
+  // The cap still holds in registry order; the late connector is reached and
+  // stored, with no tools left in the budget.
+  await expect.poll(() => open!.stored.catalog?.has('connector-4')).toBe(true);
+  expect(open.connects).toContain('connector-4');
+  expect(open.stored.catalog?.get('connector-4')?.tools).toEqual([]);
+});
+
 it('shares the tool cap in registry order, whatever order the connectors were visited in', async () => {
   const state = profileState(['native', 'native']);
   const many = (prefix: string) =>
