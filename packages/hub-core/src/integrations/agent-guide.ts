@@ -23,9 +23,10 @@ export const bridgeNotices = {
     'The connector is unavailable, changed, disabled, or requires authentication. Inspect the hub and refresh tools.',
 } as const;
 export type BridgeNotice = (typeof bridgeNotices)[keyof typeof bridgeNotices];
-export type ToolSeparator = '__' | '_';
-export const guideUri = 'hub://guide';
-export const guidePrompt = 'hub-guide';
+type ToolSeparator = '__' | '_';
+const guideUri = 'hub://guide';
+// The resource and the prompt carry the same guide under the same name.
+const guideName = 'hub-guide';
 
 interface Entry {
   meaning: string;
@@ -95,11 +96,11 @@ export function shortInstructions(separator: ToolSeparator) {
     `- The tool list can change. After "${bridgeNotices.refreshTools}", list the tools again before you retry.`,
     '- "Hub permission request" asks the user to approve one exact call. After tool_approval_denied or tool_blocked, do not retry the call or rephrase it to get around the decision. Tell the user.',
     '- Errors are fixed codes. Never edit hub files, safety.json, locks or agent configs to clear one.',
-    `- Read the ${guideUri} resource (or the ${guidePrompt} prompt) for what each code means and what to tell the user.`,
+    `- Read the ${guideUri} resource (or the ${guideName} prompt) for what each code means and what to tell the user.`,
   ].join('\n');
 }
 
-export function fullGuide(separator: ToolSeparator) {
+function fullGuide(separator: ToolSeparator) {
   const entries = (Object.keys(guidance) as Array<keyof typeof guidance>).map(
     (key) =>
       `### ${shown(key)}\n\n- Meaning: ${guidance[key].meaning}\n- What to do: ${guidance[key].action}\n- Tell the user: ${guidance[key].tellUser}`,
@@ -123,7 +124,7 @@ export function registerGuide(server: Server, separator: ToolSeparator) {
     resources: [
       {
         uri: guideUri,
-        name: guidePrompt,
+        name: guideName,
         title: 'Waleed MCP Hub agent guide',
         mimeType: 'text/markdown',
       },
@@ -139,14 +140,14 @@ export function registerGuide(server: Server, separator: ToolSeparator) {
   server.setRequestHandler(ListPromptsRequestSchema, () => ({
     prompts: [
       {
-        name: guidePrompt,
+        name: guideName,
         description:
           'How to use Waleed MCP Hub tools, approval prompts and errors.',
       },
     ],
   }));
   server.setRequestHandler(GetPromptRequestSchema, (request) => {
-    if (request.params.name !== guidePrompt)
+    if (request.params.name !== guideName)
       throw new McpError(ErrorCode.InvalidParams, 'Unknown hub prompt.');
     return {
       messages: [{ role: 'user', content: { type: 'text', text: guide } }],
