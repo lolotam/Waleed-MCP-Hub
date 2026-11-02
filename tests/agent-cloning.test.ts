@@ -153,6 +153,46 @@ it.each(['enabled', 'disabled', 'type'])(
     ).toEqual(servers);
   },
 );
+it.each([
+  {
+    type: 'local',
+    command: null,
+    good: { type: 'remote', url: 'https://example.test/mcp' },
+  },
+  {
+    type: 'local',
+    command: { type: 'remote', url: 'https://example.test/mcp' },
+  },
+  { type: 'remote', url: { type: 'local', command: ['healthy.exe'] } },
+  {
+    type: 'remote',
+    url: null,
+    good: { type: 'local', command: ['healthy.exe'] },
+  },
+])(
+  'retains wrapped siblings when reserved fields do not form a valid server (%j)',
+  (servers) => {
+    expect(
+      agentServers(JSON.stringify({ mcp: { servers } }), 'opencode'),
+    ).toEqual(servers);
+  },
+);
+it.each(['__proto__', 'constructor', 'prototype'])(
+  'keeps a mixed OpenCode server named %s as an own data property',
+  (name) => {
+    const wrapped = { type: 'local', command: ['wrapped.exe'] };
+    const direct = { type: 'remote', url: 'https://example.test/mcp' };
+    const mcp = Object.fromEntries([
+      ['servers', { wrapped }],
+      [name, direct],
+    ]);
+    const extracted = agentServers(JSON.stringify({ mcp }), 'opencode');
+    expect(Object.hasOwn(extracted, name)).toBe(true);
+    expect(extracted[name]).toEqual(direct);
+    expect(Object.getPrototypeOf(extracted)).toBe(Object.prototype);
+    expect(extracted.wrapped).toEqual(wrapped);
+  },
+);
 it('extracts both direct and wrapped OpenCode siblings without shadowing duplicates', () => {
   const wrapped = { type: 'local', command: ['wrapped.exe'] };
   const direct = { type: 'remote', url: 'https://example.test/mcp' };
@@ -167,7 +207,13 @@ it('extracts both direct and wrapped OpenCode siblings without shadowing duplica
       JSON.stringify({ mcp: { servers: { direct }, direct } }),
       'opencode',
     ),
-  ).toThrow();
+  ).toThrow(HubError);
+  expect(() =>
+    agentServers(
+      JSON.stringify({ mcp: { servers: { direct }, direct } }),
+      'opencode',
+    ),
+  ).toThrowError(expect.objectContaining({ code: 'conflict' }));
 });
 it('groups sanitized candidates by agent, omits the Hub and copies only selected entries with exact protected credentials', async () => {
   const f = fixture(),

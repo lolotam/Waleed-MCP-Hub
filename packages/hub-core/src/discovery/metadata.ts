@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { win32 } from 'node:path';
-import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
+import { parseTree, getNodeValue, type ParseError } from 'jsonc-parser';
 import { parse as parseToml } from 'smol-toml';
 import type {
   AdoptionCandidate,
@@ -8,6 +8,7 @@ import type {
   DiscoverySnapshot,
 } from '@waleed/contracts';
 import type { ReadResult } from './ports.js';
+import { HubError } from '../errors.js';
 
 export function object(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -35,22 +36,15 @@ export function openCodeServers(value: unknown) {
       name !== 'servers' && (name !== 'timeout' || openCodeServerRecord(entry)),
   );
   if (!siblings.length) return nested;
-  const combined = { ...nested };
-  for (const [name, entry] of siblings) {
-    if (Object.hasOwn(combined, name))
-      throw new Error('Conflicting OpenCode server maps.');
-    combined[name] = entry;
+  for (const [name] of siblings) {
+    if (Object.hasOwn(nested, name))
+      throw new HubError('conflict', 'Conflicting OpenCode server maps.');
   }
-  return combined;
+  return { ...nested, ...Object.fromEntries(siblings) };
 }
 function openCodeServerRecord(value: unknown) {
   const entry = object(value);
-  return Boolean(
-    entry &&
-    ((entry.type === 'local' && Object.hasOwn(entry, 'command')) ||
-      (entry.type === 'remote' && Object.hasOwn(entry, 'url')) ||
-      (Object.keys(entry).length === 1 && typeof entry.enabled === 'boolean')),
-  );
+  return entry !== null && validOpenCodeEntry(entry);
 }
 function validOpenCodeEntry(entry: Record<string, unknown>) {
   if (Object.keys(entry).length === 1 && typeof entry.enabled === 'boolean')
@@ -83,11 +77,14 @@ export function parseDocument(
   else if (format === 'json') value = JSON.parse(text);
   else {
     const errors: ParseError[] = [];
-    value = parseJsonc(text, errors, {
+    const tree = parseTree(text, errors, {
       allowTrailingComma: true,
       disallowComments: false,
     });
-    if (errors.length) throw new Error('Invalid JSONC.');
+    if (errors.length || !tree) throw new Error('Invalid JSONC.');
+    // AST materialization uses null-prototype objects, preserving literal
+    // property names such as __proto__ without invoking inherited setters.
+    value = getNodeValue(tree);
   }
   const result = object(value);
   if (!result) throw new Error('Expected an object.');
