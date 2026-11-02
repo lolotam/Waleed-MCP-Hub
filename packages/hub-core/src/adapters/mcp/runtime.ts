@@ -35,6 +35,15 @@ export function isolatedNativeArguments(
     ? [...connector.arguments, '--isolated']
     : [...connector.arguments];
 }
+// Package approvals describe the package and its saved definition. The Node
+// runtime belongs to the installation executing it, so upgrades never require
+// an obsolete install folder. Ordinary native commands keep their executable.
+export function nativeExecutable(
+  connector: Extract<Connector, { executionMode: 'native' }>,
+) {
+  return connector.package ? process.execPath : connector.executable;
+}
+
 export function createCapabilityRuntime(options: {
   workingDirectory: string;
   docker?: DockerCommand;
@@ -117,14 +126,15 @@ export function createCapabilityRuntime(options: {
             ),
           );
         if (connector.executionMode === 'native') {
+          const executable = nativeExecutable(connector);
           if (
-            !/^[a-z]:[\\/]/i.test(connector.executable) ||
-            win32.extname(connector.executable).toLowerCase() !== '.exe'
+            !/^[a-z]:[\\/]/i.test(executable) ||
+            win32.extname(executable).toLowerCase() !== '.exe'
           )
             throw new RuntimeFault('adapter_pending');
-          await assertNoLinks(connector.executable);
+          await assertNoLinks(executable);
           const runner = await createWindowsProcessRunner({
-            allowedExecutables: [connector.executable],
+            allowedExecutables: [executable],
             workingDirectory: options.workingDirectory,
             concurrency: 1,
           });
@@ -133,7 +143,7 @@ export function createCapabilityRuntime(options: {
               new ContainedStdioTransport(
                 runner,
                 {
-                  executable: connector.executable,
+                  executable,
                   arguments: isolatedNativeArguments(connector),
                   environment: {
                     ...(connector.environmentLiterals ?? {}),
