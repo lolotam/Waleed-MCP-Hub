@@ -153,6 +153,22 @@ it.each(['enabled', 'disabled', 'type'])(
     ).toEqual(servers);
   },
 );
+it('extracts both direct and wrapped OpenCode siblings without shadowing duplicates', () => {
+  const wrapped = { type: 'local', command: ['wrapped.exe'] };
+  const direct = { type: 'remote', url: 'https://example.test/mcp' };
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { wrapped }, direct } }),
+      'opencode',
+    ),
+  ).toEqual({ wrapped, direct });
+  expect(() =>
+    agentServers(
+      JSON.stringify({ mcp: { servers: { direct }, direct } }),
+      'opencode',
+    ),
+  ).toThrow();
+});
 it('groups sanitized candidates by agent, omits the Hub and copies only selected entries with exact protected credentials', async () => {
   const f = fixture(),
     before = new Map(f.files);

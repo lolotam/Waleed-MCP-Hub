@@ -3,18 +3,23 @@ import {
   parseDocument,
   object,
   openCodeServers,
-  managedName,
 } from '../discovery/metadata.js';
 import { hashData } from '../runtime/registry.js';
 import { HubError } from '../errors.js';
 
-export { managedName };
+export const managedName = 'waleed-mcp-hub';
 export type AgentFormat =
   'opencode' | 'codex' | 'mcpServers' | 'vscode' | 'kilo';
 const pathFor = (format: AgentFormat, root: Record<string, unknown>) => {
   const mcp = object(root.mcp);
-  if (format === 'opencode' && mcp && openCodeServers(mcp) !== mcp)
-    return ['mcp', 'servers', managedName];
+  if (format === 'opencode' && mcp) {
+    const direct = Object.hasOwn(mcp, managedName);
+    const wrapped = Object.hasOwn(object(mcp.servers) ?? {}, managedName);
+    if (direct && wrapped) throw conflict();
+    if (direct) return ['mcp', managedName];
+    if (wrapped || openCodeServers(mcp) !== mcp)
+      return ['mcp', 'servers', managedName];
+  }
   return [
     format === 'codex'
       ? 'mcp_servers'
@@ -61,13 +66,6 @@ export function managedEntry(
   if (text === null) return undefined;
   const root = document(text.replace(/^\uFEFF/, ''), format);
   const path = pathFor(format, root);
-  const mcp = object(root.mcp);
-  if (
-    path.length === 3 &&
-    mcp?.[managedName] !== undefined &&
-    object(mcp.servers)?.[managedName] !== undefined
-  )
-    throw conflict();
   let value: unknown = root;
   for (const key of path) {
     if (!object(value)) throw conflict();
@@ -133,6 +131,7 @@ export function editAgentDocument(
   expectedEntryHash?: string,
 ) {
   const current = managedEntry(text, format);
+  // An existing owned entry stays in its own location; foreign entries are not adopted.
   if (
     current !== undefined &&
     (!expectedEntryHash || hashData(current) !== expectedEntryHash)
@@ -141,16 +140,6 @@ export function editAgentDocument(
   const raw = text ?? (format === 'codex' ? '' : '{}\n');
   const root = document(raw, format);
   const path = pathFor(format, root);
-  const legacy =
-    format === 'opencode' && path.length === 3
-      ? object(root.mcp)?.[managedName]
-      : undefined;
-  // Moving an old owned entry is an edit, not adoption of a foreign entry.
-  if (
-    legacy !== undefined &&
-    (!expectedEntryHash || hashData(legacy) !== expectedEntryHash)
-  )
-    throw conflict();
   let result: string;
   if (format === 'codex') {
     const start = raw.indexOf(begin),
@@ -182,13 +171,9 @@ export function editAgentDocument(
         ].join(eol);
     }
   } else {
-    const editable =
-      legacy === undefined
-        ? raw
-        : applyEdits(raw, modify(raw, ['mcp', managedName], undefined, {}));
     result = applyEdits(
-      editable,
-      modify(editable, path, entry, {
+      raw,
+      modify(raw, path, entry, {
         formattingOptions: {
           insertSpaces: true,
           tabSize: 2,
@@ -210,9 +195,6 @@ export function editAgentDocument(
   // Verify semantics outside the owned entry instead of trusting an edit library.
   const without = (value: string) => {
     const doc = document(value.replace(/^\uFEFF/, ''), format);
-    const path = pathFor(format, doc);
-    if (format === 'opencode' && path.length === 3)
-      delete object(doc.mcp)![managedName];
     let parent = doc;
     for (const key of path.slice(0, -1)) {
       const next = object(parent[key]);

@@ -499,9 +499,11 @@ Follow-up (PR #20): the workstation observation above proves the direct V1-forma
 configuration worked; it does not establish that native V2 wrappers are unsupported
 by every OpenCode 2.2.5 configuration. The official V2 migration guide explicitly
 supports both V1 and native V2 formats. Discovery and import now share their map
-classifier. Managed edits preserve an existing wrapper; new/direct configurations
-keep the V1 path. A legacy mixed file can move the direct hub entry into its wrapper
-only when its saved ownership hash matches, and duplicate hub entries are refused.
+classifier, combining direct and wrapped siblings without shadowing duplicates.
+Managed edits preserve the location of any existing hub entry; new/direct configurations
+keep the V1 path, and a new entry in an existing wrapper uses the wrapped path.
+Mixed files are not migrated implicitly. Duplicate hub entries are refused in every
+layout; updates and disconnects require the saved ownership hash.
 The CLI layout probes did not load either disposable profile, so they are
 inconclusive; the one-time live client trial remains pending and is not replaced
 by parser or writer tests. Source: https://opencode.ai/v2/docs/migrate-v1/ .

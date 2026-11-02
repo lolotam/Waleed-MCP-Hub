@@ -9,8 +9,6 @@ import type {
 } from '@waleed/contracts';
 import type { ReadResult } from './ports.js';
 
-export const managedName = 'waleed-mcp-hub';
-
 export function object(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     return null;
@@ -31,20 +29,28 @@ export const strings = (value: unknown): string[] | null =>
 export function openCodeServers(value: unknown) {
   const mcp = object(value);
   const nested = object(mcp?.servers);
-  const direct =
-    nested &&
-    ((nested.type === 'local' && Object.hasOwn(nested, 'command')) ||
-      (nested.type === 'remote' && Object.hasOwn(nested, 'url')) ||
-      (Object.keys(nested).length === 1 &&
-        typeof nested.enabled === 'boolean'));
-  return mcp &&
-    nested &&
-    Object.keys(mcp).every((key) =>
-      ['servers', 'timeout', managedName].includes(key),
-    ) &&
-    !direct
-    ? nested
-    : mcp;
+  if (!mcp || !nested || openCodeServerRecord(nested)) return mcp;
+  const siblings = Object.entries(mcp).filter(
+    ([name, entry]) =>
+      name !== 'servers' && (name !== 'timeout' || openCodeServerRecord(entry)),
+  );
+  if (!siblings.length) return nested;
+  const combined = { ...nested };
+  for (const [name, entry] of siblings) {
+    if (Object.hasOwn(combined, name))
+      throw new Error('Conflicting OpenCode server maps.');
+    combined[name] = entry;
+  }
+  return combined;
+}
+function openCodeServerRecord(value: unknown) {
+  const entry = object(value);
+  return Boolean(
+    entry &&
+    ((entry.type === 'local' && Object.hasOwn(entry, 'command')) ||
+      (entry.type === 'remote' && Object.hasOwn(entry, 'url')) ||
+      (Object.keys(entry).length === 1 && typeof entry.enabled === 'boolean')),
+  );
 }
 function validOpenCodeEntry(entry: Record<string, unknown>) {
   if (Object.keys(entry).length === 1 && typeof entry.enabled === 'boolean')

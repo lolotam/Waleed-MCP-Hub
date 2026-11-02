@@ -351,6 +351,13 @@ describe('read-only environment discovery', () => {
     { mcp: { servers: { enabled: false } }, count: 1 },
     {
       mcp: {
+        servers: { wrapped: { type: 'local', command: ['never-run'] } },
+        direct: { type: 'remote', url: 'https://example.test/mcp' },
+      },
+      count: 2,
+    },
+    {
+      mcp: {
         servers: { enabled: false },
         sibling: { type: 'remote', url: 'https://example.test/mcp' },
       },
@@ -366,7 +373,7 @@ describe('read-only environment discovery', () => {
       count: 2,
     },
   ])(
-    'reads enabled-only overrides and wrapped OpenCode servers (%j)',
+    'reads enabled-only, wrapped and mixed OpenCode servers (%j)',
     ({ mcp, count }) => {
       const file = inspectAgentFile(
         'C:\\Synthetic\\opencode.json',
