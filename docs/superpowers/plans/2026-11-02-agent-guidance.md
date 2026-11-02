@@ -32,11 +32,11 @@
 
 The spec says the bridge reads `version` from the root `package.json`, resolved from the bridge module's location, and it asked the plan to verify that path in the built layout. The check fails:
 
-| Layout                                | Bridge module                                                   | Root `package.json` from the module |
-| ------------------------------------- | --------------------------------------------------------------- | ----------------------------------- |
-| Source                                | `packages/hub-core/src/integrations/bridge.ts`                  | 4 levels up                         |
-| Build                                 | `packages/hub-core/dist/integrations/bridge.js`                 | 4 levels up                         |
-| Portable folder (`package-desktop.mjs`) | `node_modules/@waleed/hub-core/dist/integrations/bridge.js`   | 5 levels up                         |
+| Layout                                  | Bridge module                                               | Root `package.json` from the module |
+| --------------------------------------- | ----------------------------------------------------------- | ----------------------------------- |
+| Source                                  | `packages/hub-core/src/integrations/bridge.ts`              | 4 levels up                         |
+| Build                                   | `packages/hub-core/dist/integrations/bridge.js`             | 4 levels up                         |
+| Portable folder (`package-desktop.mjs`) | `node_modules/@waleed/hub-core/dist/integrations/bridge.js` | 5 levels up                         |
 
 No single relative path works in all three. The package's own manifest, `new URL('../../package.json', import.meta.url)`, is the same distance in every layout:
 
@@ -47,15 +47,15 @@ The fix is to read that manifest and make the release job stamp it (Task 2). Tas
 
 ## File map
 
-| File                                                  | Change     | Responsibility                                                                      |
-| ----------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------- |
-| `packages/hub-core/src/integrations/agent-guide.ts`   | create     | Agent-visible values, guidance table, short instructions, full guide, guide handlers |
-| `packages/hub-core/src/integrations/bridge.ts`        | modify     | Use the notices, narrow refusals, version, `Server` options, register guide          |
-| `.github/workflows/release.yml`                       | modify     | Stamp the version into `packages/hub-core/package.json` and its lock entry           |
-| `scripts/package-desktop.mjs`                         | modify     | Refuse to package when the hub-core version differs from the release version        |
-| `tests/agent-guide.test.ts`                           | create     | Delivery, separator, injection and version tests through a real MCP client          |
-| `docs/superpowers/specs/2026-11-02-agent-guidance-design.md` | modify | Version-path correction and test 5 wording                                       |
-| `docs/DECISIONS.md`                                   | modify     | D027: agent guidance from the bridge, and the 9-CLI trial (results pending)         |
+| File                                                         | Change | Responsibility                                                                       |
+| ------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------ |
+| `packages/hub-core/src/integrations/agent-guide.ts`          | create | Agent-visible values, guidance table, short instructions, full guide, guide handlers |
+| `packages/hub-core/src/integrations/bridge.ts`               | modify | Use the notices, narrow refusals, version, `Server` options, register guide          |
+| `.github/workflows/release.yml`                              | modify | Stamp the version into `packages/hub-core/package.json` and its lock entry           |
+| `scripts/package-desktop.mjs`                                | modify | Refuse to package when the hub-core version differs from the release version         |
+| `tests/agent-guide.test.ts`                                  | create | Delivery, separator, injection and version tests through a real MCP client           |
+| `docs/superpowers/specs/2026-11-02-agent-guidance-design.md` | modify | Version-path correction and test 5 wording                                           |
+| `docs/DECISIONS.md`                                          | modify | D027: agent guidance from the bridge, and the 9-CLI trial (results pending)          |
 
 ---
 
@@ -299,7 +299,9 @@ This task has no runtime test. Its test is `npm run typecheck`: `guidance` is a 
          super(code);
        }
      }
-     const policyRefusal = (code: RefusalCode | BridgeNotice): CallToolResult => ({
+     const policyRefusal = (
+       code: RefusalCode | BridgeNotice,
+     ): CallToolResult => ({
        isError: true,
        content: [{ type: 'text', text: code }],
      });
@@ -365,9 +367,9 @@ This task has no runtime test. Its test is `npm run typecheck`: `guidance` is a 
 
   const manifestVersion = (path: string) =>
     (
-      JSON.parse(
-        readFileSync(new URL(path, import.meta.url), 'utf8'),
-      ) as { version: string }
+      JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')) as {
+        version: string;
+      }
     ).version;
 
   const open: Array<() => Promise<void>> = [];
@@ -464,7 +466,7 @@ This task has no runtime test. Its test is `npm run typecheck`: `guidance` is a 
   In `.github/workflows/release.yml`, step "Set the artifact version", replace the `node --input-type=module -e "..."` line with:
 
   ```yaml
-            node --input-type=module -e "import fs from 'node:fs'; const version=process.env.RELEASE_VERSION; if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Invalid version'); for(const file of ['package.json','package-lock.json','packages/hub-core/package.json']){const data=JSON.parse(fs.readFileSync(file,'utf8'));data.version=version;for(const key of ['','packages/hub-core'])if(data.packages?.[key])data.packages[key].version=version;fs.writeFileSync(file,JSON.stringify(data,null,2));}"
+  node --input-type=module -e "import fs from 'node:fs'; const version=process.env.RELEASE_VERSION; if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Invalid version'); for(const file of ['package.json','package-lock.json','packages/hub-core/package.json']){const data=JSON.parse(fs.readFileSync(file,'utf8'));data.version=version;for(const key of ['','packages/hub-core'])if(data.packages?.[key])data.packages[key].version=version;fs.writeFileSync(file,JSON.stringify(data,null,2));}"
   ```
 
   This keeps the existing shape and adds two things: the hub-core manifest in the file list, and its lockfile entry.
@@ -527,11 +529,9 @@ This task has no runtime test. Its test is `npm run typecheck`: `guidance` is a 
   it.each(['__', '_'] as const)(
     'tells the agent the tool names it will see with the %s separator',
     async (separator) => {
-      const instructions = (await connectAgent(
-        profileState([]),
-        [],
-        separator,
-      )).getInstructions();
+      const instructions = (
+        await connectAgent(profileState([]), [], separator)
+      ).getInstructions();
       expect(instructions).toContain(`<connector>${separator}<tool>`);
       expect(instructions!.length).toBeLessThanOrEqual(1200);
     },
@@ -540,7 +540,10 @@ This task has no runtime test. Its test is `npm run typecheck`: `guidance` is a 
   it('serves one guide naming every agent-visible value as a resource and a prompt', async () => {
     const agent = await connectAgent(profileState([]));
     expect((await agent.listResources()).resources).toEqual([
-      expect.objectContaining({ uri: 'hub://guide', mimeType: 'text/markdown' }),
+      expect.objectContaining({
+        uri: 'hub://guide',
+        mimeType: 'text/markdown',
+      }),
     ]);
     const [resource] = (await agent.readResource({ uri: 'hub://guide' }))
       .contents;

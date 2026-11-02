@@ -52,15 +52,15 @@ The approved part 1 named "12 fault reasons". That was wrong: those are internal
 
 **`bridge.ts`.**
 
-- `new Server({ name: 'waleed-mcp-hub', version: hubVersion }, { capabilities: { tools: { listChanged: true }, resources: {}, prompts: {} }, instructions: shortInstructions(toolSeparator) })`.
+- `new Server({ name: 'waleed-mcp-hub', version: hubVersion() }, { capabilities: { tools: { listChanged: true }, resources: {}, prompts: {} }, instructions: shortInstructions(toolSeparator) })`.
 - `resources/list` returns one resource, `hub://guide` (`text/markdown`), and `resources/read` returns `fullGuide(toolSeparator)`.
 - `prompts/list` returns one prompt, `hub-guide`, and `prompts/get` returns the same text. This serves clients that support prompts but not resources.
 - Any other resource URI or prompt name gets a standard MCP error.
 
 **`hubVersion`.**
 
-- The bridge reads `version` from the root `package.json`, as `apps/server/src/main.ts` already does for the update checker. The release workflow writes the release version into that file.
-- The path is resolved from the bridge module's own location. The plan's first step verifies it in the built layout as well as in the source layout.
+- The bridge reads `version` from `@waleed/hub-core`'s own `package.json`, `new URL('../../package.json', import.meta.url)`. That manifest is two levels above the bridge module in the source tree, the build and the portable folder; the root manifest is not (4 levels up in the repo, 5 in the portable folder).
+- The release job stamps the version into the root manifest, the lockfile, and `packages/hub-core/package.json`. `package-desktop.mjs` refuses to package when the hub-core version differs from the root version.
 - If the file cannot be read, the bridge fails to start. It does not fall back to a made-up version.
 
 ### The short instructions (draft)
@@ -94,7 +94,7 @@ All tests drive the real bridge through the MCP SDK client, as the existing brid
 4. **Injection test.**
    - Register a connector whose name and description carry an instruction-like string, and whose tool also has an instruction-like name and description.
    - Neither `instructions`, `hub://guide` nor `hub-guide` contains any of these strings.
-5. **Version.** `serverInfo.version` equals the root `package.json` version, not `0.1.0`.
+5. **Version.** `serverInfo.version` equals the hub-core manifest version, and the hub-core version equals the root version. Both are `0.1.0` on every committed revision; the release job bumps them in its own checkout.
 
 SA-15 decides where they run:
 
