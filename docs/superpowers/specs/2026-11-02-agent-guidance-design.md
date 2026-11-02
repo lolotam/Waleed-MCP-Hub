@@ -24,15 +24,15 @@ General agent behaviour rules (language, storage, review habits) are out of scop
 
 The bridge (`packages/hub-core/src/integrations/bridge.ts`) never forwards a `RuntimeFault` reason to an agent. A tool call fails with one of these fixed values:
 
-| Value returned to the agent | Kind         | When                                                                                                                                          |
-| --------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool_blocked`              | refusal code | The tool's policy is `block`.                                                                                                                 |
-| `tool_approval_required`    | refusal code | The policy is `ask`, and one of these holds: the client cannot show a form, the arguments are over 16 KiB, or the prompt failed or timed out. |
-| `tool_approval_denied`      | refusal code | The user declined or dismissed the approval prompt.                                                                                           |
-| `tool_approval_stale`       | refusal code | The connector or its policy changed between approval and the call.                                                                            |
-| `registryUnavailableText`   | notice text  | The managed registry cannot be read.                                                                                                          |
-| `refreshToolsText`          | notice text  | The tool name is unknown or its definition changed.                                                                                           |
-| `connectorUnavailableText`  | notice text  | The connector is unavailable, changed, disabled, or needs authentication.                                                                     |
+| Value returned to the agent | Kind         | When                                                                                                                                                                                                   |
+| --------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tool_blocked`              | refusal code | The tool's policy is `block`.                                                                                                                                                                          |
+| `tool_approval_required`    | refusal code | The policy is `ask`, and one of these holds: the client cannot show a form, the arguments are over 16 KiB, the prompt failed or timed out, or the policy changed to `ask` while the call was starting. |
+| `tool_approval_denied`      | refusal code | The user declined or dismissed the approval prompt.                                                                                                                                                    |
+| `tool_approval_stale`       | refusal code | The connector was removed, disabled or changed, or the hub configuration changed after the approval.                                                                                                   |
+| `registryUnavailableText`   | notice text  | The managed registry cannot be read.                                                                                                                                                                   |
+| `refreshToolsText`          | notice text  | The tool name is unknown or its definition changed.                                                                                                                                                    |
+| `connectorUnavailableText`  | notice text  | The connector is unavailable, changed, disabled, or needs authentication.                                                                                                                              |
 
 The approval prompt starts with "Hub permission request: approve one call only?". It labels the connector name and the arguments as untrusted data.
 
@@ -63,15 +63,9 @@ The approved part 1 named "12 fault reasons". That was wrong: those are internal
 - The release job stamps the version into the root manifest, the lockfile, and `packages/hub-core/package.json`. `package-desktop.mjs` refuses to package when the hub-core version differs from the root version.
 - If the file cannot be read, the bridge fails to start. It does not fall back to a made-up version.
 
-### The short instructions (draft)
+### The short instructions
 
-> You are connected to Waleed MCP Hub, which forwards tools of several MCP servers.
->
-> - Tool names are `<connector><sep><tool>`. Some names end with a hash suffix. Call names exactly as listed.
-> - The tool list can change (`listChanged`). After `Refresh the hub tool list…`, list the tools again before retrying.
-> - "Hub permission request" asks the user to approve one exact call. After `tool_approval_denied` or `tool_blocked`, do not retry the call or rephrase it to get around the decision. Tell the user.
-> - Errors are fixed codes. Never edit hub files, `safety.json`, locks or agent configs to clear one.
-> - Read `hub://guide` (or the `hub-guide` prompt) for what each code means and what to tell the user.
+The shipped text is `shortInstructions()` in `agent-guide.ts`, 793 characters with the `__` separator (the test caps it at 1,200). It covers the tool-name form, refreshing after `refreshTools`, the meaning of "Hub permission request", no retry or rephrasing after `tool_approval_denied` or `tool_blocked`, never editing hub files to clear an error, and where to read `hub://guide`.
 
 ### Security rule
 
