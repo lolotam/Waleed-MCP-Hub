@@ -110,6 +110,12 @@ it('omits alternate-name Hub entries with raw Windows arguments and array comman
   }
 });
 it('distinguishes OpenCode wrappers from a direct MCP named servers', () => {
+  expect(
+    agentServers(
+      JSON.stringify({ mcp: { servers: { enabled: false } } }),
+      'opencode',
+    ),
+  ).toEqual({ servers: { enabled: false } });
   const servers = {
     servers: { type: 'local', command: ['node', 'server.js'] },
     sibling: { type: 'remote', url: 'https://example.test/mcp' },

@@ -89,6 +89,7 @@ exit $LASTEXITCODE`,
           type: 'local',
         },
         unrelated: {
+          type: 'local',
           command: ['never-run.exe'],
           environment: { API_KEY: privateMarker },
         },

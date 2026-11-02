@@ -23,6 +23,40 @@ export const strings = (value: unknown): string[] | null =>
   value.every((item) => typeof item === 'string' && item.length <= 4096)
     ? (value as string[])
     : null;
+// V1 names servers directly under mcp; V2 wraps them under mcp.servers.
+// A direct server called servers (including an enabled-only V1 override)
+// keeps its own fields instead of being mistaken for the wrapper.
+export function openCodeServers(value: unknown) {
+  const mcp = object(value);
+  const nested = object(mcp?.servers);
+  return mcp &&
+    nested &&
+    Object.keys(mcp).every((key) => ['servers', 'timeout'].includes(key)) &&
+    !['type', 'command', 'url', 'enabled', 'disabled'].some(
+      (key) => Object.hasOwn(nested, key) && !object(nested[key]),
+    )
+    ? nested
+    : mcp;
+}
+function validOpenCodeEntry(entry: Record<string, unknown>) {
+  if (Object.keys(entry).length === 1 && typeof entry.enabled === 'boolean')
+    return true;
+  if (
+    ['enabled', 'disabled'].some(
+      (key) => entry[key] !== undefined && typeof entry[key] !== 'boolean',
+    )
+  )
+    return false;
+  if (entry.type === 'local') {
+    const command = strings(entry.command);
+    return Boolean(command?.length && command[0]?.trim());
+  }
+  return (
+    entry.type === 'remote' &&
+    typeof entry.url === 'string' &&
+    Boolean(entry.url.trim())
+  );
+}
 export const hash = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function parseDocument(
@@ -287,19 +321,16 @@ export function inspectAgentFile(
     if (shape === 'opencode') {
       if (document.mcp !== undefined && !object(document.mcp))
         throw new Error('Malformed MCP object.');
-      const mcp = object(document.mcp);
-      if (
-        document.mcpServers !== undefined ||
-        (object(mcp?.servers) &&
-          !['local', 'remote'].includes(String(object(mcp?.servers)?.type)))
-      ) {
+      if (document.mcpServers !== undefined) {
         observation.status = 'unsupported';
         return observation;
       }
     }
     const rawMap =
       shape === 'opencode'
-        ? document.mcp
+        ? document.mcp === undefined
+          ? undefined
+          : openCodeServers(document.mcp)
         : shape === 'codex'
           ? document.mcp_servers
           : document.mcpServers;
@@ -313,6 +344,8 @@ export function inspectAgentFile(
     for (const [name, value] of entries) {
       const entry = object(value);
       if (!entry) throw new Error('Invalid MCP entry.');
+      if (shape === 'opencode' && !validOpenCodeEntry(entry))
+        throw new Error('Invalid OpenCode MCP entry.');
       const match = pointer(entry, profileId, chromeLauncher);
       const expected =
         name === 'hub-pilot'

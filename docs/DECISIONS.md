@@ -203,7 +203,7 @@ to one of the eight products, not extra agents. Versions come from verified
 installed package manifests where available; unsupported native/wrapper versions
 remain unknown rather than launching a potentially stateful CLI. Adapter support,
 effective configuration, live MCP discovery, and reconnect state remain pending.
-OpenCode `mcp.<name>` is read as JSONC; Codex TOML respects `CODEX_HOME`.
+OpenCode V1 `mcp.<name>` and V2 `mcp.servers.<name>` are read as JSONC; Codex TOML respects `CODEX_HOME`.
 Known Claude/Cursor/Antigravity user files are observed narrowly. Grok/Kilo/Kimi
 configuration scopes and unsupported overrides remain pending instead of guessing
 legacy formats. Account/plugin/project layers are not claimed as effective state.

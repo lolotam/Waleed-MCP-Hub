@@ -347,6 +347,46 @@ describe('read-only environment discovery', () => {
       hubEntries: ['gateway', 'chrome'],
     });
   });
+  it.each([
+    { mcp: { servers: { enabled: false } }, count: 1 },
+    {
+      mcp: {
+        servers: { enabled: false },
+        sibling: { type: 'remote', url: 'https://example.test/mcp' },
+      },
+      count: 2,
+    },
+    {
+      mcp: {
+        servers: {
+          local: { type: 'local', command: ['never-run'] },
+          remote: { type: 'remote', url: 'https://example.test/mcp' },
+        },
+      },
+      count: 2,
+    },
+  ])(
+    'reads enabled-only overrides and wrapped OpenCode servers (%j)',
+    ({ mcp, count }) => {
+      const file = inspectAgentFile(
+        'C:\\Synthetic\\opencode.json',
+        {
+          status: 'read',
+          fingerprint: 'a'.repeat(64),
+          text: JSON.stringify({ mcp }),
+        },
+        'jsonc',
+        'opencode',
+        settings.profileId,
+        'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+      );
+      expect(file).toMatchObject({
+        status: 'read',
+        binding: 'absent',
+        entryCount: count,
+      });
+    },
+  );
   it.each(['unrelated', 'servers'])(
     'counts a direct OpenCode server named %s',
     (name) => {
@@ -371,24 +411,29 @@ describe('read-only environment discovery', () => {
       });
     },
   );
-  it.each([[], 12, { unrelated: null }])(
-    'rejects malformed OpenCode MCP maps (%j)',
-    (mcp) => {
-      const file = inspectAgentFile(
-        'C:\\Synthetic\\opencode.json',
-        {
-          status: 'read',
-          fingerprint: 'a'.repeat(64),
-          text: JSON.stringify({ mcp }),
-        },
-        'jsonc',
-        'opencode',
-        settings.profileId,
-        'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
-      );
-      expect(file).toMatchObject({ status: 'invalid', entryCount: null });
-    },
-  );
+  it.each([
+    [],
+    12,
+    { unrelated: null },
+    { broken: { type: 'local', command: 12 } },
+    { broken: { type: 'local', command: [] } },
+    { broken: { type: 'remote', url: 12 } },
+    { broken: { command: ['x'] } },
+  ])('rejects malformed OpenCode MCP maps (%j)', (mcp) => {
+    const file = inspectAgentFile(
+      'C:\\Synthetic\\opencode.json',
+      {
+        status: 'read',
+        fingerprint: 'a'.repeat(64),
+        text: JSON.stringify({ mcp }),
+      },
+      'jsonc',
+      'opencode',
+      settings.profileId,
+      'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+    );
+    expect(file).toMatchObject({ status: 'invalid', entryCount: null });
+  });
   it('reports unsupported legacy OpenCode layers rather than calling them an empty configuration', async () => {
     const file = inspectAgentFile(
       'C:\\Synthetic\\opencode.json',
@@ -396,9 +441,7 @@ describe('read-only environment discovery', () => {
         status: 'read',
         fingerprint: 'a'.repeat(64),
         text: JSON.stringify({
-          mcp: {
-            servers: { unrelated: { type: 'local', command: ['never-run'] } },
-          },
+          mcpServers: { unrelated: { type: 'local', command: ['never-run'] } },
         }),
       },
       'jsonc',
@@ -415,9 +458,7 @@ describe('read-only environment discovery', () => {
     fixture.put(
       win32.join(settings.home, '.config', 'opencode', 'opencode.jsonc'),
       JSON.stringify({
-        mcp: {
-          servers: { unrelated: { type: 'local', command: ['never-run'] } },
-        },
+        mcpServers: { unrelated: { type: 'local', command: ['never-run'] } },
       }),
     );
     expect(
