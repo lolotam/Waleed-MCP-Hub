@@ -1274,7 +1274,7 @@ export function createAgentBridge(
   };
   const admitted = async <T>(action: () => Promise<T>) => {
     if (closing) throw new Error(bridgeNotices.connectorUnavailable);
-    if (active >= 2) throw new Error('Hub request concurrency limit reached.');
+    if (active >= 2) throw new Error(bridgeNotices.concurrencyLimit);
     active++;
     try {
       return await action();

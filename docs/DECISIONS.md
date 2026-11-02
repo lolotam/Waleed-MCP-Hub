@@ -871,7 +871,7 @@ Residuals:
 
 The hub writes nothing into the agents' own folders.
 
-**Why.** Agents see only 4 refusal codes and 3 notice texts. Without guidance they retry blocked calls, guess tool names, or edit hub files to clear an error. Shipping the text inside the bridge keeps it in step with the installed version.
+**Why.** When the hub itself refuses or fails a call, agents see only 4 refusal codes and 4 notice texts; a connector's own results pass through unchanged and are marked untrusted. Without guidance they retry blocked calls, guess tool names, or edit hub files to clear an error. Shipping the text inside the bridge keeps it in step with the installed version.
 
 **Security.** The guidance never includes a connector name, tool name, description or argument. The tool separator is the only variable. Otherwise any upstream MCP server could inject instructions into every connected agent. `tests/agent-guide.test.ts` checks all three surfaces after discovery.
 

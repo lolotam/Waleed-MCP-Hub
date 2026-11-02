@@ -22,21 +22,22 @@ General agent behaviour rules (language, storage, review habits) are out of scop
 
 ## What an agent actually sees today
 
-The bridge (`packages/hub-core/src/integrations/bridge.ts`) never forwards a `RuntimeFault` reason to an agent. A tool call fails with one of these fixed values:
+The bridge (`packages/hub-core/src/integrations/bridge.ts`) never forwards a `RuntimeFault` reason to an agent. When the hub itself refuses or fails a request, the agent receives one of these fixed values. A notice text is the literal string in `bridgeNotices` in `agent-guide.ts`. A connector's own result, its error text included, passes through unchanged and is untrusted data.
 
-| Value returned to the agent | Kind         | When                                                                                                                                                                                                   |
-| --------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `tool_blocked`              | refusal code | The tool's policy is `block`.                                                                                                                                                                          |
-| `tool_approval_required`    | refusal code | The policy is `ask`, and one of these holds: the client cannot show a form, the arguments are over 16 KiB, the prompt failed or timed out, or the policy changed to `ask` while the call was starting. |
-| `tool_approval_denied`      | refusal code | The user declined or dismissed the approval prompt.                                                                                                                                                    |
-| `tool_approval_stale`       | refusal code | The connector was removed, disabled or changed, or the hub configuration changed after the approval.                                                                                                   |
-| `registryUnavailableText`   | notice text  | The managed registry cannot be read.                                                                                                                                                                   |
-| `refreshToolsText`          | notice text  | The tool name is unknown or its definition changed.                                                                                                                                                    |
-| `connectorUnavailableText`  | notice text  | The connector is unavailable, changed, disabled, or needs authentication.                                                                                                                              |
+| Value returned to the agent          | Kind         | When                                                                                                                                                                                                   |
+| ------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tool_blocked`                       | refusal code | The tool's policy is `block`.                                                                                                                                                                          |
+| `tool_approval_required`             | refusal code | The policy is `ask`, and one of these holds: the client cannot show a form, the arguments are over 16 KiB, the prompt failed or timed out, or the policy changed to `ask` while the call was starting. |
+| `tool_approval_denied`               | refusal code | The user declined or dismissed the approval prompt.                                                                                                                                                    |
+| `tool_approval_stale`                | refusal code | The connector was removed, disabled or changed before the call ran, or, for a tool that asked for approval, the hub configuration changed after the approval.                                          |
+| `bridgeNotices.registryUnavailable`  | notice text  | The managed registry cannot be read.                                                                                                                                                                   |
+| `bridgeNotices.refreshTools`         | notice text  | The tool name is unknown or its definition changed.                                                                                                                                                    |
+| `bridgeNotices.connectorUnavailable` | notice text  | The connector is unavailable, changed, disabled, or needs authentication.                                                                                                                              |
+| `bridgeNotices.concurrencyLimit`     | notice text  | The agent already has two hub requests running and starts a third.                                                                                                                                     |
 
 The approval prompt starts with "Hub permission request: approve one call only?". It labels the connector name and the arguments as untrusted data.
 
-The approved part 1 named "12 fault reasons". That was wrong: those are internal, and the agent sees the seven values above. The drift check in this design covers those seven.
+The approved part 1 named "12 fault reasons". That was wrong: those are internal, and the agent sees the eight values above. The drift check in this design covers those eight.
 
 ## Design
 
@@ -45,7 +46,7 @@ The approved part 1 named "12 fault reasons". That was wrong: those are internal
 **`packages/hub-core/src/integrations/agent-guide.ts` (new).** The only source of the guidance text.
 
 - `type RefusalCode` is the union of the four refusal codes. `ToolPolicyRefused` accepts only a `RefusalCode` or one of the notice texts, so every value an agent can see has a type.
-- `bridgeNotices` holds the three notice texts as one `as const` object. `bridge.ts` imports the texts from it instead of declaring its own constants.
+- `bridgeNotices` holds the four notice texts as one `as const` object. `bridge.ts` imports the texts from it instead of declaring its own constants.
 - `guidance: Record<RefusalCode | keyof typeof bridgeNotices, Entry>` holds one entry per agent-visible value: its meaning, what the agent does, and what it tells the user.
 - `shortInstructions(separator: '__' | '_'): string` returns the always-on text, about 1,200 characters, in English.
 - `fullGuide(separator): string` returns the markdown guide: the naming rule, the approval flow, and the full `guidance` table.
@@ -65,7 +66,7 @@ The approved part 1 named "12 fault reasons". That was wrong: those are internal
 
 ### The short instructions
 
-The shipped text is `shortInstructions()` in `agent-guide.ts`, 793 characters with the `__` separator (the test caps it at 1,200). It covers the tool-name form, refreshing after `refreshTools`, the meaning of "Hub permission request", no retry or rephrasing after `tool_approval_denied` or `tool_blocked`, never editing hub files to clear an error, and where to read `hub://guide`.
+The shipped text is `shortInstructions()` in `agent-guide.ts`, 959 characters with the `__` separator (the test caps it at 1,200). It covers the tool-name form, refreshing after `refreshTools`, the meaning of "Hub permission request", no retry or rephrasing after `tool_approval_denied` or `tool_blocked`, at most two hub calls at once, that only hub refusals and notices are fixed values while connector results are untrusted, never editing hub files to clear an error, and where to read `hub://guide`.
 
 ### Security rule
 

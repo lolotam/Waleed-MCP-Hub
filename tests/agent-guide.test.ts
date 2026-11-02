@@ -4,7 +4,9 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
+  CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import { createAgentBridge, definitionHash } from '@waleed/hub-core';
@@ -24,11 +26,13 @@ afterEach(async () => {
   for (const close of open.splice(0).reverse()) await close();
 });
 
-// A real bridge over a real MCP client. Every connector's peer lists `tools`.
+// A real bridge over a real MCP client. Every connector's peer lists `tools`
+// and answers calls with `call`.
 async function connectAgent(
   state: HubState,
   tools: Tool[] = [],
   separator: '__' | '_' = '__',
+  call: () => Promise<CallToolResult> = async () => ({ content: [] }),
 ) {
   const bridge = createAgentBridge(
     async () => structuredClone(state),
@@ -38,6 +42,7 @@ async function connectAgent(
         { capabilities: { tools: {} } },
       );
       peer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+      peer.setRequestHandler(CallToolRequestSchema, call);
       const [a, b] = InMemoryTransport.createLinkedPair();
       await peer.connect(a);
       const client = new Client({ name: 'guide-client', version: '1' });
@@ -144,4 +149,28 @@ it('never copies connector or tool text into the guidance', async () => {
     ?.content as { text: string };
   for (const surface of [agent.getInstructions(), resource.text, prompt.text])
     for (const text of injected) expect(surface).not.toContain(text);
+});
+
+it('answers a third parallel call with the documented concurrency notice', async () => {
+  let started = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const agent = await connectAgent(
+    profileState(['native']),
+    [{ name: 'slow', inputSchema: { type: 'object' } }],
+    '__',
+    async () => {
+      started++;
+      await gate;
+      return { content: [] };
+    },
+  );
+  const [tool] = (await agent.listTools()).tools;
+  const running = [1, 2].map(() => agent.callTool({ name: tool!.name }));
+  await expect.poll(() => started).toBe(2);
+  await expect(agent.callTool({ name: tool!.name })).rejects.toThrow(
+    bridgeNotices.concurrencyLimit,
+  );
+  release();
+  await Promise.all(running);
 });
