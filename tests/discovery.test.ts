@@ -442,6 +442,8 @@ describe('read-only environment discovery', () => {
     '{env:MCP_BASE_URL}/mcp?key={env:KEY}',
     'https://example.test/mcp?key={env:KEY}',
     '{env:SCHEME}://example.test/mcp',
+    '{env:SCHEME}example.test:8443/mcp',
+    '{env:SCHEME}example.test:{env:PORT}/mcp',
     'https://example.test:{env:PORT}/mcp',
   ])('counts an unexpanded OpenCode remote URL %s', (endpoint) => {
     const file = inspectAgentFile(

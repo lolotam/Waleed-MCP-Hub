@@ -112,7 +112,14 @@ function validOpenCodeUrl(value: unknown) {
     leadingToken && value.startsWith(leadingToken)
       ? value.slice(leadingToken.length)
       : '';
-  if (/^[a-z][a-z\d+.-]*:/i.test(suffix) && !/^https?:/i.test(suffix))
+  const hostPort = /^[^/?#:\s]+:\d+(?:[/?#]|$)/.test(
+    suffix.replace(reference, '1'),
+  );
+  if (
+    !hostPort &&
+    /^[a-z][a-z\d+.-]*:/i.test(suffix) &&
+    !/^https?:/i.test(suffix)
+  )
     return false;
   const masked = value.replace(reference, (token: string, offset: number) => {
     if (offset !== 0) return '1';
