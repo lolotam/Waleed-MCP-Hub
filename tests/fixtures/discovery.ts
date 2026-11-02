@@ -76,7 +76,7 @@ exit $LASTEXITCODE`,
   put(win32.join(settings.home, '.config', 'opencode', 'mcp.json'), source);
   put(
     win32.join(settings.home, '.config', 'opencode', 'opencode.jsonc'),
-    '{ // synthetic comment\n"mcp":{"servers":' +
+    '{ // synthetic comment\n"mcp":' +
       JSON.stringify({
         'hub-pilot': {
           ...gateway,
@@ -93,7 +93,7 @@ exit $LASTEXITCODE`,
           environment: { API_KEY: privateMarker },
         },
       }) +
-      '},"providers":{"do-not-expand":"{file:C:/Synthetic/.credentials.json}"},}',
+      ',"providers":{"do-not-expand":"{file:C:/Synthetic/.credentials.json}"},}',
   );
   put(
     win32.join(settings.environment.CODEX_HOME!, 'config.toml'),

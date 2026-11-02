@@ -143,6 +143,10 @@ describe('comment-preserving managed agent entries', () => {
       expect(receipt.agent.status).toBe('integrated');
       expect(backups[0]).toBe(original);
       const integrated = contents.get(target.paths[0]!)!;
+      if (target.format === 'codex')
+        expect(managedEntry(integrated, target.format)).toMatchObject({
+          startup_timeout_sec: 90,
+        });
       expect(integrated.toLowerCase()).toContain('preserve');
       if (target.id === 'codex')
         expect(integrated).toContain('node_repl = true');
@@ -362,7 +366,7 @@ describe('comment-preserving managed agent entries', () => {
     expect(managedEntry(document, 'codex')).toEqual({
       command: 'C:\\Node24\\node.exe',
       args: ['C:\\Hub\\bridge.js', 'C:\\Runtime\\state.json', 'grok'],
-      startup_timeout_sec: 30,
+      startup_timeout_sec: 90,
     });
     const removed = editAgentDocument(
       document,

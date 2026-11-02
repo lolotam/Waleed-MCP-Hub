@@ -290,8 +290,8 @@ export function inspectAgentFile(
       const mcp = object(document.mcp);
       if (
         document.mcpServers !== undefined ||
-        (mcp &&
-          Object.keys(mcp).some((key) => !['servers', 'timeout'].includes(key)))
+        (object(mcp?.servers) &&
+          !['local', 'remote'].includes(String(object(mcp?.servers)?.type)))
       ) {
         observation.status = 'unsupported';
         return observation;
@@ -299,7 +299,7 @@ export function inspectAgentFile(
     }
     const rawMap =
       shape === 'opencode'
-        ? object(document.mcp)?.servers
+        ? document.mcp
         : shape === 'codex'
           ? document.mcp_servers
           : document.mcpServers;

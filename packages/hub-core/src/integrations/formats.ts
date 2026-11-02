@@ -154,7 +154,7 @@ export function editAgentDocument(
           `[mcp_servers.${managedName}]`,
           `command = ${JSON.stringify(entry.command)}`,
           `args = ${JSON.stringify(entry.args)}`,
-          'startup_timeout_sec = 30',
+          'startup_timeout_sec = 90',
           end,
           '',
         ].join(eol);
@@ -177,7 +177,7 @@ export function editAgentDocument(
       ? actual !== undefined
       : hashData(actual) !==
         hashData(
-          format === 'codex' ? { ...entry, startup_timeout_sec: 30 } : entry,
+          format === 'codex' ? { ...entry, startup_timeout_sec: 90 } : entry,
         )
   )
     throw conflict();

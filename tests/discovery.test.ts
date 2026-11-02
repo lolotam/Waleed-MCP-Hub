@@ -347,6 +347,48 @@ describe('read-only environment discovery', () => {
       hubEntries: ['gateway', 'chrome'],
     });
   });
+  it.each(['unrelated', 'servers'])(
+    'counts a direct OpenCode server named %s',
+    (name) => {
+      const file = inspectAgentFile(
+        'C:\\Synthetic\\opencode.json',
+        {
+          status: 'read',
+          fingerprint: 'a'.repeat(64),
+          text: JSON.stringify({
+            mcp: { [name]: { type: 'local', command: ['never-run'] } },
+          }),
+        },
+        'jsonc',
+        'opencode',
+        settings.profileId,
+        'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+      );
+      expect(file).toMatchObject({
+        status: 'read',
+        binding: 'absent',
+        entryCount: 1,
+      });
+    },
+  );
+  it.each([[], 12, { unrelated: null }])(
+    'rejects malformed OpenCode MCP maps (%j)',
+    (mcp) => {
+      const file = inspectAgentFile(
+        'C:\\Synthetic\\opencode.json',
+        {
+          status: 'read',
+          fingerprint: 'a'.repeat(64),
+          text: JSON.stringify({ mcp }),
+        },
+        'jsonc',
+        'opencode',
+        settings.profileId,
+        'C:\\Synthetic\\pilot\\Start-Chrome.ps1',
+      );
+      expect(file).toMatchObject({ status: 'invalid', entryCount: null });
+    },
+  );
   it('reports unsupported legacy OpenCode layers rather than calling them an empty configuration', async () => {
     const file = inspectAgentFile(
       'C:\\Synthetic\\opencode.json',
@@ -354,7 +396,9 @@ describe('read-only environment discovery', () => {
         status: 'read',
         fingerprint: 'a'.repeat(64),
         text: JSON.stringify({
-          mcp: { unrelated: { type: 'local', command: ['never-run'] } },
+          mcp: {
+            servers: { unrelated: { type: 'local', command: ['never-run'] } },
+          },
         }),
       },
       'jsonc',
@@ -371,7 +415,9 @@ describe('read-only environment discovery', () => {
     fixture.put(
       win32.join(settings.home, '.config', 'opencode', 'opencode.jsonc'),
       JSON.stringify({
-        mcp: { unrelated: { type: 'local', command: ['never-run'] } },
+        mcp: {
+          servers: { unrelated: { type: 'local', command: ['never-run'] } },
+        },
       }),
     );
     expect(
