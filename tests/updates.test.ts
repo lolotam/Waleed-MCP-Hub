@@ -4,6 +4,7 @@ import { releaseVersion } from '../scripts/release-version.mjs';
 import { createHubServer } from '../apps/server/src/app.js';
 import { createLifecycle } from '@waleed/hub-core';
 import { memoryStore } from './helpers/memory-store.js';
+import { createServer } from 'node:net';
 const root = 'https://github.com/lolotam/Waleed-MCP-Hub';
 const release = (tag = 'v0.1.2') => ({
   tag_name: tag,
@@ -216,6 +217,89 @@ it('protects update checks, keeps status reads local, and rejects caller-control
     ).toBe('available');
     expect(request).toHaveBeenCalledTimes(1);
   } finally {
+    await server.app.close();
+  }
+});
+
+// A pending release-metadata request must not delay desktop writer shutdown.
+it('aborts an in-flight HTTP update check before waiting for server connections to close', async () => {
+  const reservation = createServer();
+  await new Promise<void>((resolve) =>
+    reservation.listen(0, '127.0.0.1', resolve),
+  );
+  const address = reservation.address();
+  if (!address || typeof address === 'string')
+    throw new Error('Missing test port.');
+  const port = address.port;
+  await new Promise<void>((resolve, reject) =>
+    reservation.close((error) => (error ? reject(error) : resolve())),
+  );
+  let started!: () => void;
+  const requestStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let releaseRequest: (() => void) | undefined;
+  let upstreamSignal: AbortSignal | undefined;
+  const checker = createUpdateChecker('0.1.0', async (_url, options) => {
+    const signal = options?.signal;
+    if (!signal) throw new Error('Missing upstream cancellation signal.');
+    upstreamSignal = signal;
+    return new Promise<Response>((resolve, reject) => {
+      releaseRequest = () => resolve(new Response('', { status: 404 }));
+      if (signal.aborted) reject(signal.reason);
+      else
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
+      started();
+    });
+  });
+  const server = await createHubServer({
+    port,
+    lifecycle: createLifecycle(memoryStore()),
+    updates: checker,
+  });
+  const host = `127.0.0.1:${port}`,
+    origin = `http://${host}`;
+  let response: Promise<Response> | undefined;
+  try {
+    await server.app.listen({ host: '127.0.0.1', port });
+    const session = await server.app.inject({
+      method: 'POST',
+      url: '/api/session',
+      headers: { host, origin },
+      payload: { token: server.issueLaunchToken() },
+    });
+    response = fetch(`${origin}/api/updates/check`, {
+      method: 'POST',
+      headers: {
+        origin,
+        cookie: String(session.headers['set-cookie']).split(';')[0]!,
+        'x-csrf-token': session.json().csrfToken,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    await Promise.race([
+      requestStarted,
+      response.then((result) => {
+        throw new Error(
+          `Update request ended before upstream work: ${result.status}`,
+        );
+      }),
+    ]);
+    const closed = server.app.close();
+    await expect
+      .poll(() => upstreamSignal?.aborted, { timeout: 1000 })
+      .toBe(true);
+    expect((await (await response).json()).state).toBe('unavailable');
+    await closed;
+  } finally {
+    releaseRequest?.();
+    await response
+      ?.then((result) => result.arrayBuffer())
+      .catch(() => undefined);
+    server.app.server.closeIdleConnections();
     await server.app.close();
   }
 });

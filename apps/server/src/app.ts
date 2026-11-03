@@ -991,8 +991,12 @@ export async function createHubServer(options: ServerOptions) {
       });
     });
   }
-  app.addHook('onClose', async () => {
+  // Cancel release requests before HTTP draining waits for their handlers;
+  // otherwise a pending update check can delay releasing the writer locks.
+  app.addHook('preClose', async () => {
     await options.updates?.close();
+  });
+  app.addHook('onClose', async () => {
     imports.close();
     sessions.clear();
     await options.discovery?.close();
