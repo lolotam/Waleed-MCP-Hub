@@ -838,10 +838,16 @@ function ToolPermissions({
       ...Object.keys(policies),
     ]),
   ].sort();
-  const blocked = Object.values(policies).filter(
-      (policy) => policy === 'block',
+  const effectivePolicy = (name: string) =>
+    ToolPolicyNameSchema.safeParse(name).success
+      ? Object.hasOwn(policies, name)
+        ? policies[name]!
+        : defaultPolicy
+      : 'block';
+  const blocked = names.filter(
+      (name) => effectivePolicy(name) === 'block',
     ).length,
-    asked = Object.values(policies).filter((policy) => policy === 'ask').length;
+    asked = names.filter((name) => effectivePolicy(name) === 'ask').length;
   async function change(name: string, policy: ToolPolicy) {
     const next = { ...policies };
     if (policy === defaultPolicy) delete next[name];
@@ -927,11 +933,7 @@ function ToolPermissions({
       <ul className="tool-policy-list">
         {names.map((name) => {
           const supported = ToolPolicyNameSchema.safeParse(name).success,
-            policy = supported
-              ? Object.hasOwn(policies, name)
-                ? policies[name]!
-                : defaultPolicy
-              : 'block';
+            policy = effectivePolicy(name);
           return (
             <li key={name}>
               <label>

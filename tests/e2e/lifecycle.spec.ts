@@ -266,8 +266,20 @@ test('persists default-block while explicit Full permission remains an allow exc
   await expect(row.getByRole('status')).toContainText('Permissions saved.');
   const tool = row.getByLabel('Policy for fixture_first', { exact: true });
   await expect(tool).toHaveValue('block');
+  const toolCount = await row
+    .locator('select[aria-label^="Policy for "]')
+    .count();
+  const summary = row
+    .locator('summary')
+    .filter({ hasText: 'Tools & Permissions' });
+  await expect(summary).toContainText(
+    `${toolCount} tools · 0 Ask · ${toolCount} Blocked`,
+  );
   await tool.selectOption('allow');
   await expect(row.getByRole('status')).toContainText('Permissions saved.');
+  await expect(summary).toContainText(
+    `${toolCount} tools · 0 Ask · ${toolCount - 1} Blocked`,
+  );
   await page.reload();
   row = page.getByTestId('connector-fixture');
   await expand(row);

@@ -574,39 +574,48 @@ for (const mode of ['native', 'docker', 'remote'] as const) {
   });
 }
 
-it('refuses default-block policy mutation while a direct snapshot exists', async () => {
-  const state = profileState(['native']);
-  state.materializations = [
-    {
-      profileId: 'profile',
-      profileRevision: state.profiles[0]!.revision,
-      dockerProfileId: null,
-      configurationHash: 'a'.repeat(64),
-      dockerHash: null,
-      files: [],
-      appliedAt: '2026-10-28T00:00:00.000Z',
-    },
-  ];
-  const hub = createLifecycle(
-    memoryStore(state),
-    Date.now,
-    createMemorySafetyLedger(),
-  );
-  try {
-    await expect(
-      hub.preview(
-        {
-          kind: 'set_tool_policies',
-          connectorId: state.connectors[0]!.id,
-          expectedRevision: 0,
-          expectedConnectorRevision: state.connectors[0]!.revision,
-          defaultToolPolicy: 'block',
-          toolPolicies: { read: 'allow' },
-        },
-        'owner',
-      ),
-    ).rejects.toMatchObject({ code: 'conflict' });
-  } finally {
-    await hub.close();
-  }
-});
+it.each([
+  ['native', false],
+  ['native', true],
+  ['docker', true],
+  ['remote', true],
+] as const)(
+  'refuses default-block with a retained %s snapshot (unassigned=%s)',
+  async (mode, unassigned) => {
+    const state = profileState([mode]);
+    state.materializations = [
+      {
+        profileId: 'profile',
+        profileRevision: state.profiles[0]!.revision,
+        dockerProfileId: null,
+        configurationHash: 'a'.repeat(64),
+        dockerHash: null,
+        files: [],
+        appliedAt: '2026-10-28T00:00:00.000Z',
+      },
+    ];
+    if (unassigned) state.profiles[0]!.connectorIds = [];
+    const hub = createLifecycle(
+      memoryStore(state),
+      Date.now,
+      createMemorySafetyLedger(),
+    );
+    try {
+      await expect(
+        hub.preview(
+          {
+            kind: 'set_tool_policies',
+            connectorId: state.connectors[0]!.id,
+            expectedRevision: 0,
+            expectedConnectorRevision: state.connectors[0]!.revision,
+            defaultToolPolicy: 'block',
+            toolPolicies: { read: 'allow' },
+          },
+          'owner',
+        ),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    } finally {
+      await hub.close();
+    }
+  },
+);

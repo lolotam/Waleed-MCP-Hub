@@ -40,6 +40,11 @@ materialization through its supported workflow before narrowing permissions;
 the policy mutation refuses to leave such a bypass in place. Normal managed
 agent entries continue to point at the enforcing bridge.
 
+Retained materialization records do not capture immutable connector membership.
+Restrictive policy saves therefore require all retained direct snapshots to be
+dematerialized, even if their profiles no longer list the connector. Current
+profile membership cannot prove that a stale snapshot is harmless.
+
 The new field is persisted only when needed for default-block. Strict older
 connector/state schemas do not recognize it and must refuse the guarded state,
 not strip it or fall back to allow. Do not hand-edit the field into an older

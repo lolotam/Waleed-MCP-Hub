@@ -177,7 +177,10 @@ export function planRegistry(input: RegistryOperation, state: HubState, targetId
       const connector=requireConnector(next,input.connectorId);
       if(connector.revision!==input.expectedConnectorRevision)conflict('Connector changed. Refresh permissions before saving.');
       const defaultToolPolicy=input.defaultToolPolicy??connector.defaultToolPolicy??'allow';
-      if(hasRestrictedTools({...connector,toolPolicies:input.toolPolicies,defaultToolPolicy})&&next.materializations?.some(record=>record.files.some(file=>file.name.endsWith(`-${hashData(connector.id).slice(0,16)}.json`))||next.profiles.some(profile=>profile.id===record.profileId&&profile.connectorIds.includes(connector.id))))conflict('Dematerialize direct profile snapshots before restricting tools. Tool policies require the managed agent bridge.');
+      // Records do not capture immutable connector membership. Even a profile
+      // that no longer includes this connector can retain a direct snapshot.
+      // Fail closed for all retained records until they are dematerialized.
+      if(hasRestrictedTools({...connector,toolPolicies:input.toolPolicies,defaultToolPolicy})&&next.materializations?.length)conflict('Dematerialize all retained direct profile snapshots before restricting tools. Their saved connector membership cannot be verified.');
       if(toolPolicyHash(connector)===hashData({defaultToolPolicy,toolPolicies:input.toolPolicies}))conflict('Tool policies already have this state.');
       connector.toolPolicies=structuredClone(input.toolPolicies);
       if(defaultToolPolicy==='block')connector.defaultToolPolicy='block';else delete connector.defaultToolPolicy;
