@@ -26,8 +26,6 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import {
   StateSchema,
-  ToolPolicyNameSchema,
-  ToolPolicySchema,
   SafetyStateSchema,
   IntegrationAgentIdSchema,
   type Connector,
@@ -49,7 +47,13 @@ import {
   isolatedNativeArguments,
   nativeExecutable,
 } from '../adapters/mcp/runtime.js';
-import { approved, definitionHash, hashData } from '../runtime/registry.js';
+import {
+  approved,
+  definitionHash,
+  hashData,
+  toolPolicyHash,
+} from '../runtime/registry.js';
+import { toolPolicy } from '../runtime/tool-policy.js';
 import { RuntimeFault } from '../runtime/capabilities.js';
 import { readBootRecord, readInstallRecord } from '../runtime/boot.js';
 import {
@@ -91,12 +95,7 @@ import {
   type SessionPool,
 } from './session-pool.js';
 
-export function toolPolicy(connector: Connector, name: string) {
-  if (!ToolPolicyNameSchema.safeParse(name).success) return 'block';
-  if (!Object.hasOwn(connector.toolPolicies ?? {}, name)) return 'allow';
-  const parsed = ToolPolicySchema.safeParse(connector.toolPolicies![name]);
-  return parsed.success ? parsed.data : 'block';
-}
+export { toolPolicy } from '../runtime/tool-policy.js';
 class ToolPolicyRefused extends Error {
   constructor(readonly code: RefusalCode | BridgeNotice) {
     super(code);
@@ -739,26 +738,51 @@ function createSessionBridge(
       }
       // 8. The request itself. The pool sees a peer's JSON-RPC answer as a
       // result, so it does not count as a failure of the peer.
-      authorize?.(snapshot.state);
-      const outcome = await lease.request(
-        snapshot.seq,
-        admission,
-        async (signal): Promise<{ value: T } | { answered: true }> => {
-          try {
-            return { value: await send(lease.peer.peer, signal) };
-          } catch (error) {
-            if (peerAnswered(error)) return { answered: true };
-            // A request that timed out inside the SDK ends the peer: the server
-            // may keep working.
-            if (
-              error instanceof McpError &&
-              error.code === ErrorCode.RequestTimeout
-            )
-              throw new RuntimeFault('timed_out');
-            throw error;
-          }
-        },
-      );
+      let authorizedRequest:
+        Promise<{ value: T } | { answered: true }> | undefined;
+      // Publish the authorization and invoke the pool's synchronous send gate
+      // inside the serialized snapshot callback. A later snapshot/revocation
+      // cannot overtake a permissive read while this request is awaiting it.
+      await session.snapshot((latest) => {
+        if ('failed' in latest) throw new RegistryUnavailable();
+        const member = latest.state.connectors.find(
+          (item) => item.id === connector.id,
+        );
+        if (
+          !member ||
+          !member.enabled ||
+          !approved(member) ||
+          definitionHash(member) !== pooled.definitionHash ||
+          credentialStamp(member, latest.state) !== pooled.credentials ||
+          latest.bootId !== pooled.bootId
+        )
+          throw new PeerRefused();
+        authorize?.(latest.state);
+        authorizedRequest = lease.request(
+          latest.seq,
+          admission,
+          async (signal): Promise<{ value: T } | { answered: true }> => {
+            try {
+              return { value: await send(lease.peer.peer, signal) };
+            } catch (error) {
+              if (peerAnswered(error)) return { answered: true };
+              // A request that timed out inside the SDK ends the peer: the server
+              // may keep working.
+              if (
+                error instanceof McpError &&
+                error.code === ErrorCode.RequestTimeout
+              )
+                throw new RuntimeFault('timed_out');
+              throw error;
+            }
+          },
+        );
+        // The promise is consumed below; attach immediately in case the
+        // snapshot provider completes asynchronously after invoking `inside`.
+        void authorizedRequest.catch(() => undefined);
+      });
+      if (!authorizedRequest) throw new RegistryUnavailable();
+      const outcome = await authorizedRequest;
       if ('answered' in outcome) throw new PeerAnswered();
       const value = outcome.value;
       // A result that carries a credential never leaves the bridge and the
@@ -1428,6 +1452,18 @@ export function createAgentBridge(
     }
     return tools;
   };
+  const publishLatest = async (catalog: ToolCatalog): Promise<Tool[]> => {
+    if (!session) return publish(await readState(), catalog);
+    let tools: Tool[] | undefined;
+    // A catalog read/write can await while permissions change. Authorize the
+    // route table inside a new serialized snapshot, never that earlier state.
+    await session.snapshot((snapshot) => {
+      if ('failed' in snapshot) throw new RegistryUnavailable();
+      tools = publish(snapshot.state, catalog);
+    });
+    if (!tools) throw new RegistryUnavailable();
+    return tools;
+  };
   const catalogStore = session?.catalog;
   // The catalog this bridge knows, and the listing the agent last received.
   let known: ToolCatalog | undefined;
@@ -1472,7 +1508,7 @@ export function createAgentBridge(
         // The catalog only speeds up the next listing: a file that cannot be
         // written leaves this listing intact.
         await catalogStore?.write(next).catch(() => undefined);
-        const tools = publish(state, next);
+        const tools = await publishLatest(next);
         const listing = JSON.stringify(tools);
         if (served !== undefined && listing !== served) {
           served = listing;
@@ -1494,13 +1530,13 @@ export function createAgentBridge(
         );
         const catalog: ToolCatalog = new Map();
         for (const [id, entry] of found) if (entry) catalog.set(id, entry);
-        return { tools: publish(await latestState(), catalog) };
+        return { tools: await publishLatest(catalog) };
       }
       // The ledger and the registry decide first: a blocked ledger serves
       // nothing, and a revoked connector drops out of the cached catalog.
-      const state = await latestState();
+      await latestState();
       known ??= await catalogStore.read().catch(() => undefined);
-      const cached = known ? publish(state, known) : [];
+      const cached = known ? await publishLatest(known) : [];
       if (known !== undefined) {
         served = JSON.stringify(cached);
         void refresh().catch(() => undefined);
@@ -1542,7 +1578,7 @@ export function createAgentBridge(
         const policy = toolPolicy(connector, target.name);
         if (policy === 'block') throw new ToolPolicyRefused('tool_blocked');
         let confirmed = false;
-        const policyHash = hashData(connector.toolPolicies ?? {});
+        const policyHash = toolPolicyHash(connector);
         if (policy === 'ask') {
           const elicitation = server.getClientCapabilities()?.elicitation;
           // Legacy MCP clients advertise form support with an empty object.
@@ -1602,7 +1638,7 @@ export function createAgentBridge(
             confirmed &&
             (state.revision !== initial.revision ||
               current.revision !== connector.revision ||
-              hashData(current.toolPolicies ?? {}) !== policyHash)
+              toolPolicyHash(current) !== policyHash)
           )
             throw new ToolPolicyRefused('tool_approval_stale');
           if (toolPolicy(current, target.name) === 'ask' && !confirmed)
@@ -1696,6 +1732,7 @@ export function createAgentBridge(
           AbortSignal.timeout(60000),
         ]);
         if (closing) throw new Error();
+        authorize(state);
         peer = await connect(connector, signal);
         // Recheck approval after startup, immediately before the explicit call.
         const latestStateForCall = await readState();

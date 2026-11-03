@@ -52,6 +52,8 @@ async function createHarness(options: {
   expireDiscovery?: boolean;
   pageSize?: number;
   pooled?: boolean;
+  onCatalogRead?: () => void;
+  onCatalogWrite?: () => void;
 }): Promise<Harness> {
   const stored = { catalog: options.catalog };
   const connects: string[] = [];
@@ -81,9 +83,13 @@ async function createHarness(options: {
       timers.delete(handle as number);
     },
     catalog: {
-      read: async () => stored.catalog && new Map(stored.catalog),
+      read: async () => {
+        options.onCatalogRead?.();
+        return stored.catalog && new Map(stored.catalog);
+      },
       write: async (catalog) => {
         stored.catalog = new Map(catalog);
+        options.onCatalogWrite?.();
       },
     },
   };
@@ -336,6 +342,29 @@ it('round-trips a stored catalog', () => {
   ]);
   expect(parseToolCatalog(serializeToolCatalog(catalog))).toEqual(catalog);
 });
+
+it.each(['read', 'write'] as const)(
+  'rechecks default-block after an asynchronous catalog %s instead of publishing the permissive snapshot',
+  async (phase) => {
+    const state = profileState(['native']);
+    const revoke = () => {
+      state.connectors[0]!.defaultToolPolicy = 'block';
+      state.revision++;
+    };
+    const cached = new Map([
+      ['connector-0', entryFor(state, 'connector-0', [tool('unreviewed')])],
+    ]);
+    open = await createHarness({
+      state,
+      listing: () => [tool('unreviewed')],
+      ...(phase === 'read'
+        ? { catalog: cached, onCatalogRead: revoke }
+        : { onCatalogWrite: revoke }),
+    });
+    expect(await names(open.agent)).toEqual([]);
+    expect(open.calls).toEqual([]);
+  },
+);
 
 it.each([
   ['not JSON', '{'],

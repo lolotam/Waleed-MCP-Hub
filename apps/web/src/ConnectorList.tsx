@@ -820,14 +820,18 @@ function ToolPermissions({
   refresh: () => Promise<unknown>;
 }) {
   const [policies, setPolicies] = useState(connector.toolPolicies ?? {}),
+    [defaultPolicy, setDefaultPolicy] = useState<'allow' | 'block'>(
+      connector.defaultToolPolicy ?? 'allow',
+    ),
     [saving, setSaving] = useState(false),
     [stale, setStale] = useState(false),
     [message, setMessage] = useState(''),
     [error, setError] = useState('');
   useEffect(() => {
     setPolicies(connector.toolPolicies ?? {});
+    setDefaultPolicy(connector.defaultToolPolicy ?? 'allow');
     setStale(false);
-  }, [connector.toolPolicies, revision]);
+  }, [connector.toolPolicies, connector.defaultToolPolicy, revision]);
   const names = [
     ...new Set([
       ...(observation?.tools.map((tool) => tool.name) ?? []),
@@ -840,9 +844,13 @@ function ToolPermissions({
     asked = Object.values(policies).filter((policy) => policy === 'ask').length;
   async function change(name: string, policy: ToolPolicy) {
     const next = { ...policies };
-    if (policy === 'allow') delete next[name];
+    if (policy === defaultPolicy) delete next[name];
     else next[name] = policy;
+    await save(next, defaultPolicy);
+  }
+  async function save(next: typeof policies, nextDefault: 'allow' | 'block') {
     setPolicies(next);
+    setDefaultPolicy(nextDefault);
     setSaving(true);
     setError('');
     setMessage('Saving permissions…');
@@ -854,6 +862,7 @@ function ToolPermissions({
           expectedRevision: revision,
           expectedConnectorRevision: connector.revision,
           toolPolicies: next,
+          defaultToolPolicy: nextDefault,
         },
       );
       saved = true;
@@ -865,7 +874,10 @@ function ToolPermissions({
           : 'Permissions saved. The managed bridge rechecks every call.',
       );
     } catch {
-      if (!saved) setPolicies(connector.toolPolicies ?? {});
+      if (!saved) {
+        setPolicies(connector.toolPolicies ?? {});
+        setDefaultPolicy(connector.defaultToolPolicy ?? 'allow');
+      }
       setStale(true);
       setMessage('');
       setError(
@@ -889,9 +901,23 @@ function ToolPermissions({
         Full permission runs normally. Always ask requires a one-time user
         confirmation through the agent’s elicitation UI; unsupported clients are
         refused. Closed removes the tool from the agent’s catalog and rejects
-        stale calls. Unconfigured tools default to Full permission, including
-        read-only tools.
+        stale calls. Choose Closed for tools without a rule to prevent newly
+        discovered tools from becoming available before you review them.
       </p>
+      <label>
+        Tools without a rule{' '}
+        <select
+          aria-label="Default tool policy"
+          value={defaultPolicy}
+          disabled={disabled || saving || stale}
+          onChange={(event) =>
+            void save(policies, event.target.value as 'allow' | 'block')
+          }
+        >
+          <option value="allow">Full permission</option>
+          <option value="block">Closed until reviewed</option>
+        </select>
+      </label>
       {!names.length && (
         <p>
           No discovered tools yet. Enable and approve this connector for
@@ -904,7 +930,7 @@ function ToolPermissions({
             policy = supported
               ? Object.hasOwn(policies, name)
                 ? policies[name]!
-                : 'allow'
+                : defaultPolicy
               : 'block';
           return (
             <li key={name}>

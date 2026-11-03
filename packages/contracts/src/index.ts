@@ -4,6 +4,7 @@ import {
   IntegrationRecordSchema,
   PortBindingsSchema,
   ToolPoliciesSchema,
+  DefaultToolPolicySchema,
 } from './integrations.js';
 import { PackageProvenanceSchema } from './packages.js';
 import {
@@ -81,6 +82,7 @@ const SecretBindings = z
   .refine((bindings) => Object.keys(bindings).length <= 64);
 const connectorFields = {
   toolPolicies: ToolPoliciesSchema.optional(),
+  defaultToolPolicy: DefaultToolPolicySchema.optional(),
   id: IdSchema,
   name: Name,
   description: Description,

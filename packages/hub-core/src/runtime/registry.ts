@@ -3,6 +3,7 @@ import { win32 } from 'node:path';
 import { ConnectorSchema, StateSchema, isPackageEnvName as isRefusedPackageEnvName, type Connector, type HubState, type ImportDefinition, type PackageProvenance, type Profile, type RegistryOperation } from '@waleed/contracts';
 import { HubError, RevisionConflictError } from '../errors.js';
 import { normalizeImport, clearImport } from '../imports/normalize.js';
+import { hasRestrictedTools } from './tool-policy.js';
 
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -38,6 +39,7 @@ export function executionDefinition(connector: Connector) {
   return connector.executionMode === 'native' ? { ...common, executable: connector.executable, arguments: connector.arguments, ...(connector.package ? { package: connector.package } : {}) } : connector.executionMode === 'docker' ? { ...common, image: connector.image, command: connector.command ?? [], arguments: connector.arguments, ...(connector.portBindings?.length ? {portBindings:connector.portBindings}: {}) } : { ...common, endpoint: connector.endpoint };
 }
 export const definitionHash = (connector: Connector) => hashData(executionDefinition(connector));
+export const toolPolicyHash = (connector: Connector) => hashData({ defaultToolPolicy: connector.defaultToolPolicy ?? 'allow', toolPolicies: connector.toolPolicies ?? {} });
 export function approved(connector: Connector) {
   return connector.trustApproval?.revision === connector.revision && connector.trustApproval.definitionHash === definitionHash(connector);
 }
@@ -165,7 +167,7 @@ export function planRegistry(input: RegistryOperation, state: HubState, targetId
         const managed = existing && existing.executionMode === 'native' && existing.package ? existing : null;
         const definition = managed ? managedDefinition(raw, managed, next) : checkedDefinition(raw, next, context, existing ?? undefined);
         if (next.connectors.some((item) => item.id !== existing?.id && (item.id === definition.id || fold(item.name) === fold(definition.name)))) conflict('Connector name or identifier already exists.');
-        const connector = ConnectorSchema.parse({ ...definition, ...(existing?.toolPolicies ? {toolPolicies:existing.toolPolicies} : {}), revision: existing ? existing.revision + 1 : 1, createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp });
+        const connector = ConnectorSchema.parse({ ...definition, ...(existing?.toolPolicies ? {toolPolicies:existing.toolPolicies} : {}), ...(existing?.defaultToolPolicy ? {defaultToolPolicy:existing.defaultToolPolicy} : {}), revision: existing ? existing.revision + 1 : 1, createdAt: existing?.createdAt ?? timestamp, updatedAt: timestamp });
         next.connectors = next.connectors.filter((item) => item.id !== existing?.id); next.connectors.push(connector);
         connectors.add(connector.id); actualTarget = connector.id;
       }
@@ -174,9 +176,12 @@ export function planRegistry(input: RegistryOperation, state: HubState, targetId
     case 'set_tool_policies': {
       const connector=requireConnector(next,input.connectorId);
       if(connector.revision!==input.expectedConnectorRevision)conflict('Connector changed. Refresh permissions before saving.');
-      if(Object.values(input.toolPolicies).some(policy=>policy!=='allow')&&next.materializations?.some(record=>record.files.some(file=>file.name.endsWith(`-${hashData(connector.id).slice(0,16)}.json`))||next.profiles.some(profile=>profile.id===record.profileId&&profile.connectorIds.includes(connector.id))))conflict('Dematerialize direct profile snapshots before restricting tools. Tool policies require the managed agent bridge.');
-      if(hashData(connector.toolPolicies??{})===hashData(input.toolPolicies))conflict('Tool policies already have this state.');
-      connector.toolPolicies=structuredClone(input.toolPolicies);connector.updatedAt=timestamp;actualTarget=connector.id;
+      const defaultToolPolicy=input.defaultToolPolicy??connector.defaultToolPolicy??'allow';
+      if(hasRestrictedTools({...connector,toolPolicies:input.toolPolicies,defaultToolPolicy})&&next.materializations?.some(record=>record.files.some(file=>file.name.endsWith(`-${hashData(connector.id).slice(0,16)}.json`))||next.profiles.some(profile=>profile.id===record.profileId&&profile.connectorIds.includes(connector.id))))conflict('Dematerialize direct profile snapshots before restricting tools. Tool policies require the managed agent bridge.');
+      if(toolPolicyHash(connector)===hashData({defaultToolPolicy,toolPolicies:input.toolPolicies}))conflict('Tool policies already have this state.');
+      connector.toolPolicies=structuredClone(input.toolPolicies);
+      if(defaultToolPolicy==='block')connector.defaultToolPolicy='block';else delete connector.defaultToolPolicy;
+      connector.updatedAt=timestamp;actualTarget=connector.id;
       // Policies authorize bridge calls, not process startup. Keep the execution
       // revision/hash/approval and discovery observations for the unchanged code.
       // The bridge separately fingerprints policies and rechecks every call.
