@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import {
@@ -182,7 +183,18 @@ try {
       definitionHash: definitionHash(counter),
       approveExecution: true,
     });
-    const listed = await agent.listTools();
+    // A warm bridge returns its previous catalog while discovery runs in the
+    // background. Wait for the new connector, not an unrelated list_changed
+    // notification from the registry watcher, before checking the full list.
+    const discoveryDeadline = Date.now() + 20000;
+    let listed = await agent.listTools();
+    while (
+      !listed.tools.some((tool) => tool.name === 'counter__increment') &&
+      Date.now() < discoveryDeadline
+    ) {
+      await delay(50);
+      listed = await agent.listTools();
+    }
     assert.equal(listed.tools.length, 2);
     const increment = listed.tools.find(
       (tool) => tool.name === 'counter__increment',
