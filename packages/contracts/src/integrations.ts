@@ -1,5 +1,6 @@
 import { z } from 'zod';
 export const ToolPolicySchema = z.enum(['allow', 'ask', 'block']);
+export const DefaultToolPolicySchema = z.enum(['allow', 'block']);
 export const ToolPolicyNameSchema = z
   .string()
   .min(1)
@@ -30,6 +31,8 @@ export const ToolPoliciesUpdateSchema = z.strictObject({
     .nonnegative()
     .max(Number.MAX_SAFE_INTEGER),
   toolPolicies: ToolPoliciesSchema,
+  // Omission by an older editor preserves the existing default.
+  defaultToolPolicy: DefaultToolPolicySchema.optional(),
 });
 export type ToolPolicy = z.infer<typeof ToolPolicySchema>;
 

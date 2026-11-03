@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { emptyState, openStateStore, type StateStore } from '@waleed/hub-core';
+import { profileState } from '../helpers/runtime.js';
 
 const directories: string[] = [];
 const stores: StateStore[] = [];
@@ -25,6 +26,21 @@ afterEach(async () => {
 });
 
 describe('atomic JSON state', () => {
+  it('reopens the persisted explicit default-block and allow exceptions without weakening them', async () => {
+    const directory = await temporary();
+    const store = await open(directory);
+    const state = profileState(['native']);
+    state.revision = 1;
+    state.connectors[0]!.defaultToolPolicy = 'block';
+    state.connectors[0]!.toolPolicies = { read: 'allow' };
+    await store.write(0, state);
+    await store.close();
+    const reopened = await open(directory);
+    const saved = (await reopened.read()).connectors[0]!;
+    expect(saved.defaultToolPolicy).toBe('block');
+    expect(saved.toolPolicies).toEqual({ read: 'allow' });
+    expect(saved.trustApproval).toEqual(state.connectors[0]!.trustApproval);
+  });
   it('locks out another writer, persists revisions, and retains five backups', async () => {
     const directory = await temporary();
     const store = await open(directory);

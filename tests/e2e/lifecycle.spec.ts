@@ -249,6 +249,53 @@ test('automatically shows tools after approval and reload, and persists all thre
   expect(report.methods).not.toContain('tools/call');
 });
 
+test('persists default-block while explicit Full permission remains an allow exception', async ({
+  page,
+}) => {
+  await save(page, {
+    id: 'fixture',
+    name: 'Fixture remote',
+    url: 'https://example.test/mcp',
+  });
+  await approve(page, 'fixture');
+  let row = page.getByTestId('connector-fixture');
+  await row.getByText('Tools & Permissions', { exact: false }).click();
+  await row
+    .getByLabel('Default tool policy', { exact: true })
+    .selectOption('block');
+  await expect(row.getByRole('status')).toContainText('Permissions saved.');
+  const tool = row.getByLabel('Policy for fixture_first', { exact: true });
+  await expect(tool).toHaveValue('block');
+  const toolCount = await row
+    .locator('select[aria-label^="Policy for "]')
+    .count();
+  const summary = row
+    .locator('summary')
+    .filter({ hasText: 'Tools & Permissions' });
+  await expect(summary).toContainText(
+    `${toolCount} tools · 0 Ask · ${toolCount} Blocked`,
+  );
+  await tool.selectOption('allow');
+  await expect(row.getByRole('status')).toContainText('Permissions saved.');
+  await expect(summary).toContainText(
+    `${toolCount} tools · 0 Ask · ${toolCount - 1} Blocked`,
+  );
+  await page.reload();
+  row = page.getByTestId('connector-fixture');
+  await expand(row);
+  await row.getByText('Tools & Permissions', { exact: false }).click();
+  await expect(
+    row.getByLabel('Default tool policy', { exact: true }),
+  ).toHaveValue('block');
+  await expect(
+    row.getByLabel('Policy for fixture_first', { exact: true }),
+  ).toHaveValue('allow');
+  const report = await (
+    await page.request.get('http://127.0.0.1:4193/api/fixture-report')
+  ).json();
+  expect(report.methods).not.toContain('tools/call');
+});
+
 test('a failed auth check does not erase a healthy connector and editing invalidates execution approval', async ({
   page,
 }) => {

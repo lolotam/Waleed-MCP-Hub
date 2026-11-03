@@ -4,6 +4,7 @@ import type { DockerProfiles } from '../adapters/docker-profile.js';
 import { HubError } from '../errors.js';
 import { approved, hashBytes, hashData, profileHash, requireProfile } from './registry.js';
 import { assertBinding } from '../auth/bindings.js';
+import { hasRestrictedTools } from './tool-policy.js';
 
 export class MaterializationFault extends HubError {
   constructor(readonly restored: boolean) { super('unavailable', 'External apply failed. Recovery status records whether the prior snapshot was restored.'); }
@@ -47,7 +48,7 @@ export function createMaterializer(options: { files: ManagedFiles; docker?: Dock
       };
       const selected = remove || profile.enabled === false ? [] : state.connectors.filter((connector) => connector.enabled && profile.connectorIds.includes(connector.id)).sort((a, b) => a.id.localeCompare(b.id));
       for (const connector of selected) {
-        if(Object.values(connector.toolPolicies??{}).some(policy=>policy!=='allow'))throw new HubError('unavailable','Restricted tools require the managed agent bridge; direct profile snapshots cannot enforce tool policies.');
+        if(hasRestrictedTools(connector))throw new HubError('unavailable','Restricted tools require the managed agent bridge; direct profile snapshots cannot enforce tool policies.');
         if (connector.executionMode === 'docker' && connector.portBindings?.length) throw new HubError('unavailable','Port-published images require the contained agent bridge, not a Docker catalog snapshot.');
         if (!approved(connector)) throw new HubError('conflict', 'Approve every enabled member definition before materializing.');
         if (Object.keys(connector.headerBindings).length) throw new HubError('unavailable', 'Secret-backed remote profile proxies require the verified P7 agent path; no values are written into Docker snapshots.');
