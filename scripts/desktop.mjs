@@ -120,6 +120,9 @@ const desktop = await startDesktop({
 log(
   desktop.reused ? 'reused running desktop' : `started backend ${desktop.pid}`,
 );
+// The launcher reads this line to end when another launcher shows the tray.
+if (desktop.reused && mode === 'attach')
+  process.stdout.write('wmh-desktop-reused\n');
 process.once('SIGINT', desktop.stop);
 process.once('SIGTERM', desktop.stop);
 await desktop.closed;

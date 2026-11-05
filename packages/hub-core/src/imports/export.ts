@@ -1,4 +1,8 @@
-import type { Connector, ConnectorExport } from '@waleed/contracts';
+import {
+  MAX_REQUEST_BYTES,
+  type Connector,
+  type ConnectorExport,
+} from '@waleed/contracts';
 
 // The hub export format: a versioned document of connectors without any
 // secret, approval, observation, install path or profile.
@@ -8,10 +12,6 @@ export const HUB_EXPORT_VERSION = 1;
 // 40 KiB that leaves room under the 48 KiB source limit of the importer.
 const MAX_PART_CONNECTORS = 32;
 const MAX_PART_BYTES = 40 * 1024;
-// The request body of the preview holds the part as a JSON string, so the
-// escaped text must stay under the body limit of the hub. A part of text
-// that is dominated by characters JSON escapes would grow past it.
-const MAX_REQUEST_BYTES = 64 * 1024;
 
 type CredentialFormat = 'raw' | 'bearer' | 'basic';
 
@@ -65,7 +65,8 @@ const requestBytes = (
   Buffer.byteLength(
     JSON.stringify({
       source: partText(connectors, part, parts),
-      expectedRevision: 0,
+      // The preview sends the current revision; measure the widest one.
+      expectedRevision: Number.MAX_SAFE_INTEGER,
     }),
     'utf8',
   );

@@ -269,7 +269,9 @@ launchers are saved as data only; convert them as described in
 
 **Connectors → Export** writes the registry to a JSON file you can keep or move
 to another machine. The file never contains a secret: no credential value, no
-OAuth token, no approval, no observation, no install path and no profile. What
+OAuth token, no approval, no observation, no profile and no install path of a
+managed package. The executable path and arguments of a native connector are
+exported as they are, so check them before you share the file. What
 it does contain are the **names** of the credentials a connector needs, so you
 know what to add again on the other side.
 

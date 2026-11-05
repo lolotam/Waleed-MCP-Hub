@@ -300,11 +300,14 @@ describe.skipIf(process.platform !== 'win32')('desktop control pipe', () => {
     await new Promise((settle) => setTimeout(settle, 1500));
     expect(child.exitCode).toBeNull();
 
+    const exited = new Promise((settle) =>
+      child.once('exit', (code) => settle(code)),
+    );
     host.stop();
     await host.closed;
     await expect(
       Promise.race([
-        new Promise((settle) => child.once('exit', (code) => settle(code))),
+        exited,
         new Promise((settle) => setTimeout(() => settle('timeout'), 8000)),
       ]),
     ).resolves.toBe(0);

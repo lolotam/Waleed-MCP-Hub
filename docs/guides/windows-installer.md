@@ -61,8 +61,10 @@ running. Right-click the icon for:
   again to retry.
 
 Only one tray icon is shown: the launchers share the per-user mutex
-`Local\WaleedMcpHub.Tray`. Starting the launcher again while a launcher holds
-that mutex only reopens the app window; the second launcher then exits. A
+`Local\WaleedMcpHub.Tray`. Starting the same installation again while a
+launcher holds that mutex only reopens the app window; the second launcher then
+exits. Starting a different installation hands the manager over to it, and its
+launcher takes the icon over once the old launcher ends. A
 launcher that starts while the mutex is still free but loses the race to it
 waits for its manager without showing an icon and takes the icon over when the
 first launcher ends.

@@ -29,13 +29,10 @@ namespace WaleedMcpHub
                 foreach (string file in new string[] { node, script, Path.Combine(root, "apps", "server", "dist", "main.js"), Path.Combine(root, "apps", "web", "dist", "index.html") })
                     if (!File.Exists(file)) throw new IOException("An application file is missing. Run Waleed-MCP-Hub-Setup.exe again.");
                 if (selfTest) return RunSelfTest(root, node);
-                // Another launcher already shows the tray, so this one only
-                // opens the window instead of staying resident beside it.
-                if (TrayContext.TrayIsShown()) return OpenWindow(root, node, script);
                 Process child = StartNode(root, node, "\"" + script + "\" --attach");
                 StringBuilder diagnostic = new StringBuilder();
-                BeginOutput(child, delegate(string line) { AppendDiagnostic(diagnostic, line); });
                 TrayContext tray = new TrayContext(root, node, script, child, diagnostic);
+                BeginOutput(child, delegate(string line) { AppendDiagnostic(diagnostic, line); }, tray.OnChildOutput);
                 Application.Run(tray);
                 return tray.ChildExitCode;
             }
@@ -43,16 +40,6 @@ namespace WaleedMcpHub
             {
                 if (!selfTest) MessageBox.Show(error.Message, "Waleed MCP Hub", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
-            }
-        }
-
-        private static int OpenWindow(string root, string node, string script)
-        {
-            using (Process process = StartNode(root, node, "\"" + script + "\""))
-            {
-                BeginOutput(process, null);
-                process.WaitForExit();
-                return process.ExitCode;
             }
         }
 
@@ -84,7 +71,12 @@ namespace WaleedMcpHub
         // pipe; the error lines are the only ones the launcher shows.
         internal static void BeginOutput(Process process, Action<string> onError)
         {
-            process.OutputDataReceived += delegate { };
+            BeginOutput(process, onError, null);
+        }
+
+        internal static void BeginOutput(Process process, Action<string> onError, Action<string> onOutput)
+        {
+            process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (onOutput != null && e.Data != null) onOutput(e.Data); };
             process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (onError != null && e.Data != null) onError(e.Data); };
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
@@ -193,6 +185,7 @@ namespace WaleedMcpHub
         private ToolStripMenuItem quitItem;
         private DateTime lastOpen = DateTime.MinValue;
         private bool quitting;
+        private bool redundant;
         private int childExitCode = 1;
 
         internal TrayContext(string root, string node, string script, Process child, StringBuilder diagnostic)
@@ -244,25 +237,24 @@ namespace WaleedMcpHub
             ShowTray();
         }
 
-        // A held tray mutex means a live launcher shows the icon. An abandoned
-        // one is taken over by the next launcher, so it does not count.
-        internal static bool TrayIsShown()
+        // desktop.mjs --attach prints this line when it attached to a manager
+        // of this installation that was already running.
+        private const string ReusedLine = "wmh-desktop-reused";
+
+        // A launcher that only reopened the window of a manager whose tray is
+        // already shown has nothing to add, so it ends instead of staying
+        // resident. A handoff from another installation never prints the line:
+        // its child becomes the manager and this launcher keeps the tray.
+        internal void OnChildOutput(string line)
         {
-            Mutex existing;
-            if (!Mutex.TryOpenExisting(TrayMutexName, out existing)) return false;
-            using (existing)
+            if (line != ReusedLine) return;
+            RunOnUiThread(delegate
             {
-                try
-                {
-                    if (!existing.WaitOne(0)) return true;
-                }
-                catch (AbandonedMutexException)
-                {
-                    // WaitOne acquired the abandoned mutex; release it below.
-                }
-                existing.ReleaseMutex();
-                return false;
-            }
+                if (tray != null || AcquireTrayMutex()) return;
+                redundant = true;
+                mutexTimer.Stop();
+                try { child.Kill(); } catch (InvalidOperationException) { }
+            });
         }
 
         private bool AcquireTrayMutex()
@@ -472,8 +464,12 @@ namespace WaleedMcpHub
             ResetQuitItem();
         }
 
+        // Only an abandoned quit resets the item, so the launcher stops
+        // treating a later manager exit as a requested one.
         private void ResetQuitItem()
         {
+            quitting = false;
+            quitTimer.Stop();
             if (quitItem == null) return;
             quitItem.Text = "Quit";
             quitItem.Enabled = true;
@@ -493,7 +489,7 @@ namespace WaleedMcpHub
             // Exit code -1 (0xFFFFFFFF) indicates external process termination
             // (taskkill/shutdown); only alert on actual crashes (> 0). A manager
             // that ended while it was stopping did not fail to start.
-            if (!quitting && code != 0 && code != -1)
+            if (!quitting && !redundant && code != 0 && code != -1)
                 MessageBox.Show("Waleed MCP Hub could not start.\n\n" + Launcher.ReadDiagnostic(diagnostic) + "\nSee %LOCALAPPDATA%\\WaleedMcpHub\\desktop.log for details.", BalloonText, MessageBoxButtons.OK, MessageBoxIcon.Error);
             ExitThread();
         }

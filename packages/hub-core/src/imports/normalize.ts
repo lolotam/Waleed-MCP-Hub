@@ -19,7 +19,7 @@ import {
   type PackageProposal,
   type RequiredCredentials,
 } from '@waleed/contracts';
-import { assertBinding } from '../auth/bindings.js';
+import { assertBinding } from './binding-rules.js';
 import { HubError } from '../errors.js';
 import { HUB_EXPORT_FORMAT } from './export.js';
 
@@ -230,6 +230,8 @@ function hubHeaderCredentials(
     const name = entry?.name;
     const format = entry?.format;
     if (
+      !entry ||
+      Object.keys(entry).some((key) => key !== 'name' && key !== 'format') ||
       typeof name !== 'string' ||
       (format !== 'raw' && format !== 'bearer' && format !== 'basic')
     ) {
@@ -355,6 +357,12 @@ const hubPackage = (
   const packageArguments = pkg?.arguments;
   if (!pkg) issues.push({ code: 'invalid_entry', field: 'package' });
   else {
+    if (
+      Object.keys(pkg).some(
+        (key) => !['name', 'version', 'entry', 'arguments'].includes(key),
+      )
+    )
+      issues.push({ code: 'unsupported_fields', field: 'package' });
     if (
       typeof packageName !== 'string' ||
       !proposalName.safeParse(packageName).success
@@ -1005,7 +1013,10 @@ export function normalizeImport(
                 )
               : /^[a-z0-9._-]+==\d+\.\d+\.\d+$/i.test(packageArgs[0] ?? '');
           if (!pinned) warnings.add('unpinned_package');
+          // A hub package connector runs through its installed entry, never
+          // through npx, so its arguments after the spec belong to the app.
           if (
+            !extra?.proposal &&
             argsOk(args) &&
             args.some((arg) => /^(?:-c|--call)(?:=|$)/.test(arg))
           )

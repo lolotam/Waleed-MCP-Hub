@@ -457,6 +457,63 @@ describe('the hub export and the hub import', () => {
     service.close();
   });
 
+  // PR #26 review: a managed package's own "-c" argument was refused as an
+  // npx inline program, so its export could not be imported again.
+  it('round trips a package connector whose arguments start with -c', () => {
+    const configured: Connector = {
+      ...managed,
+      arguments: [...managed.arguments!.slice(0, 2), '-c', 'config.json'],
+    };
+    const draft = normalizeImport(exportConnectors([configured]).parts[0]!);
+    try {
+      expect(draft.entries[0]!.issues).toEqual([]);
+      expect(draft.entries[0]!.packageProposal?.arguments).toEqual([
+        '-c',
+        'config.json',
+      ]);
+    } finally {
+      clearImport(draft);
+    }
+  });
+
+  it('refuses unknown fields inside a header credential or a package', () => {
+    const exported = JSON.parse(
+      exportConnectors([remote, managed]).parts[0]!,
+    ) as { connectors: Record<string, unknown>[] };
+    const [hubRemote, hubManaged] = exported.connectors;
+    const draft = normalizeImport(
+      JSON.stringify(
+        hubDocument([
+          {
+            ...hubRemote,
+            headerCredentials: [
+              { name: 'Authorization', format: 'bearer', value: 'x' },
+            ],
+          },
+          {
+            ...hubManaged,
+            package: {
+              ...(hubManaged!.package as object),
+              integrity: 'sha512-x',
+            },
+          },
+        ]),
+      ),
+    );
+    try {
+      expect(draft.entries[0]!.issues).toContainEqual({
+        code: 'invalid_bindings',
+        field: 'header',
+      });
+      expect(draft.entries[1]!.issues).toContainEqual({
+        code: 'unsupported_fields',
+        field: 'package',
+      });
+    } finally {
+      clearImport(draft);
+    }
+  });
+
   it('marks the proposal of an installed package connector', () => {
     const service = createImportService();
     const state = emptyState();

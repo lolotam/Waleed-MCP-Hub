@@ -66,7 +66,7 @@ hash has a state other than `untested` or `checking`.
   `Loading tools · 9 of 22 connectors · 41 %`, and once complete
   `Tools loaded · 22 connectors · 467 tools` plus a count of connectors that
   ended in a failure state (`error`, `timed_out`, `auth_required`,
-  `unsupported`, `cancelled`) as "N need attention".
+  `unsupported`, `cancelled`, `unavailable`) as "N need attention".
 - Determinate bar width animates with a CSS transition; while loading, a subtle
   moving sheen runs over the filled part. Both stop under
   `prefers-reduced-motion: reduce`.
