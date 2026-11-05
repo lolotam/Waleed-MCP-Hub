@@ -160,6 +160,77 @@ describe('approved capability jobs and isolated observations', () => {
     });
     await hub.close();
   });
+  it('gives file verification its own deadline before the handshake deadline starts', async () => {
+    vi.useFakeTimers();
+    const discover = vi.fn(async () => capabilities);
+    const runtime: CapabilityRuntime = {
+      // Longer than the 20 s handshake deadline, as a large managed install is.
+      verify: () => new Promise((resolve) => setTimeout(resolve, 25_000)),
+      discover,
+    };
+    const hub = createLifecycle(
+      memoryStore(profileState(['native'])),
+      Date.now,
+      createMemorySafetyLedger(),
+      { runtime },
+    );
+    const job = await hub.checks.start('connector-0', 'owner');
+    await vi.advanceTimersByTimeAsync(25_001);
+    await hub.checks.drain();
+    expect(hub.checks.job(job.id, 'owner')).toMatchObject({
+      state: 'succeeded',
+    });
+    expect(discover).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      { verified: true },
+    );
+    await hub.close();
+  });
+  it('times out a stalled verification and a stalled handshake after verification', async () => {
+    vi.useFakeTimers();
+    const stall = (signal: AbortSignal) =>
+      new Promise<never>((_resolve, reject) =>
+        signal.addEventListener(
+          'abort',
+          () => reject(new RuntimeFault('cancelled')),
+          { once: true },
+        ),
+      );
+    const discover = vi.fn(async (_connector: unknown, signal: AbortSignal) =>
+      stall(signal),
+    );
+    const stalledVerify = createLifecycle(
+      memoryStore(profileState(['native'])),
+      Date.now,
+      createMemorySafetyLedger(),
+      { runtime: { verify: (_c, signal) => stall(signal), discover } },
+    );
+    const first = await stalledVerify.checks.start('connector-0', 'owner');
+    await vi.advanceTimersByTimeAsync(120_001);
+    await stalledVerify.checks.drain();
+    expect(stalledVerify.checks.job(first.id, 'owner')).toMatchObject({
+      state: 'failed',
+      reason: 'timed_out',
+    });
+    expect(discover).not.toHaveBeenCalled();
+    await stalledVerify.close();
+
+    const stalledHandshake = createLifecycle(
+      memoryStore(profileState(['native'])),
+      Date.now,
+      createMemorySafetyLedger(),
+      { runtime: { verify: async () => undefined, discover } },
+    );
+    const second = await stalledHandshake.checks.start('connector-0', 'owner');
+    await vi.advanceTimersByTimeAsync(20_001);
+    await stalledHandshake.checks.drain();
+    expect(stalledHandshake.checks.job(second.id, 'owner')).toMatchObject({
+      state: 'failed',
+      reason: 'timed_out',
+    });
+    await stalledHandshake.close();
+  });
   it('journals owned-container cleanup and blocks recovery when cleanup is uncertain', async () => {
     const ledger = createMemorySafetyLedger();
     const hub = createLifecycle(

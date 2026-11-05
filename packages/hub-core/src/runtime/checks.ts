@@ -7,6 +7,11 @@ import { HubError } from '../errors.js';
 import { approved, definitionHash, hashData, requireConnector } from './registry.js';
 import { RuntimeFault, type CapabilityRuntime } from './capabilities.js';
 
+// A managed install of ~13k files takes 6-16 s to hash when several checks
+// run at once (measured with ssh-mcp 2.1.0), so hashing cannot share the
+// handshake deadline.
+export const DISCOVERY_DEADLINE_MS = 20_000;
+export const VERIFY_DEADLINE_MS = 120_000;
 function untested(connector: Connector): CapabilityObservation {
   return { connectorId: connector.id, revision: connector.revision, definitionHash: definitionHash(connector), state: 'untested', checkedAt: null, method: 'none', protocolVersion: null, tools: [], resourceCount: 0, promptCount: 0, reason: !connector.enabled ? 'disabled' : !approved(connector) ? 'approval_required' : 'none' };
 }
@@ -43,13 +48,21 @@ export function createRuntimeChecks(store: StateStore, safety: SafetyLedger, run
         }
         if (closed) controller.abort();
         observations.set(id, observed);
-        const timer = setTimeout(() => { job.reason = 'timed_out'; controller.abort(); }, 20_000);
+        const expire = () => { job.reason = 'timed_out'; controller.abort(); };
+        // Verification has its own deadline; the handshake deadline starts after it.
+        let timer = setTimeout(expire, runtime.verify ? VERIFY_DEADLINE_MS : DISCOVERY_DEADLINE_MS);
         const task = Promise.resolve().then(async () => {
           let result: CapabilityObservation = { ...observed };
           let uncertain = false;
           try {
             controller.signal.throwIfAborted();
-            const discovered = await runtime.discover(connector, controller.signal);
+            if (runtime.verify) {
+              await runtime.verify(connector, controller.signal);
+              controller.signal.throwIfAborted();
+              clearTimeout(timer);
+              timer = setTimeout(expire, DISCOVERY_DEADLINE_MS);
+            }
+            const discovered = await runtime.discover(connector, controller.signal, { verified: !!runtime.verify });
             if (controller.signal.aborted) throw new RuntimeFault(job.reason === 'timed_out' ? 'timed_out' : 'cancelled');
             result = { ...untested(connector), ...discovered, state: 'connected', checkedAt: new Date(now()).toISOString(), method: 'mcp_discovery', reason: 'none' }; job.state = 'succeeded';
           } catch (error) {
