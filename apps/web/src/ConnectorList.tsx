@@ -20,8 +20,10 @@ import {
   pollPackageJob,
 } from './api.js';
 import { compareVersions } from './versions.js';
+import { Icon } from './Icon.js';
 import {
   currentObservation,
+  isApproved,
   isDiscoveryEligible,
   settledObservation,
 } from './discovery-progress.js';
@@ -36,6 +38,19 @@ export function isManagedPackage(
   connector: ManagedConnector,
 ): connector is ManagedPackageConnector {
   return connector.executionMode === 'native' && !!connector.package;
+}
+
+// The target of a connector: the package, the command, the image or the
+// endpoint. The row and the search of the list read the same string.
+export function connectorTarget(connector: ManagedConnector): string {
+  const record = isManagedPackage(connector) ? connector.package : null;
+  return record
+    ? `npm ${record.name}@${record.version} · ${record.entry}`
+    : connector.executionMode === 'native'
+      ? [connector.executable, ...connector.arguments].join(' ')
+      : connector.executionMode === 'docker'
+        ? connector.image
+        : connector.endpoint;
 }
 
 // The results of the file verification of the hub.
@@ -94,6 +109,7 @@ export function editableDefinition(
 }
 export function ConnectorList({
   connectors,
+  visibleIds,
   revision,
   observations,
   profiles,
@@ -107,6 +123,9 @@ export function ConnectorList({
   openPackage,
 }: {
   connectors: ManagedConnector[];
+  // The rows the list shows. The whole list is still needed for the
+  // discovery of the eligible connectors.
+  visibleIds?: ReadonlySet<string>;
   revision: number;
   observations: CapabilityObservation[];
   profiles: Profile[];
@@ -333,19 +352,16 @@ export function ConnectorList({
       aborts.current.delete(controller);
     }
   }
+  // The rows the list shows; the whole list still drives the discovery.
+  const rows = visibleIds
+    ? connectors.filter((connector) => visibleIds.has(connector.id))
+    : connectors;
   return (
     <>
       <ul className="connector-list">
-        {connectors.map((connector) => {
-          const observation = observations.find(
-            (entry) =>
-              entry.connectorId === connector.id &&
-              entry.revision === connector.revision &&
-              entry.definitionHash === connector.executionHash,
-          );
-          const approval =
-            connector.trustApproval?.revision === connector.revision &&
-            connector.trustApproval.definitionHash === connector.executionHash;
+        {rows.map((connector) => {
+          const observation = currentObservation(connector, observations);
+          const approval = isApproved(connector);
           const secretBacked =
             Object.keys(connector.secretBindings).length > 0 ||
             Object.keys(connector.headerBindings).length > 0;
@@ -361,13 +377,7 @@ export function ConnectorList({
           // A managed package is a native connector with a package record.
           const record = isManagedPackage(connector) ? connector.package : null;
           const managed = record !== null;
-          const target = managed
-            ? `npm ${record.name}@${record.version} · ${record.entry}`
-            : connector.executionMode === 'native'
-              ? [connector.executable, ...connector.arguments].join(' ')
-              : connector.executionMode === 'docker'
-                ? connector.image
-                : connector.endpoint;
+          const target = connectorTarget(connector);
           const verification = verifications[sessionKey(connector)];
           const update = updates[sessionKey(connector)];
           const reinstall =
@@ -378,6 +388,34 @@ export function ConnectorList({
               observation?.reason === 'invalid_configuration');
           const expanded = open.has(connector.id);
           const panelId = `connector-panel-${connector.id}`;
+          // The notices of the panel share one compact callout list.
+          const updateJob = packageJobs[sessionKey(connector)];
+          const notices: Array<{ id: string; text: string; live?: boolean }> =
+            [];
+          if (managed)
+            notices.push({
+              id: 'managed',
+              text: `${MANAGED_PANEL}${reinstall ? ` ${REINSTALL_PANEL}` : ''}`,
+            });
+          if (update?.state === 'checking' && updateJob)
+            notices.push({
+              id: 'update',
+              text: `Update lookup: ${updateJob.phase.replaceAll('_', ' ')} · ${updateJob.progress.packages} packages`,
+              live: true,
+            });
+          if (observation?.reason && observation.reason !== 'none')
+            notices.push({
+              id: 'observation',
+              text: observation.reason.replaceAll('_', ' '),
+            });
+          if (secretBacked)
+            notices.push({
+              id: 'secrets',
+              text:
+                connector.executionMode === 'docker'
+                  ? 'Docker secret references are supported in snapshots; direct secret-backed image checks are unavailable.'
+                  : 'Protected credentials are resolved only for this connector. Save success is not authentication verification.',
+            });
           return (
             <li
               key={connector.id}
@@ -427,11 +465,7 @@ export function ConnectorList({
               </button>
               {expanded && (
                 <div className="connector-panel" id={panelId}>
-                  <div
-                    className="row-actions"
-                    role="group"
-                    aria-label={`Actions for ${connector.name}`}
-                  >
+                  <div className="connector-actions">
                     <ConnectorActions
                       connector={connector}
                       approval={approval}
@@ -526,36 +560,17 @@ export function ConnectorList({
                       </div>
                     )}
                   </dl>
-                  {managed && (
-                    <p className="notice">
-                      {MANAGED_PANEL}
-                      {reinstall ? ` ${REINSTALL_PANEL}` : ''}
-                    </p>
-                  )}
-                  {update?.state === 'checking' &&
-                    packageJobs[sessionKey(connector)] && (
-                      <p role="status" className="notice">
-                        Update lookup:{' '}
-                        {packageJobs[sessionKey(connector)]!.phase.replaceAll(
-                          '_',
-                          ' ',
-                        )}{' '}
-                        ·{' '}
-                        {packageJobs[sessionKey(connector)]!.progress.packages}{' '}
-                        packages
-                      </p>
-                    )}
-                  {observation?.reason && observation.reason !== 'none' && (
-                    <p className="notice">
-                      {observation.reason.replaceAll('_', ' ')}
-                    </p>
-                  )}
-                  {secretBacked && (
-                    <p className="notice">
-                      {connector.executionMode === 'docker'
-                        ? 'Docker secret references are supported in snapshots; direct secret-backed image checks are unavailable.'
-                        : 'Protected credentials are resolved only for this connector. Save success is not authentication verification.'}
-                    </p>
+                  {notices.length > 0 && (
+                    <ul className="callouts">
+                      {notices.map((notice) => (
+                        <li
+                          key={notice.id}
+                          aria-live={notice.live ? 'polite' : undefined}
+                        >
+                          {notice.text}
+                        </li>
+                      ))}
+                    </ul>
                   )}
                   <ToolPermissions
                     connector={connector}
@@ -663,161 +678,207 @@ function ConnectorActions({
 }) {
   const managedConnector = isManagedPackage(connector) ? connector : null;
   const record = managedConnector?.package ?? null;
+  // The capability check is the primary action of an enabled connector.
+  const capabilityButtonClass = connector.enabled ? 'small primary' : 'small';
   return (
     <>
-      {managed && (
+      <div className="action-group" role="group" aria-label="Run">
         <button
-          disabled={disabled}
-          title="Re-checks the installed files. No package code runs."
-          onClick={() => verify(connector)}
+          type="button"
+          className={capabilityButtonClass}
+          disabled={
+            disabled ||
+            checking ||
+            !runtime ||
+            !connector.enabled ||
+            !approval ||
+            (secretBacked && (!secrets || connector.executionMode === 'docker'))
+          }
+          onClick={() => check(connector.id)}
         >
-          Verify files
+          <Icon name="play" size={15} />
+          Test capabilities
         </button>
-      )}
-      {managed &&
-        (update?.state === 'found' ? (
-          <button
-            disabled={disabled || !managedConnector}
-            onClick={() => {
-              if (!managedConnector) return;
-              openPackage({
-                mode: 'replace',
-                purpose: 'update',
-                connector: managedConnector,
-                ...(update.version ? { version: update.version } : {}),
-              });
-            }}
-          >
-            Update to {update.version}
-          </button>
-        ) : update?.state === 'up_to_date' ? (
-          <button disabled={disabled} onClick={() => checkUpdate(connector)}>
-            Up to date · check again
-          </button>
-        ) : (
-          <button
-            disabled={disabled || update?.state === 'checking'}
-            onClick={() => checkUpdate(connector)}
-          >
-            {update?.state === 'checking'
-              ? 'Checking for update…'
-              : 'Check for update'}
-          </button>
-        ))}
-      {managed && reinstall && record && managedConnector && (
         <button
-          disabled={disabled}
+          type="button"
+          className="small"
+          disabled={disabled || !connector.enabled || approval}
           onClick={() =>
-            openPackage({
-              mode: 'replace',
-              purpose: 'reinstall',
-              connector: managedConnector,
-              version: record.version,
+            operate({
+              title: 'Approve exact execution definition',
+              operation: {
+                kind: 'approve_connector',
+                connectorId: connector.id,
+                expectedConnectorRevision: connector.revision,
+                definitionHash: connector.executionHash,
+                approveExecution: true,
+              },
+              context: editableDefinition(connector),
             })
           }
         >
-          Reinstall
+          <Icon name="check" size={15} />
+          Approve execution
         </button>
-      )}
-      <button
-        disabled={disabled || !secrets}
-        title={
-          !secrets
-            ? 'A protected credential backend is unavailable.'
-            : 'Manage write-only credentials and supported OAuth.'
-        }
-        onClick={() => authenticate(connector)}
-      >
-        Authentication
-      </button>
-      <button
-        disabled={disabled}
-        onClick={() =>
-          operate({
-            title: 'Edit connector',
-            operation: {
-              kind: 'edit_connector',
-              connectorId: connector.id,
-              definition: editableDefinition(connector),
-            },
-            editor: 'definition',
-            context: managed
-              ? { ...editableDefinition(connector), effect: MANAGED_PANEL }
-              : editableDefinition(connector),
-          })
-        }
-      >
-        Edit
-      </button>
-      <button
-        disabled={disabled || !connector.enabled || approval}
-        onClick={() =>
-          operate({
-            title: 'Approve exact execution definition',
-            operation: {
-              kind: 'approve_connector',
-              connectorId: connector.id,
-              expectedConnectorRevision: connector.revision,
-              definitionHash: connector.executionHash,
-              approveExecution: true,
-            },
-            context: editableDefinition(connector),
-          })
-        }
-      >
-        Approve execution
-      </button>
-      <button
-        disabled={
-          disabled ||
-          checking ||
-          !runtime ||
-          !connector.enabled ||
-          !approval ||
-          (secretBacked && (!secrets || connector.executionMode === 'docker'))
-        }
-        onClick={() => check(connector.id)}
-      >
-        Test capabilities
-      </button>
-      <button
-        disabled={disabled}
-        onClick={() =>
-          operate({
-            title: connector.enabled ? 'Disable connector' : 'Enable connector',
-            operation: {
-              kind: 'set_connector_enabled',
-              connectorId: connector.id,
-              enabled: !connector.enabled,
-            },
-            context: {
-              effect:
-                'Changes desired state only. Reapply affected profiles and reconnect existing clients. Credentials are retained.',
-            },
-          })
-        }
-      >
-        {connector.enabled ? 'Disable' : 'Enable'}
-      </button>
-      <button
-        disabled={disabled}
-        onClick={() =>
-          operate({
-            title: 'Remove connector definition',
-            operation: {
-              kind: 'remove_connector',
-              connectorId: connector.id,
-            },
-            context: {
-              effect: managed
-                ? 'Remove definition and desired memberships, not credentials or provider authorization. Reapply affected profiles. Its install folder is deleted.'
-                : 'Remove definition and desired memberships, not credentials or provider authorization. Reapply affected profiles.',
-            },
-          })
-        }
-      >
-        Remove
-      </button>
+      </div>
+      <div className="action-group" role="group" aria-label="Configure">
+        {managed && (
+          <button
+            type="button"
+            className="small"
+            disabled={disabled}
+            title="Re-checks the installed files. No package code runs."
+            onClick={() => verify(connector)}
+          >
+            <Icon name="package" size={15} />
+            Verify files
+          </button>
+        )}
+        {managed &&
+          (update?.state === 'found' ? (
+            <button
+              type="button"
+              className="small"
+              disabled={disabled || !managedConnector}
+              onClick={() => {
+                if (!managedConnector) return;
+                openPackage({
+                  mode: 'replace',
+                  purpose: 'update',
+                  connector: managedConnector,
+                  ...(update.version ? { version: update.version } : {}),
+                });
+              }}
+            >
+              <Icon name="download" size={15} />
+              Update to {update.version}
+            </button>
+          ) : update?.state === 'up_to_date' ? (
+            <button
+              type="button"
+              className="small"
+              disabled={disabled}
+              onClick={() => checkUpdate(connector)}
+            >
+              <Icon name="refresh" size={15} />
+              Up to date · check again
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="small"
+              disabled={disabled || update?.state === 'checking'}
+              onClick={() => checkUpdate(connector)}
+            >
+              <Icon name="refresh" size={15} />
+              {update?.state === 'checking'
+                ? 'Checking for update…'
+                : 'Check for update'}
+            </button>
+          ))}
+        {managed && reinstall && record && managedConnector && (
+          <button
+            type="button"
+            className="small"
+            disabled={disabled}
+            onClick={() =>
+              openPackage({
+                mode: 'replace',
+                purpose: 'reinstall',
+                connector: managedConnector,
+                version: record.version,
+              })
+            }
+          >
+            <Icon name="refresh" size={15} />
+            Reinstall
+          </button>
+        )}
+        <button
+          type="button"
+          className="small"
+          disabled={disabled || !secrets}
+          title={
+            !secrets
+              ? 'A protected credential backend is unavailable.'
+              : 'Manage write-only credentials and supported OAuth.'
+          }
+          onClick={() => authenticate(connector)}
+        >
+          <Icon name="key" size={15} />
+          Authentication
+        </button>
+        <button
+          type="button"
+          className="small"
+          disabled={disabled}
+          onClick={() =>
+            operate({
+              title: 'Edit connector',
+              operation: {
+                kind: 'edit_connector',
+                connectorId: connector.id,
+                definition: editableDefinition(connector),
+              },
+              editor: 'definition',
+              context: managed
+                ? { ...editableDefinition(connector), effect: MANAGED_PANEL }
+                : editableDefinition(connector),
+            })
+          }
+        >
+          <Icon name="edit" size={15} />
+          Edit
+        </button>
+      </div>
+      <div className="action-group" role="group" aria-label="Danger">
+        <button
+          type="button"
+          className="small ghost"
+          disabled={disabled}
+          onClick={() =>
+            operate({
+              title: connector.enabled
+                ? 'Disable connector'
+                : 'Enable connector',
+              operation: {
+                kind: 'set_connector_enabled',
+                connectorId: connector.id,
+                enabled: !connector.enabled,
+              },
+              context: {
+                effect:
+                  'Changes desired state only. Reapply affected profiles and reconnect existing clients. Credentials are retained.',
+              },
+            })
+          }
+        >
+          <Icon name="power" size={15} />
+          {connector.enabled ? 'Disable' : 'Enable'}
+        </button>
+        <button
+          type="button"
+          className="small danger"
+          disabled={disabled}
+          onClick={() =>
+            operate({
+              title: 'Remove connector definition',
+              operation: {
+                kind: 'remove_connector',
+                connectorId: connector.id,
+              },
+              context: {
+                effect: managed
+                  ? 'Remove definition and desired memberships, not credentials or provider authorization. Reapply affected profiles. Its install folder is deleted.'
+                  : 'Remove definition and desired memberships, not credentials or provider authorization. Reapply affected profiles.',
+              },
+            })
+          }
+        >
+          <Icon name="trash" size={15} />
+          Remove
+        </button>
+      </div>
     </>
   );
 }

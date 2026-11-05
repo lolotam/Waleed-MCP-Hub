@@ -27,14 +27,19 @@ export type DiscoveryProgressState = {
   percent: number;
 };
 
-// The rule of the automatic discovery: the connector is enabled and approved
-// for exactly its current revision and definition hash.
-export function isDiscoveryEligible(connector: ManagedConnector): boolean {
+// The approval rule: the trust approval must belong to the current revision
+// and definition hash of the connector.
+export function isApproved(connector: ManagedConnector): boolean {
   return (
-    connector.enabled &&
     connector.trustApproval?.revision === connector.revision &&
     connector.trustApproval.definitionHash === connector.executionHash
   );
+}
+
+// The rule of the automatic discovery: the connector is enabled and approved
+// for exactly its current revision and definition hash.
+export function isDiscoveryEligible(connector: ManagedConnector): boolean {
+  return connector.enabled && isApproved(connector);
 }
 
 // The observation of the current revision and definition hash of a connector.

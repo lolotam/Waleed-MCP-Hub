@@ -25,8 +25,13 @@ import {
   OperationDialog,
   type OperationDialogInput,
 } from './OperationDialog.js';
-import { ConnectorList, type ManagedConnector } from './ConnectorList.js';
+import {
+  ConnectorList,
+  connectorTarget,
+  type ManagedConnector,
+} from './ConnectorList.js';
 import { DiscoveryProgress } from './DiscoveryProgress.js';
+import { currentObservation, isApproved } from './discovery-progress.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
@@ -65,6 +70,48 @@ const agentNames: Record<string, string> = {
   cursor: 'Cursor Agent',
 };
 
+// The status filter of the connector list. The filter is a set of toggles, not
+// a radio group: a page radio would be counted by the package browser test.
+const connectorFilters = [
+  { id: 'all', label: 'All' },
+  { id: 'ready', label: 'Ready' },
+  { id: 'loading', label: 'Loading' },
+  { id: 'attention', label: 'Needs attention' },
+  { id: 'disabled', label: 'Disabled' },
+] as const;
+type ConnectorFilter = (typeof connectorFilters)[number]['id'];
+// The status a connector shows in the list, and the filter it belongs to.
+type ConnectorStatus = Exclude<ConnectorFilter, 'all'>;
+
+// The status of one connector: a disabled connector is disabled, an enabled
+// connector without a valid approval needs attention, a connected connector is
+// ready, and one whose discovery has not settled yet is loading.
+function connectorStatus(
+  connector: ManagedConnector,
+  observations: CapabilityObservation[],
+): ConnectorStatus {
+  if (!connector.enabled) return 'disabled';
+  if (!isApproved(connector)) return 'attention';
+  const state =
+    currentObservation(connector, observations)?.state ?? 'untested';
+  if (state === 'connected') return 'ready';
+  if (state === 'untested' || state === 'checking') return 'loading';
+  return 'attention';
+}
+
+// The search of the list reads the name, the identifier and the target of a
+// connector.
+function connectorMatches(
+  connector: ManagedConnector,
+  search: string,
+): boolean {
+  const needle = search.trim().toLowerCase();
+  if (!needle) return true;
+  return `${connector.name} ${connector.id} ${connectorTarget(connector)}`
+    .toLowerCase()
+    .includes(needle);
+}
+
 // The longest wait on one full refresh of the hub state.
 const REFRESH_LIMIT_MS = 20_000;
 
@@ -96,6 +143,9 @@ export function App() {
   const [importing, setImporting] = useState(false);
   const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
   const [search, setSearch] = useState('');
+  // The search and the status filter of the connector list.
+  const [connectorSearch, setConnectorSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<ConnectorFilter>('all');
 
   // The newest refresh owns the page, and every refresh is bounded, so a
   // stalled hub never leaves the page loading. See latestRunner.
@@ -188,6 +238,20 @@ export function App() {
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
+  // The connector list shows the rows the search and the status filter keep.
+  const visibleConnectors = connectors.filter(
+    (connector) =>
+      connectorMatches(connector, connectorSearch) &&
+      (statusFilter === 'all' ||
+        connectorStatus(connector, observations) === statusFilter),
+  );
+  const visibleIds = new Set(
+    visibleConnectors.map((connector) => connector.id),
+  );
+  const clearConnectorFilters = () => {
+    setConnectorSearch('');
+    setStatusFilter('all');
+  };
 
   return (
     <div className="app-shell">
@@ -213,6 +277,8 @@ export function App() {
               onClick={() => {
                 setPage(item);
                 setSearch('');
+                setConnectorSearch('');
+                setStatusFilter('all');
               }}
             >
               <Icon name={iconNames[index]!} />
@@ -270,21 +336,26 @@ export function App() {
               </button>
             ) : page === 'Connectors' ? (
               <div className="action-with-help">
-                <button
-                  disabled={loading || !!error || recoveryBlocked}
-                  onClick={() => setManual(true)}
-                >
-                  Add Manual MCP
-                </button>
-                <button
-                  className="primary"
-                  disabled={loading || !!error}
-                  onClick={() => setImporting(true)}
-                  aria-describedby="add-help"
-                >
-                  <Icon name="plus" size={18} />
-                  Add connector
-                </button>
+                <div className="page-actions">
+                  <button
+                    type="button"
+                    disabled={loading || !!error || recoveryBlocked}
+                    onClick={() => setManual(true)}
+                  >
+                    <Icon name="upload" size={16} />
+                    Add Manual MCP
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={loading || !!error}
+                    onClick={() => setImporting(true)}
+                    aria-describedby="add-help"
+                  >
+                    <Icon name="plus" size={18} />
+                    Add connector
+                  </button>
+                </div>
                 <small id="add-help">
                   Preview first · saving and execution are separate
                 </small>
@@ -305,12 +376,11 @@ export function App() {
           <div className="foundation-notice">
             <Icon name="shield" />
             <div>
-              <strong>A safe starting point.</strong>{' '}
               {bootstrap?.capabilities.discovery
-                ? 'Discovery does not execute connectors. Save, exact execution approval, protected credentials, profile apply and capability checks are separate actions. Pilot adoption and agent synchronization stay disabled.'
+                ? 'Discovery does not execute connectors; saving, exact execution approval, protected credentials, profile apply and capability checks are separate actions, and pilot adoption and agent synchronization stay disabled.'
                 : bootstrap?.capabilities.agentApply
-                  ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly. Agent integration verifies configuration only; reconnect and trust remain agent-controlled.'
-                  : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly. Capability tests use available runtime adapters; agent synchronization remains disabled.'}
+                  ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; agent integration verifies configuration only, and reconnect and trust remain agent-controlled.'
+                  : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; capability tests use available runtime adapters, and agent synchronization remains disabled.'}
             </div>
             <span className="read-only-tag">Explicit actions only</span>
           </div>
@@ -367,37 +437,56 @@ export function App() {
                   aria-labelledby="connector-list-title"
                 >
                   <div className="list-toolbar">
-                    <h2 id="connector-list-title">
-                      Your connectors{' '}
-                      <span className="count">{connectors.length}</span>
-                    </h2>
-                    <span className="muted">
-                      Desired state · not a live verification
-                    </span>
-                  </div>
-                  <div className="panel-footer">
-                    Definitions, verification and desired profile membership
+                    <div className="list-toolbar-title">
+                      <h2 id="connector-list-title">
+                        Your connectors{' '}
+                        <span className="count">
+                          {visibleConnectors.length}
+                        </span>
+                      </h2>
+                      {visibleConnectors.length !== connectors.length && (
+                        <span className="muted">of {connectors.length}</span>
+                      )}
+                      <span className="muted">
+                        Desired state · not a live verification
+                      </span>
+                    </div>
+                    <div className="list-toolbar-controls">
+                      <div className="search">
+                        <Icon name="search" size={16} />
+                        <input
+                          type="search"
+                          aria-label="Search connectors"
+                          placeholder="Name, id or target…"
+                          value={connectorSearch}
+                          onChange={(event) =>
+                            setConnectorSearch(event.target.value)
+                          }
+                        />
+                      </div>
+                      <div
+                        className="segmented"
+                        role="group"
+                        aria-label="Filter connectors by status"
+                      >
+                        {connectorFilters.map((filter) => (
+                          <button
+                            key={filter.id}
+                            type="button"
+                            aria-pressed={statusFilter === filter.id}
+                            onClick={() => setStatusFilter(filter.id)}
+                          >
+                            {filter.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                   <DiscoveryProgress
                     connectors={connectors}
                     observations={observations}
                   />
-                  {connectors.length ? (
-                    <ConnectorList
-                      connectors={connectors}
-                      revision={bootstrap?.revision ?? 0}
-                      observations={observations}
-                      observe={setObservations}
-                      profiles={profiles}
-                      disabled={recoveryBlocked}
-                      runtime={!!bootstrap?.capabilities.runtimeChecks}
-                      secrets={!!bootstrap?.capabilities.secrets}
-                      authenticate={setAuthentication}
-                      operate={setOperation}
-                      refresh={refresh}
-                      openPackage={setPackageSeed}
-                    />
-                  ) : (
+                  {connectors.length === 0 ? (
                     <div className="empty-state">
                       <div className="empty-icon">
                         <Icon name="connectors" size={28} />
@@ -415,11 +504,52 @@ export function App() {
                         Creating a profile does not register tools with agents.
                       </small>
                     </div>
+                  ) : (
+                    // The list stays mounted while a filter hides every row:
+                    // it owns the automatic discovery of all connectors.
+                    <>
+                      {visibleConnectors.length === 0 && (
+                        <div
+                          className="empty-state"
+                          data-testid="connector-no-match"
+                        >
+                          <div className="empty-icon">
+                            <Icon name="filter" size={28} />
+                          </div>
+                          <h2>No connectors match</h2>
+                          <p>
+                            No connector matches the current search and status
+                            filter.
+                          </p>
+                          <button type="button" onClick={clearConnectorFilters}>
+                            Clear filters
+                          </button>
+                        </div>
+                      )}
+                      <ConnectorList
+                        connectors={connectors}
+                        visibleIds={visibleIds}
+                        revision={bootstrap?.revision ?? 0}
+                        observations={observations}
+                        observe={setObservations}
+                        profiles={profiles}
+                        disabled={recoveryBlocked}
+                        runtime={!!bootstrap?.capabilities.runtimeChecks}
+                        secrets={!!bootstrap?.capabilities.secrets}
+                        authenticate={setAuthentication}
+                        operate={setOperation}
+                        refresh={refresh}
+                        openPackage={setPackageSeed}
+                      />
+                    </>
                   )}
                   <div className="panel-footer">
                     <Icon name="lock" size={15} />
                     Saving is not execution. Capability discovery calls no
                     tools.
+                    <span className="panel-footer-note">
+                      Definitions, verification and desired profile membership
+                    </span>
                   </div>
                 </section>
               )}

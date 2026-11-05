@@ -13,6 +13,16 @@ const paths = {
   check: 'm5 12 4 4L19 6',
   clock: 'M12 8v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
   lock: 'M6 10h12v11H6V10Zm3 0V6a3 3 0 0 1 6 0v4',
+  play: 'M8 5v14l11-7L8 5Z',
+  edit: 'M4 20h4L20 8l-4-4L4 16v4Z',
+  key: 'M15.5 8.5a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM11 12l9 9m-3-3 2-2m-5 5 2-2',
+  trash: 'M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13M10 11v5M14 11v5',
+  power: 'M12 3v9M6.9 6.9a7.5 7.5 0 1 0 10.2 0',
+  download: 'M12 4v10m-4-4 4 4 4-4M5 19h14',
+  upload: 'M12 20V10m-4 4 4-4 4 4M5 5h14',
+  refresh: 'M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5',
+  filter: 'M4 6h16l-6 7v5l-4 2v-7L4 6Z',
+  package: 'M12 3 3 8v8l9 5 9-5V8l-9-5Zm0 0v18M3 8l9 5 9-5',
 } as const;
 export function Icon({
   name,
