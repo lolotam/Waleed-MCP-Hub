@@ -29,6 +29,9 @@ namespace WaleedMcpHub
                 foreach (string file in new string[] { node, script, Path.Combine(root, "apps", "server", "dist", "main.js"), Path.Combine(root, "apps", "web", "dist", "index.html") })
                     if (!File.Exists(file)) throw new IOException("An application file is missing. Run Waleed-MCP-Hub-Setup.exe again.");
                 if (selfTest) return RunSelfTest(root, node);
+                // Another launcher already shows the tray, so this one only
+                // opens the window instead of staying resident beside it.
+                if (TrayContext.TrayIsShown()) return OpenWindow(root, node, script);
                 Process child = StartNode(root, node, "\"" + script + "\" --attach");
                 StringBuilder diagnostic = new StringBuilder();
                 BeginOutput(child, delegate(string line) { AppendDiagnostic(diagnostic, line); });
@@ -40,6 +43,16 @@ namespace WaleedMcpHub
             {
                 if (!selfTest) MessageBox.Show(error.Message, "Waleed MCP Hub", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
+            }
+        }
+
+        private static int OpenWindow(string root, string node, string script)
+        {
+            using (Process process = StartNode(root, node, "\"" + script + "\""))
+            {
+                BeginOutput(process, null);
+                process.WaitForExit();
+                return process.ExitCode;
             }
         }
 
@@ -159,7 +172,7 @@ namespace WaleedMcpHub
     // started. Only the launcher that owns the per-user mutex shows it.
     internal sealed class TrayContext : ApplicationContext
     {
-        private const string TrayMutexName = @"Local\WaleedMcpHub.Tray";
+        internal const string TrayMutexName = @"Local\WaleedMcpHub.Tray";
         private const string BalloonText = "Waleed MCP Hub";
         private readonly string root;
         private readonly string node;
@@ -192,8 +205,8 @@ namespace WaleedMcpHub
             // The hidden control owns the window handle that lets the
             // process-exit thread hand its work to the message loop.
             marshallerHandle = marshaller.Handle;
-            child.EnableRaisingEvents = true;
             child.Exited += delegate { OnChildExited(); };
+            child.EnableRaisingEvents = true;
             mutexTimer.Interval = 2000;
             mutexTimer.Tick += delegate { TryShowTray(); };
             mutexTimer.Start();
@@ -229,6 +242,27 @@ namespace WaleedMcpHub
             if (tray != null) return;
             if (!AcquireTrayMutex()) return;
             ShowTray();
+        }
+
+        // A held tray mutex means a live launcher shows the icon. An abandoned
+        // one is taken over by the next launcher, so it does not count.
+        internal static bool TrayIsShown()
+        {
+            Mutex existing;
+            if (!Mutex.TryOpenExisting(TrayMutexName, out existing)) return false;
+            using (existing)
+            {
+                try
+                {
+                    if (!existing.WaitOne(0)) return true;
+                }
+                catch (AbandonedMutexException)
+                {
+                    // WaitOne acquired the abandoned mutex; release it below.
+                }
+                existing.ReleaseMutex();
+                return false;
+            }
         }
 
         private bool AcquireTrayMutex()
@@ -420,9 +454,9 @@ namespace WaleedMcpHub
         {
             RunOnUiThread(delegate
             {
-                // 3 means the manager was already gone and 4 means it is busy;
-                // both keep waiting for the manager to end.
-                if (code == 3 || code == 4) return;
+                // 0 means the manager is stopping, 3 that it was already gone
+                // and 4 that it is busy; all keep waiting for it to end.
+                if (code == 0 || code == 3 || code == 4) return;
                 if (code == 5)
                     ShowNotice("This hub version cannot be stopped from the tray. Use Settings to stop the desktop manager.");
                 else ShowNotice("Could not reach the hub to stop it.");

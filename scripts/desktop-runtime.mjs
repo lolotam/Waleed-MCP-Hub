@@ -365,6 +365,11 @@ export async function startDesktop({
       }
     }
     fingerprint = await buildFingerprint(root);
+    // A quit that arrived while a restart awaited has nothing to stop.
+    if (closing) {
+      finalize();
+      return;
+    }
     backend = fork(join(root, 'apps/server/dist/main.js'), [], {
       execArgv: [],
       env: {

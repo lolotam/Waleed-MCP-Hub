@@ -42,8 +42,8 @@ may show publisher/reputation prompts. Signing requires a publisher certificate.
 The installer supports `--silent`, `--no-launch`, `--no-shortcuts`, and
 `--directory <absolute local folder>` for automated installation/verification.
 It does not register startup, alter PATH, install services, configure agents,
-or install external applications. The launcher can add a startup entry later,
-when the tray menu asks for it.
+or install external applications. The launcher itself turns **Start with
+Windows** on the first time it runs (see below); turn it off in its tray menu.
 
 ## The tray icon
 
@@ -61,8 +61,11 @@ running. Right-click the icon for:
   again to retry.
 
 Only one tray icon is shown: the launchers share the per-user mutex
-`Local\WaleedMcpHub.Tray`. A second launcher waits for its manager without
-showing an icon and takes the icon over when the first launcher ends.
+`Local\WaleedMcpHub.Tray`. Starting the launcher again while a launcher holds
+that mutex only reopens the app window; the second launcher then exits. A
+launcher that starts while the mutex is still free but loses the race to it
+waits for its manager without showing an icon and takes the icon over when the
+first launcher ends.
 
 ## Start with Windows
 
