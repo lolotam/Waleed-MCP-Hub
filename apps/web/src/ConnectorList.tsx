@@ -20,6 +20,11 @@ import {
   pollPackageJob,
 } from './api.js';
 import { compareVersions } from './versions.js';
+import {
+  currentObservation,
+  isDiscoveryEligible,
+  settledObservation,
+} from './discovery-progress.js';
 
 export type ManagedConnector = Connector & { executionHash: string };
 // A managed package is a native connector with a package record.
@@ -140,26 +145,9 @@ export function ConnectorList({
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
     if (!runtime || disabled) return;
-    const eligible = connectors.filter(
-      (connector) =>
-        connector.enabled &&
-        connector.trustApproval?.revision === connector.revision &&
-        connector.trustApproval.definitionHash === connector.executionHash,
-    );
+    const eligible = connectors.filter(isDiscoveryEligible);
     if (
-      !eligible.some((connector) => {
-        const current = observations.find(
-          (entry) =>
-            entry.connectorId === connector.id &&
-            entry.revision === connector.revision &&
-            entry.definitionHash === connector.executionHash,
-        );
-        return (
-          !current ||
-          current.state === 'untested' ||
-          current.state === 'checking'
-        );
-      })
+      eligible.every((connector) => settledObservation(connector, observations))
     )
       return;
     const controller = new AbortController();
@@ -226,19 +214,47 @@ export function ConnectorList({
   async function check(id: string) {
     setChecking(true);
     setError('');
+    // The observation the window holds before the check: it comes back when
+    // the refresh after the check fails, so the synthetic "checking" state
+    // never outlives the check.
+    const observationsBeforeCheck = observations;
+    const target = connectors.find((connector) => connector.id === id);
+    const observation = target && currentObservation(target, observations);
+    // The observation of this connector says "checking" while the check runs,
+    // so the discovery bar leaves its final state for its whole duration.
+    if (observation) {
+      const checking: CapabilityObservation = {
+        ...observation,
+        state: 'checking',
+      };
+      observe(
+        observations.map((entry) => (entry === observation ? checking : entry)),
+      );
+    }
     try {
       let current = await api<RuntimeJob>(`/api/connectors/${id}/check`, {});
       setJob(current);
-      const deadline = Date.now() + 65_000;
+      // The job is read until it is no longer running: the verification and
+      // the handshake of the hub have their own deadlines.
+      const deadline = Date.now() + 150_000;
       while (current.state === 'running' && Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 200));
         current = await api<RuntimeJob>(`/api/runtime/jobs/${current.id}`);
         setJob(current);
       }
-      await refresh();
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Check failed.');
     } finally {
+      // The check is over either way: the real observation replaces the
+      // synthetic one, or the observation from before the check comes back.
+      try {
+        if ((await refresh()) === false) observe(observationsBeforeCheck);
+      } catch (failure) {
+        observe(observationsBeforeCheck);
+        setError(
+          failure instanceof Error ? failure.message : 'Check refresh failed.',
+        );
+      }
       setChecking(false);
     }
   }

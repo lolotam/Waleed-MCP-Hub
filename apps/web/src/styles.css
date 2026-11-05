@@ -1479,3 +1479,54 @@ dialog h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+/* The discovery progress: how far the tool discovery of the eligible
+   connectors has come. */
+.discovery-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 24px;
+  border-block-end: 1px solid var(--border);
+}
+.discovery-progress-text {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.discovery-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--muted-surface);
+  overflow: hidden;
+}
+.discovery-progress-fill {
+  position: relative;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--action);
+  overflow: hidden;
+  transition: width 300ms ease;
+}
+.discovery-progress.is-complete .discovery-progress-fill {
+  background: #0b6b3a;
+}
+/* A soft sheen moves over the filled part while the discovery runs. The
+   global reduced-motion rule turns the sheen and the width transition off. */
+.discovery-progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, #ffffff73, transparent);
+  transform: translateX(-100%);
+}
+.discovery-progress.is-loading .discovery-progress-fill::after {
+  animation: discovery-sheen 1.6s ease-in-out infinite;
+}
+@keyframes discovery-sheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}

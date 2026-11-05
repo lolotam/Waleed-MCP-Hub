@@ -26,6 +26,7 @@ import {
   type OperationDialogInput,
 } from './OperationDialog.js';
 import { ConnectorList, type ManagedConnector } from './ConnectorList.js';
+import { DiscoveryProgress } from './DiscoveryProgress.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
@@ -377,6 +378,10 @@ export function App() {
                   <div className="panel-footer">
                     Definitions, verification and desired profile membership
                   </div>
+                  <DiscoveryProgress
+                    connectors={connectors}
+                    observations={observations}
+                  />
                   {connectors.length ? (
                     <ConnectorList
                       connectors={connectors}
