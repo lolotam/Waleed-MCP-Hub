@@ -1,6 +1,6 @@
 # Waleed MCP Hub — Actual Project Status
 
-Updated: 2026-10-30
+Updated: 2026-11-05
 
 ## Completed in this project
 
@@ -90,6 +90,24 @@ Updated: 2026-10-30
   budgets in the process host and transports, label- and pipe-based Docker
   ownership with crash recovery, and Windows containment tests against the
   compiled bridge.
+- F04 Connectors refresh: a discovery progress bar above the connector list, a
+  Connectors page with search by name, id or target, a status filter (All, Ready,
+  Loading, Needs attention, Disabled) and connector actions grouped as Run,
+  Configure and Danger, and a shared button system with icons and visible focus
+  rings.
+- F04 export and import without secrets: the versioned hub export format
+  `waleed-mcp-hub/connectors` (version 1), the route `GET /api/connectors/export`
+  that packs the registry into part files, and **Load from file…** in the Add
+  connector dialog. The export carries credential names, never values.
+- F04 tray icon and start with Windows: the launcher shows one tray icon per
+  user, its menu offers **Open Waleed MCP Hub**, **Start with Windows** and
+  **Quit**, and the startup entry is the Run value `WaleedMcpHub` reconciled
+  with the preference file.
+- Package verification has its own 120-second deadline before the 20-second MCP
+  handshake deadline, so a large managed install no longer times out during
+  automatic discovery.
+- Registry activity rows are one line, and the top bar shows the installed
+  version.
 
 ## Not implemented
 
@@ -118,7 +136,12 @@ Updated: 2026-10-30
   the moved-folder hint, although only removing the binding fixes it; the UI
   should tell the two causes apart.
 - No secret-backed import save or adoption apply. P4 normalization stays data-only;
-  P5 no-secret saving is a distinct registry operation, not runtime approval.
+  P5 no-secret saving is a distinct registry operation, not runtime approval. The
+  F04 hub export format is value-free in the same way: it carries the names of
+  the credentials a connector needs, never their values.
+- The F04 export covers connector definitions only. Profiles, tool permissions,
+  execution approvals, capability observations and credential values are not
+  exported.
 - P3 adoption preview remains metadata-only, not an approved executable definition
   or a claim of complete source/profile equivalence. It is not silently fed into P4.
 - Native/wrapper version metadata may be unknown. P7 documents current Kilo/Kimi
@@ -137,7 +160,9 @@ Updated: 2026-10-30
 - No MCP usage metrics. Per-project/per-agent/CLI traffic accounting is recorded
   as follow-on R2 work in specification section 11.1 and the implementation backlog.
 - No real agent registration, Desktop shortcut installation or startup entry has
-  been performed. Real Edge App Mode window launch remains a manual gate.
+  been performed. The tray icon and the start-with-Windows entry are implemented,
+  but their manual Windows checklist has not been run, and the real Edge App Mode
+  window launch remains a manual gate.
 - No migration of the existing pilot.
 
 ## Work packages
@@ -156,6 +181,7 @@ Updated: 2026-10-30
 | P9 Windows startup/recovery             | Portable folder/launchers implemented; real Edge/shortcut manual gates remain pending         |
 | P10 final validation/rollout            | Not started                                                                                   |
 | F01 managed npm packages                | Merged (PR #3, #4); automated gates verified; live registry smoke pending                     |
+| F04 Connectors refresh, tray, export    | Implemented; the manual Windows tray checklist is still open                                  |
 
 ## Existing pilot — separate from this project's completion
 
@@ -169,11 +195,42 @@ by the pilot. This implementation does not change those facts.
 ## Next release gates
 
 Verify each installed agent's effective scope, trust/reconnect and MCP tool discovery
-only with explicit configuration-change consent. Exercise real Edge App Mode and the
-shortcut installer. Retain live-account OAuth, second-login DPAPI and live Docker
+only with explicit configuration-change consent. Exercise real Edge App Mode, the
+tray icon, the start-with-Windows entry and the shortcut installer. Retain
+live-account OAuth, second-login DPAPI and live Docker
 image cleanup gates. No pilot adoption apply or automated recovery is enabled;
 project/agent usage metrics stay R2. Changes land through reviewed GitHub pull
 requests; nothing is deployed.
+
+## F04 verification evidence (2026-11-05)
+
+- Four commits on `feat/hub-ui-refresh`: `868198d` (discovery progress bar),
+  `39e81b6` (button system and Connectors page), `7ce9a43` (export and import
+  without secrets) and `cb4e62c` (tray icon and start with Windows), landed
+  through a reviewed pull request.
+- `npm run typecheck`, `npx eslint apps packages tests scripts`, `npm run build`
+  and `npx prettier --check README.md docs` pass. `npm test` passes **1257 tests
+  across 81 files** with 3 skipped, and `npx playwright test` passes **38/38**
+  browser tests.
+- `tests/discovery-progress.test.ts` covers the eligible and settled rules, the
+  percentage rounded down, the failure states that count as needing attention
+  and an unavailable connector.
+- `tests/connector-export.test.ts` covers the round trip of a registry with one
+  connector of every kind, the part limits (32 connectors, 40 KiB of text, a
+  preview request body under 64 KiB), 33 connectors over two parts, the skipped
+  connector, a document that is not the hub format, the credential names the
+  Authentication dialog refuses, and the deselection of installed entries for
+  the hub format only.
+- `tests/desktop-control.test.ts` covers the control pipe: an attachment that
+  stays open until the manager stops, a final close that a tray does not block,
+  a stalled shutdown, the `quit` answer, the busy answers while closing, the
+  refused ninth attachment, every `requestQuit` outcome and a
+  `desktop.mjs --attach` child that stays alive while it is attached.
+- `tests/e2e/imports.spec.ts` exports the registry, reads the part back with the
+  file loader and checks that an installed entry comes back deselected.
+- The tray icon, the **Open Waleed MCP Hub** and **Quit** menu items and the
+  start-with-Windows entry need the manual Windows checklist, which has not been
+  run yet.
 
 ## F01 verification evidence (2026-10-30)
 

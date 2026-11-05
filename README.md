@@ -82,6 +82,21 @@ backend restarts are intentionally not enabled yet.
 - Manual Stdio/Docker/HTTP/SSE saving with protected env/headers, optional auto-sync
   and separate execution consent; partial saves return a connector ID to inspect.
 - Portable-folder desktop packaging, Windows launchers and opt-in shortcut installer.
+- A discovery progress bar above the connector list: how many eligible connectors
+  have finished loading their tools, the tool count when it ends, and how many
+  connectors need attention.
+- Connectors page search by name, id or target, and a status filter of All,
+  Ready, Loading, Needs attention and Disabled. The actions of a connector are
+  grouped as Run, Configure and Danger.
+- **Connectors → Export** (`GET /api/connectors/export`) writes the registry to a
+  JSON file in the versioned format `waleed-mcp-hub/connectors` (version 1) that
+  holds no secret value, split into part files; **Add connector → Load from
+  file…** reads such a file back through the reviewed preview and save flow.
+- A Windows tray icon on the `WaleedMcpHub.exe` launcher with **Open Waleed MCP
+  Hub**, **Start with Windows** and **Quit**: closing the Edge window keeps the
+  hub reachable.
+- The top bar shows the installed version, and each registry change is one
+  activity line.
 
 On first authenticated opening, **Copy MCPs from your agents** scans known supported
 user configuration files. Select source agents and individual MCPs, review their
@@ -98,8 +113,9 @@ Dismiss or finish the first-run panel to stop automatic rescanning on later open
 **Refresh** reloads its observations. Neither scan launches connector commands or calls
 tools. MCP discovery after copying is a separate automatic approved-definition check.
 No agent/connector command, gateway, image pull, package install, or upstream tool
-is launched by environment discovery. Pilot adoption and startup registration remain
-disabled/unimplemented. Agent integration is a separate explicit action in Agents.
+is launched by environment discovery. Environment discovery neither adopts the
+pilot nor registers a startup entry. Agent integration is a separate explicit
+action in Agents.
 Protected credential writes and supported
 OAuth are separate explicit actions. Opening the connector list automatically
 discovers capabilities for enabled, approved definitions. **Test capabilities**
@@ -124,8 +140,9 @@ Set `HUB_DISCOVERY_MODE=disabled` to run the foundation without the scan capabil
 Choose **Add connector** to paste strict JSON, enter an HTTPS endpoint, or provide
 a native executable and explicit JSON argument array. Guided npx/uvx inputs are
 data only; no package is downloaded or command run. Accepted JSON shapes are a
-single server, `mcpServers`, `servers`, OpenCode V2 `mcp.servers`, and supported Docker
-image/remote definitions (including a single `server` wrapper). JSONC/TOML, full
+single server, `mcpServers`, `servers`, OpenCode V2 `mcp.servers`, supported Docker
+image/remote definitions (including a single `server` wrapper), and the hub export
+of a registry. JSONC/TOML, full
 Docker profile snapshots, and raw JavaScript/Python/PowerShell programs are not
 import formats. Unknown fields and ambiguous transports block the affected entry.
 
@@ -154,7 +171,9 @@ or secret, updates Docker/agent files, approves execution, or fixes upstream aut
 
 1. Normalize with **Add connector**, then **Preview local save** and apply the
    separate registry preview. Private import values stay memory-only; save a
-   value-free definition, then enter credentials in **Authentication**.
+   value-free definition, then enter credentials in **Authentication**. A file
+   written by **Connectors → Export** loads with **Load from file…** and follows
+   the same path.
 2. Review the exact executable/image/endpoint and **Approve execution**. Edits and
    toggles invalidate approval. While the connector list is open, approval makes
    enabled connectors eligible for automatic capability discovery.
@@ -177,8 +196,10 @@ Known Chrome MCP launch arguments force `--isolated`; personal-browser attachmen
 flags are rejected. Generated sessions currently have a 120-second/1-MiB bound and
 require reconnect after that limit; they are not unrestricted long-lived gateways.
 
-Capability jobs have a 20-second deadline (scoped cleanup may take longer), two-job
-concurrency limit, 1-MiB aggregate output, eight pages and 256 items per category.
+Capability jobs have a 20-second deadline for the MCP handshake, after a managed
+package is verified under its own 120-second deadline (scoped cleanup may take
+longer), two-job concurrency limit, 1-MiB aggregate output, eight pages and 256
+items per category.
 HTTP/SSE requires public HTTPS, pinned validated DNS addresses and normal TLS;
 redirects and cookies are not forwarded. Only explicit declared credential bindings
 are resolved for approved checks. Docker runs approved
@@ -295,6 +316,17 @@ After building, launch `scripts\start-desktop.bat` or
 Microsoft Edge is required for `--app` mode. Launch tokens use `#launch=...`, never
 query parameters. Real Edge window/shortcut behavior remains manually unverified.
 
+The installed Windows launcher `WaleedMcpHub.exe` shows a tray icon with the
+tooltip "Waleed MCP Hub". Right-click it for **Open Waleed MCP Hub**, **Start with
+Windows** and **Quit**; a left click opens the window as well. **Start with
+Windows** writes the value `WaleedMcpHub` under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and the preference file
+`%LOCALAPPDATA%\WaleedMcpHub\launcher-settings.json` is the source of truth that
+is reconciled with that value on every start. Without that file the preference is
+on, so a first start adds the entry once the hub has run for 10 seconds. The tray icon and the startup entry
+still need the manual Windows checklist; see the
+[installer guide](docs/guides/windows-installer.md#the-tray-icon).
+
 ```powershell
 npm run package:desktop
 # Use the generated desktop-builds\Waleed-MCP-Hub-... folder:
@@ -305,15 +337,18 @@ npm run package:desktop
 
 Keep the generated folder intact and at a stable path: integrated agents reference
 its bundled Node/bridge by absolute path. Disconnect and reintegrate after a reviewed
-move/upgrade. No installer, service, startup task or execution-policy bypass is used.
+move/upgrade. The packaging installs no service, no startup task and no
+execution-policy bypass. The installed launcher turns **Start with Windows** on
+the first time it runs; turn it off in its tray menu.
 Shortcut installation refuses an existing shortcut unless `-Replace` is explicit.
 The runtime directory remains `%LOCALAPPDATA%\WaleedMcpHub` unless `HUB_DATA_DIR`
 is set; packaging does not copy credentials, personal configs or the pilot.
 
 Reopening uses a same-user/runtime-bound pipe to ask the existing backend for a
 fresh launch; the pipe returns only an acknowledgement. **Closing the window leaves
-the manager running. Settings → Stop desktop manager** performs protected graceful
-shutdown and releases locks. Independent agent bridges remain agent-owned. A port
+the manager running**, and with the Windows launcher the tray icon as well.
+**Settings → Stop desktop manager** performs protected graceful shutdown and
+releases locks. Independent agent bridges remain agent-owned. A port
 conflict never kills its owner. Never remove active locks to start another instance.
 
 ## Verification
@@ -422,7 +457,8 @@ usage metrics.
 - `scripts/` — development/runtime selection and boundary/credential/bundle checks.
 
 Agent adapters and non-developer launchers are implemented in the documented subset;
-optional Windows sign-in startup management remains later work.
+optional Windows sign-in startup is available from the tray menu of the installed
+launcher.
 
 The internal runner supports approved absolute local `.exe` paths only; `.cmd`
 and `.bat` shims are intentionally unsupported. Its fixed local PowerShell/.NET

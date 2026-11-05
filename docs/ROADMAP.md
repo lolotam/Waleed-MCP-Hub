@@ -102,15 +102,21 @@ targets from one screen.
     confirmation, and keep a local log of agent calls (tool, agent, duration,
     result size; never arguments that may hold secrets).
 13. **Forward resources and prompts**, not only tools.
-14. **Health and lifecycle.** Tray icon, start with Windows, background re-tests,
-    and a clear "needs re-auth" badge.
+14. **Health and lifecycle. Tray and startup done (F04).** The tray icon and start
+    with Windows are implemented. Background re-tests and a dedicated "needs
+    re-auth" badge are still open; a connector whose last check ended in a failure
+    state (including `auth_required`) is grouped under the list's **Needs
+    attention** filter.
 15. **Tool overrides.** Rename a tool or edit its description and annotations, as
     in MetaMCP.
 
 ## P2 — reach more people
 
-16. **Export / import setups without secrets**, so people can share a working
-    configuration and only re-enter their own keys.
+16. **Export / import setups without secrets. Connectors done (F04).** Connector
+    definitions export to a file with no secret value and import back through the
+    reviewed preview and save flow, so a working configuration can be moved and
+    only the keys re-entered. Profiles, tool permissions, approvals and
+    observations are not exported yet.
 17. **In-app help and a first-run wizard** that link to [the guides](guides/README.md).
 18. **More agents:** Windsurf, Cline, Roo Code, Zed, Gemini CLI, Goose, JetBrains AI,
     Warp.
