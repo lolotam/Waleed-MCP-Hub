@@ -42,4 +42,62 @@ may show publisher/reputation prompts. Signing requires a publisher certificate.
 The installer supports `--silent`, `--no-launch`, `--no-shortcuts`, and
 `--directory <absolute local folder>` for automated installation/verification.
 It does not register startup, alter PATH, install services, configure agents,
-or install external applications.
+or install external applications. The launcher itself turns **Start with
+Windows** on the first time it runs (see below); turn it off in its tray menu.
+
+## The tray icon
+
+The launcher that runs the desktop manager shows a tray icon with the tooltip
+"Waleed MCP Hub". Closing the Edge window leaves the hub and the tray icon
+running. Right-click the icon for:
+
+- **Open Waleed MCP Hub** — reopens the app window on the running hub. A left
+  click or a double click on the icon does the same.
+- **Start with Windows** — a checkable item. A checked item means the Hub
+  starts when you sign in to Windows.
+- **Quit** — stops the desktop manager. The item shows "Stopping…" while the
+  hub shuts down. If the hub is still stopping after 15 seconds, the icon
+  stays, Quit becomes available again, and a balloon asks you to choose Quit
+  again to retry.
+
+Only one tray icon is shown: the launchers share the per-user mutex
+`Local\WaleedMcpHub.Tray`. Starting the same installation again while a
+launcher holds that mutex only reopens the app window; the second launcher then
+exits. Starting a different installation hands the manager over to it, and its
+launcher takes the icon over once the old launcher ends. A
+launcher that starts while the mutex is still free but loses the race to it
+waits for its manager without showing an icon and takes the icon over when the
+first launcher ends.
+
+## Start with Windows
+
+The startup entry is a value named `WaleedMcpHub` under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. It points at the launcher
+of the installation you use and adds `--startup`, so signing in to Windows
+opens the Hub like a normal start.
+
+The preference file `%LOCALAPPDATA%\WaleedMcpHub\launcher-settings.json` is
+the source of truth:
+
+```json
+{ "startWithWindows": true }
+```
+
+Turning **Start with Windows** on or off in the tray menu writes this file
+first and then updates the registry value. The menu tick shows the real state
+of the registry value, and a balloon names the step that failed if the file or
+the registry could not be written. Every start reconciles the registry value
+with the preference file. A new installation only takes over the startup entry
+after its manager has stayed alive for 10 seconds, so a broken installation
+cannot take startup away from a working one.
+
+To remove the startup entry by hand:
+
+1. Open `regedit` and go to
+   `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`.
+2. Delete the `WaleedMcpHub` value.
+3. Set `"startWithWindows": false` in
+   `%LOCALAPPDATA%\WaleedMcpHub\launcher-settings.json`. The next start of the
+   launcher reads that preference and keeps the entry away. Deleting the file
+   instead turns the default back on: the next start writes `true` and adds
+   the entry again.

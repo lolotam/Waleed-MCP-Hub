@@ -96,10 +96,13 @@ async function main() {
           },
         )
       : undefined;
-  // Include adapter construction in startup cleanup: argument evaluation can
-  // reject before createHubServer's promise exists (for example unsafe scopes).
-  const hub = await (async () =>
-    createHubServer({
+  // Include adapter construction and the version read in startup cleanup:
+  // either can reject before createHubServer's promise exists.
+  const hub = await (async () => {
+    const { version } = JSON.parse(
+      await readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
+    return createHubServer({
       port,
       lifecycle: createLifecycle(
         store,
@@ -110,16 +113,8 @@ async function main() {
         ),
       ),
       webRoot,
-      updates: createUpdateChecker(
-        (
-          JSON.parse(
-            await readFile(
-              new URL('../../../package.json', import.meta.url),
-              'utf8',
-            ),
-          ) as { version: string }
-        ).version,
-      ),
+      updates: createUpdateChecker(version),
+      version,
       ...(process.env.HUB_DESKTOP === '1'
         ? {
             shutdown: () => {
@@ -128,7 +123,8 @@ async function main() {
           }
         : {}),
       ...(discovery ? { discovery } : {}),
-    }))().catch(async (error: unknown) => {
+    });
+  })().catch(async (error: unknown) => {
     await safety.close();
     await store.close();
     throw error;

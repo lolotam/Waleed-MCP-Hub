@@ -26,22 +26,25 @@ input,
 textarea {
   font: inherit;
 }
+/* The shared button system: the secondary style is the default, the
+   variants only change colour and border. */
 button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 8px 14px;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--surface);
   color: var(--text);
   font-weight: 600;
   cursor: pointer;
   transition:
     background 150ms,
-    border-color 150ms;
+    border-color 150ms,
+    color 150ms;
 }
 button:hover:not(:disabled) {
   background: var(--muted-surface);
@@ -57,14 +60,58 @@ button.primary {
 }
 button.primary:hover:not(:disabled) {
   background: #095f59;
+  border-color: #095f59;
+}
+button.primary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--action) 70%, #000);
+}
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+button.ghost:hover:not(:disabled) {
+  background: var(--muted-surface);
+  border-color: transparent;
+  color: var(--text);
+}
+button.ghost:active:not(:disabled) {
+  background: #e1e8ed;
+}
+button.danger {
+  background: var(--surface);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+button.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 80%, #000);
+}
+button.danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+}
+button.small {
+  min-height: 32px;
+  padding: 4px 10px;
+  font-size: 13px;
 }
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
+/* A disabled primary keeps its readable contrast instead of a faded teal. */
+button.primary:disabled {
+  background: var(--muted-surface);
+  border-color: var(--border);
+  color: var(--muted);
+  opacity: 1;
+}
 :focus-visible {
   outline: 2px solid var(--action);
   outline-offset: 3px;
+}
+button:focus-visible {
+  outline-offset: 2px;
 }
 input,
 textarea {
@@ -297,30 +344,36 @@ main {
   gap: 7px;
   flex-shrink: 0;
 }
+/* The header actions sit on one row; the export action joins them later. */
+.page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .action-with-help small {
   color: var(--muted);
-  max-width: 200px;
+  max-width: 320px;
   text-align: end;
-  font-size: 11px;
+  font-size: 12px;
 }
+/* The safety notice is one slim bar: an icon, one sentence and the tag. */
 .foundation-notice {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 16px 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 8px;
   color: var(--muted);
   font-size: 12px;
-  margin-block-end: 28px;
+  margin-block-end: 20px;
   background: var(--surface);
 }
 .foundation-notice > svg {
-  margin-block-start: 2px;
-}
-.foundation-notice strong {
   color: var(--text);
-  font-weight: 600;
+  flex-shrink: 0;
 }
 .read-only-tag {
   white-space: nowrap;
@@ -402,11 +455,12 @@ main {
 }
 .list-toolbar {
   min-height: 70px;
-  padding: 18px 24px;
+  padding: 14px 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px 16px;
+  flex-wrap: wrap;
   border-block-end: 1px solid var(--border);
 }
 .list-toolbar h2 {
@@ -415,8 +469,51 @@ main {
   gap: 9px;
   font-size: 14px;
 }
-.list-toolbar > span {
+.list-toolbar-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.list-toolbar-title .muted {
   font-size: 12px;
+}
+.list-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-inline-start: auto;
+}
+/* The status filter is a segmented set of toggles, not a radio group. */
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted-surface);
+}
+.segmented button {
+  min-height: 32px;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.segmented button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  border-color: transparent;
+}
+.segmented button[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--action);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .count {
   background: var(--muted-surface);
@@ -478,12 +575,16 @@ main {
 .panel-footer {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 13px 24px;
   background: #fafbfc;
   border-block-start: 1px solid var(--border);
   font-size: 11px;
   color: var(--muted);
+}
+.panel-footer-note {
+  margin-inline-start: auto;
 }
 .workspace-footer {
   display: flex;
@@ -613,7 +714,7 @@ main {
 }
 .connector-summary {
   display: grid;
-  grid-template-columns: 10px minmax(0, 1fr) 72px 248px 64px 16px;
+  grid-template-columns: 10px minmax(0, 1fr) 84px 216px 84px 16px;
   align-items: center;
   gap: 14px;
   width: 100%;
@@ -627,7 +728,7 @@ main {
   cursor: pointer;
 }
 .connector-summary:hover {
-  background: #f9fbfc;
+  background: var(--muted-surface);
 }
 .connector-summary:focus-visible {
   outline: 2px solid var(--action);
@@ -660,6 +761,19 @@ main {
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
+}
+/* The runtime of a connector is a chip, not a column of plain text. */
+.cell-runtime {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted-surface);
+  color: var(--muted);
+  font-size: 11px;
 }
 .cell-tools {
   text-align: end;
@@ -724,9 +838,41 @@ main {
   border-block-start: 1px solid var(--border);
   background: #fbfcfd;
 }
+/* The panel actions are one toolbar with a separator between the groups. */
+.connector-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.action-group + .action-group {
+  margin-inline-start: 8px;
+  padding-inline-start: 16px;
+  border-inline-start: 1px solid var(--border);
+}
+/* Below 1200 px the three groups no longer fit on one line: they stack and
+   keep a rule between them instead of a separator at the start of a row. */
+@media (max-width: 1200px) {
+  .action-group {
+    flex-basis: 100%;
+  }
+  .action-group + .action-group {
+    margin-inline-start: 0;
+    padding-inline-start: 0;
+    padding-block-start: 8px;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--border);
+  }
+}
 .connector-facts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 24px;
   margin: 0;
 }
@@ -749,8 +895,21 @@ main {
   font-family: Consolas, monospace;
   font-size: 12px;
 }
-.connector-panel .notice {
+/* The notices of a panel share one compact callout list. */
+.callouts {
+  display: grid;
+  gap: 6px;
   margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.callouts li {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
 }
 .connector-panel details {
   color: var(--muted);
@@ -792,6 +951,9 @@ main {
   .connector-panel {
     padding-inline: 16px;
   }
+  .connector-facts {
+    grid-template-columns: 1fr;
+  }
 }
 .connector-list pre {
   white-space: pre-wrap;
@@ -820,6 +982,35 @@ main {
   border-radius: 5px;
   color: var(--muted);
   font-size: 11px;
+  white-space: nowrap;
+}
+/* One compact line per registry change: operation · revision · time. */
+.activity-list.single-line li {
+  gap: 12px;
+  padding-block: 10px;
+  min-height: 0;
+  flex-wrap: nowrap;
+}
+.activity-list.single-line .row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.activity-list.single-line h3 {
+  flex-shrink: 0;
+  margin: 0;
+  font-size: 14px;
+}
+.activity-list.single-line .activity-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 12px;
+}
+.activity-list.single-line time {
+  flex-shrink: 0;
   white-space: nowrap;
 }
 .profile-list .muted,
@@ -1202,6 +1393,13 @@ dialog h2 {
     padding: 16px;
     flex-wrap: wrap;
   }
+  .list-toolbar-controls {
+    margin-inline-start: 0;
+    width: 100%;
+  }
+  .segmented button {
+    min-height: 36px;
+  }
   .table-heading {
     padding-inline: 16px;
     grid-template-columns: 1fr 1fr 1fr;
@@ -1449,4 +1647,55 @@ dialog h2 {
   padding: 12px 16px;
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+/* The discovery progress: how far the tool discovery of the eligible
+   connectors has come. */
+.discovery-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 24px;
+  border-block-end: 1px solid var(--border);
+}
+.discovery-progress-text {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.discovery-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--muted-surface);
+  overflow: hidden;
+}
+.discovery-progress-fill {
+  position: relative;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--action);
+  overflow: hidden;
+  transition: width 300ms ease;
+}
+.discovery-progress.is-complete .discovery-progress-fill {
+  background: #0b6b3a;
+}
+/* A soft sheen moves over the filled part while the discovery runs. The
+   global reduced-motion rule turns the sheen and the width transition off. */
+.discovery-progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, #ffffff73, transparent);
+  transform: translateX(-100%);
+}
+.discovery-progress.is-loading .discovery-progress-fill::after {
+  animation: discovery-sheen 1.6s ease-in-out infinite;
+}
+@keyframes discovery-sheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
 }

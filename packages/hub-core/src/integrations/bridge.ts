@@ -82,6 +82,8 @@ import {
   type RefusalCode,
 } from './agent-guide.js';
 import {
+  MAX_BRIDGE_TOOLS,
+  MAX_CATALOG_BYTES,
   parseToolCatalog,
   writeToolCatalogFile,
   type CatalogEntry,
@@ -1238,7 +1240,7 @@ function mergeCatalog(
     if (!entry || entry.hash !== definitionHash(connector)) continue;
     const tools = entry.tools
       .filter((tool) => toolPolicy(connector, tool.name) !== 'block')
-      .slice(0, 256 - count);
+      .slice(0, MAX_BRIDGE_TOOLS - count);
     next.set(connector.id, { hash: entry.hash, tools });
     count += tools.length;
   }
@@ -1388,7 +1390,7 @@ export function createAgentBridge(
   // listed with. Package verification and process startup used to consume
   // the whole deadline before later healthy peers were visited, so at most
   // four peers start at once, in registry order, within one shared deadline;
-  // the 256-tool cap is applied later, by the catalog merge and by publish. A
+  // the tool cap is applied later, by the catalog merge and by publish. A
   // connector that could not list maps to undefined, and so does one the
   // deadline ended the discovery before reaching. A connector the catalog
   // lacks is visited first, so a slow startup cannot keep starving the last
@@ -1409,7 +1411,9 @@ export function createAgentBridge(
       // not the order of the registry, so the cap is shared out in registry
       // order by the catalog merge and by publish, never here.
       const results = await Promise.all(
-        batch.map((connector) => discover(connector, snapshot, signal, 256)),
+        batch.map((connector) =>
+          discover(connector, snapshot, signal, MAX_BRIDGE_TOOLS),
+        ),
       );
       for (const [index, tools] of results.entries()) {
         const connector = batch[index]!;
@@ -1419,7 +1423,7 @@ export function createAgentBridge(
         );
       }
     }
-    // Every connector is visited until the deadline, even past 256 tools: one
+    // Every connector is visited until the deadline, even past the tool cap: one
     // that was never reached counts as a failure, so it is retried.
     if (signal.aborted)
       for (const connector of connectors)
@@ -1445,7 +1449,7 @@ export function createAgentBridge(
       )
         continue;
       for (const tool of entry.tools) {
-        if (tools.length >= 256) break;
+        if (tools.length >= MAX_BRIDGE_TOOLS) break;
         if (toolPolicy(connector, tool.name) !== 'block')
           register(connector, tool, tools);
       }
@@ -1789,7 +1793,8 @@ export function createAgentBridge(
   return bridgeServer;
 }
 // The largest protected file the bridge reads, and the chunk it reads it in.
-const protectedLimit = 4 * 1024 * 1024;
+// The tool catalog is the largest of them; its writer enforces the same bound.
+const protectedLimit = MAX_CATALOG_BYTES;
 const protectedChunk = 64 * 1024;
 
 // A protected file is opened for reading only. On POSIX the open never blocks

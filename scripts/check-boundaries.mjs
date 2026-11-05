@@ -68,6 +68,8 @@ const allowedImports = new Set([
   '@waleed/contracts',
   '../errors.js',
   './normalize.js',
+  './binding-rules.js',
+  './export.js',
 ]);
 for (const file of importFiles) {
   const ast = ts.createSourceFile(

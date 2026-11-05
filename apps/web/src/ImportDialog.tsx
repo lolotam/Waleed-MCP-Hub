@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from 'react';
 import type {
   ImportPreview,
   ImportSelection,
@@ -10,6 +16,9 @@ import { api, ApiError } from './api.js';
 import { Icon } from './Icon.js';
 
 type Mode = 'paste' | 'endpoint' | 'native';
+// The importer reads at most 48 KiB of source, so a file above that limit is
+// refused before it reaches the hub.
+const MAX_SOURCE_BYTES = 48 * 1024;
 function sourceFromForm(form: HTMLFormElement, mode: Mode): string {
   const data = new FormData(form);
   if (mode === 'paste') return String(data.get('source') ?? '');
@@ -48,6 +57,7 @@ export function ImportDialog({
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
+  const file = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
   const draftId = useRef<string | null>(null);
   const [mode, setMode] = useState<Mode>('paste');
@@ -146,6 +156,32 @@ export function ImportDialog({
     } finally {
       if (mounted.current) setBusy(false);
     }
+  }
+  // The file loader fills the same field as a paste, so the text is cleared
+  // exactly as a pasted text is cleared and no copy is kept anywhere.
+  function loadFile(event: ChangeEvent<HTMLInputElement>) {
+    const chosen = event.target.files?.[0];
+    event.target.value = '';
+    if (!chosen) return;
+    setError('');
+    if (chosen.size > MAX_SOURCE_BYTES) {
+      setError(
+        'The file is larger than 48 KiB. The importer reads at most 48 KiB of configuration.',
+      );
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const field = form.current?.elements.namedItem(
+        'source',
+      ) as HTMLTextAreaElement | null;
+      if (!field || !mounted.current) return;
+      field.value = String(reader.result ?? '');
+    };
+    reader.onerror = () => {
+      if (mounted.current) setError('The file could not be read.');
+    };
+    reader.readAsText(chosen);
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -321,6 +357,23 @@ export function ImportDialog({
             <div className="form-fields">
               {mode === 'paste' ? (
                 <>
+                  <div className="discovery-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        file.current?.click();
+                      }}
+                    >
+                      Load from file…
+                    </button>
+                  </div>
+                  <input
+                    ref={file}
+                    type="file"
+                    accept=".json,application/json"
+                    hidden
+                    onChange={loadFile}
+                  />
                   <label htmlFor="import-source">Configuration JSON</label>
                   <textarea
                     id="import-source"
@@ -516,6 +569,20 @@ export function ImportDialog({
                         />
                       </label>
                     </div>
+                    {entry.requiredCredentials &&
+                      (entry.requiredCredentials.environment.length > 0 ||
+                        entry.requiredCredentials.header.length > 0) && (
+                        <p className="muted">
+                          Needs credentials after saving:{' '}
+                          {[
+                            ...entry.requiredCredentials.environment,
+                            ...entry.requiredCredentials.header.map(
+                              (header) => header.name,
+                            ),
+                          ].join(', ')}
+                          .
+                        </p>
+                      )}
                     {entry.issues.length > 0 && (
                       <ul className="error-message">
                         {entry.issues.map((issue, index) => (

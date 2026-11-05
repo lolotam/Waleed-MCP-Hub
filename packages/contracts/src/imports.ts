@@ -114,7 +114,26 @@ export const ImportWarningSchema = z.enum([
   'destination_review',
   'secrets_memory_only',
   'disabled_entry',
+  'credentials_required',
+  'already_installed',
 ]);
+// The credential names an imported connector needs. The names only: no value
+// ever reaches an import, so the user adds the values after saving.
+export const RequiredCredentialsSchema = z.strictObject({
+  environment: z.array(z.string().min(1).max(100)).max(64),
+  header: z
+    .array(
+      z.strictObject({
+        name: z
+          .string()
+          .min(1)
+          .max(100)
+          .regex(/^[a-zA-Z_][a-zA-Z0-9_-]*$/),
+        format: z.enum(['raw', 'bearer', 'basic']),
+      }),
+    )
+    .max(64),
+});
 export const ImportEntrySchema = z.strictObject({
   key: Id,
   selected: z.boolean(),
@@ -122,6 +141,7 @@ export const ImportEntrySchema = z.strictObject({
   id: Id,
   definition: ImportDefinitionSchema.nullable(),
   packageProposal: PackageProposalSchema.nullable().optional(),
+  requiredCredentials: RequiredCredentialsSchema.optional(),
   issues: z.array(ImportIssueSchema).max(100),
   warnings: z.array(ImportWarningSchema).max(20),
   conflicts: z
@@ -158,7 +178,14 @@ export const ImportPreviewSchema = z.strictObject({
   id: z.uuid(),
   expectedRevision: Revision,
   expiresAt: z.iso.datetime(),
-  format: z.enum(['single', 'mcpServers', 'servers', 'opencode', 'docker']),
+  format: z.enum([
+    'single',
+    'mcpServers',
+    'servers',
+    'opencode',
+    'docker',
+    'hub',
+  ]),
   entries: z.array(ImportEntrySchema).min(1).max(32),
   secretReferences: z
     .array(
@@ -207,9 +234,26 @@ export const ImportPreviewSchema = z.strictObject({
       .max(3),
   }),
 });
+// The answer of the hub export: the serialized part files and the connectors
+// that no part can carry. A part never holds more than 32 connectors and stays
+// under the size the importer reads.
+export const ConnectorExportSchema = z.strictObject({
+  parts: z.array(z.string()).max(256),
+  skipped: z
+    .array(
+      z.strictObject({
+        id: Id,
+        name: z.string().max(100),
+        reason: z.literal('too_large'),
+      }),
+    )
+    .max(256),
+});
 export type ImportDefinition = z.infer<typeof ImportDefinitionSchema>;
 export type ImportEntry = z.infer<typeof ImportEntrySchema>;
 export type ImportIssue = z.infer<typeof ImportIssueSchema>;
 export type ImportWarning = z.infer<typeof ImportWarningSchema>;
 export type ImportPreview = z.infer<typeof ImportPreviewSchema>;
 export type ImportSelection = z.infer<typeof ImportSelectionSchema>;
+export type RequiredCredentials = z.infer<typeof RequiredCredentialsSchema>;
+export type ConnectorExport = z.infer<typeof ConnectorExportSchema>;

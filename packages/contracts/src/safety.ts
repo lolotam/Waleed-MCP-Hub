@@ -30,6 +30,7 @@ export const AuditRouteSchema = z.enum([
   'logout',
   'bootstrap',
   'connectors',
+  'connectors_export',
   'profiles',
   'agents',
   'activity',

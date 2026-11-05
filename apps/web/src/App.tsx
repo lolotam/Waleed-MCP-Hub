@@ -10,6 +10,7 @@ import {
   type DiscoverySnapshot,
   type AdoptionPreview,
   type CapabilityObservation,
+  type ConnectorExport,
   type Materialization,
   type PackageProposal,
 } from '@waleed/contracts';
@@ -25,7 +26,13 @@ import {
   OperationDialog,
   type OperationDialogInput,
 } from './OperationDialog.js';
-import { ConnectorList, type ManagedConnector } from './ConnectorList.js';
+import {
+  ConnectorList,
+  connectorTarget,
+  type ManagedConnector,
+} from './ConnectorList.js';
+import { DiscoveryProgress } from './DiscoveryProgress.js';
+import { currentObservation, isApproved } from './discovery-progress.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
@@ -64,8 +71,73 @@ const agentNames: Record<string, string> = {
   cursor: 'Cursor Agent',
 };
 
+// The status filter of the connector list. The filter is a set of toggles, not
+// a radio group: a page radio would be counted by the package browser test.
+const connectorFilters = [
+  { id: 'all', label: 'All' },
+  { id: 'ready', label: 'Ready' },
+  { id: 'loading', label: 'Loading' },
+  { id: 'attention', label: 'Needs attention' },
+  { id: 'disabled', label: 'Disabled' },
+] as const;
+type ConnectorFilter = (typeof connectorFilters)[number]['id'];
+// The status a connector shows in the list, and the filter it belongs to.
+type ConnectorStatus = Exclude<ConnectorFilter, 'all'>;
+
+// The status of one connector: a disabled connector is disabled, an enabled
+// connector without a valid approval needs attention, a connected connector is
+// ready, and one whose discovery has not settled yet is loading.
+function connectorStatus(
+  connector: ManagedConnector,
+  observations: CapabilityObservation[],
+): ConnectorStatus {
+  if (!connector.enabled) return 'disabled';
+  if (!isApproved(connector)) return 'attention';
+  const state =
+    currentObservation(connector, observations)?.state ?? 'untested';
+  if (state === 'connected') return 'ready';
+  if (state === 'untested' || state === 'checking') return 'loading';
+  return 'attention';
+}
+
+// The search of the list reads the name, the identifier and the target of a
+// connector.
+function connectorMatches(
+  connector: ManagedConnector,
+  search: string,
+): boolean {
+  const needle = search.trim().toLowerCase();
+  if (!needle) return true;
+  return `${connector.name} ${connector.id} ${connectorTarget(connector)}`
+    .toLowerCase()
+    .includes(needle);
+}
+
 // The longest wait on one full refresh of the hub state.
 const REFRESH_LIMIT_MS = 20_000;
+
+// One exported part becomes one file in the browser. The hub names the parts
+// after the day and the part number, so a registry of many connectors lands
+// in several files.
+function exportFileName(part: number, parts: number, stamp: string): string {
+  return parts === 1
+    ? `waleed-mcp-hub-connectors-${stamp}.json`
+    : `waleed-mcp-hub-connectors-${stamp}-part-${part}-of-${parts}.json`;
+}
+
+function downloadPart(name: string, text: string) {
+  const url = URL.createObjectURL(
+    new Blob([text], { type: 'application/json' }),
+  );
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  // The download reads the object URL after the click returns.
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 0);
+}
 
 export function App() {
   const [page, setPage] = useState<Page>('Connectors');
@@ -94,7 +166,12 @@ export function App() {
   const [manual, setManual] = useState(false);
   const [importing, setImporting] = useState(false);
   const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
+  // The result of the last export of the registry.
+  const [exportStatus, setExportStatus] = useState<string>('');
   const [search, setSearch] = useState('');
+  // The search and the status filter of the connector list.
+  const [connectorSearch, setConnectorSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<ConnectorFilter>('all');
 
   // The newest refresh owns the page, and every refresh is bounded, so a
   // stalled hub never leaves the page loading. See latestRunner.
@@ -187,6 +264,50 @@ export function App() {
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
+  // The connector list shows the rows the search and the status filter keep.
+  const visibleConnectors = connectors.filter(
+    (connector) =>
+      connectorMatches(connector, connectorSearch) &&
+      (statusFilter === 'all' ||
+        connectorStatus(connector, observations) === statusFilter),
+  );
+  const visibleIds = new Set(
+    visibleConnectors.map((connector) => connector.id),
+  );
+  const clearConnectorFilters = () => {
+    setConnectorSearch('');
+    setStatusFilter('all');
+  };
+  // The export of the registry. The hub writes the files; the browser only
+  // saves them. No credential value is part of an export.
+  async function exportRegistry() {
+    setExportStatus('');
+    try {
+      const result = await api<ConnectorExport>('/api/connectors/export');
+      const stamp = new Date().toISOString().slice(0, 10);
+      result.parts.forEach((part, index) => {
+        downloadPart(
+          exportFileName(index + 1, result.parts.length, stamp),
+          part,
+        );
+      });
+      const files = result.parts.length
+        ? `Exported ${result.parts.length} file${result.parts.length === 1 ? '' : 's'}`
+        : 'No connectors to export.';
+      const skipped = result.skipped.length
+        ? `. Not exported: ${result.skipped
+            .map((connector) => `${connector.name} (${connector.reason})`)
+            .join(', ')}`
+        : '';
+      setExportStatus(`${files}${skipped}`);
+    } catch (failure) {
+      setExportStatus(
+        failure instanceof Error
+          ? failure.message
+          : 'The export failed. Check the terminal and retry.',
+      );
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -212,6 +333,8 @@ export function App() {
               onClick={() => {
                 setPage(item);
                 setSearch('');
+                setConnectorSearch('');
+                setStatusFilter('all');
               }}
             >
               <Icon name={iconNames[index]!} />
@@ -243,12 +366,13 @@ export function App() {
             Personal workspace <span className="slash">/</span>{' '}
             <strong>{page}</strong>
           </span>
-          <span className="stage-label">
-            {bootstrap?.capabilities.connectorManagement
-              ? 'Lifecycle build'
-              : 'Foundation build'}{' '}
-            <span className="version">v0.1</span>
-          </span>
+          {bootstrap?.version && (
+            <span className="stage-label">
+              <span className="version" title="Installed version">
+                v{bootstrap.version}
+              </span>
+            </span>
+          )}
         </header>
         <main id="main" tabIndex={-1}>
           <div className="page-heading">
@@ -268,23 +392,42 @@ export function App() {
               </button>
             ) : page === 'Connectors' ? (
               <div className="action-with-help">
-                <button
-                  disabled={loading || !!error || recoveryBlocked}
-                  onClick={() => setManual(true)}
-                >
-                  Add Manual MCP
-                </button>
-                <button
-                  className="primary"
-                  disabled={loading || !!error}
-                  onClick={() => setImporting(true)}
-                  aria-describedby="add-help"
-                >
-                  <Icon name="plus" size={18} />
-                  Add connector
-                </button>
+                <div className="page-actions">
+                  <button
+                    type="button"
+                    disabled={loading || !!error || recoveryBlocked}
+                    onClick={() => setManual(true)}
+                  >
+                    <Icon name="upload" size={16} />
+                    Add Manual MCP
+                  </button>
+                  <button
+                    type="button"
+                    disabled={loading || !!error}
+                    aria-describedby="export-help"
+                    onClick={() => {
+                      void exportRegistry();
+                    }}
+                  >
+                    <Icon name="download" size={16} />
+                    Export
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={loading || !!error}
+                    onClick={() => setImporting(true)}
+                    aria-describedby="add-help"
+                  >
+                    <Icon name="plus" size={18} />
+                    Add connector
+                  </button>
+                </div>
                 <small id="add-help">
                   Preview first · saving and execution are separate
+                </small>
+                <small id="export-help">
+                  Secrets are never exported; credential names are.
                 </small>
               </div>
             ) : (
@@ -300,15 +443,20 @@ export function App() {
             )}
           </div>
 
+          {page === 'Connectors' && exportStatus && (
+            <p className="notice" role="status" data-testid="export-status">
+              {exportStatus}
+            </p>
+          )}
+
           <div className="foundation-notice">
             <Icon name="shield" />
             <div>
-              <strong>A safe starting point.</strong>{' '}
               {bootstrap?.capabilities.discovery
-                ? 'Discovery does not execute connectors. Save, exact execution approval, protected credentials, profile apply and capability checks are separate actions. Pilot adoption and agent synchronization stay disabled.'
+                ? 'Discovery does not execute connectors; saving, exact execution approval, protected credentials, profile apply and capability checks are separate actions, and pilot adoption and agent synchronization stay disabled.'
                 : bootstrap?.capabilities.agentApply
-                  ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly. Agent integration verifies configuration only; reconnect and trust remain agent-controlled.'
-                  : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly. Capability tests use available runtime adapters; agent synchronization remains disabled.'}
+                  ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; agent integration verifies configuration only, and reconnect and trust remain agent-controlled.'
+                  : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; capability tests use available runtime adapters, and agent synchronization remains disabled.'}
             </div>
             <span className="read-only-tag">Explicit actions only</span>
           </div>
@@ -365,33 +513,61 @@ export function App() {
                   aria-labelledby="connector-list-title"
                 >
                   <div className="list-toolbar">
-                    <h2 id="connector-list-title">
-                      Your connectors{' '}
-                      <span className="count">{connectors.length}</span>
-                    </h2>
-                    <span className="muted">
-                      Desired state · not a live verification
-                    </span>
+                    <div className="list-toolbar-title">
+                      <h2 id="connector-list-title">
+                        Your connectors{' '}
+                        <span className="count">
+                          {visibleConnectors.length}
+                        </span>
+                      </h2>
+                      {visibleConnectors.length !== connectors.length && (
+                        <span className="muted">of {connectors.length}</span>
+                      )}
+                      <span className="muted">
+                        Desired state · not a live verification
+                      </span>
+                    </div>
+                    <div className="list-toolbar-controls">
+                      <div className="search">
+                        <Icon name="search" size={16} />
+                        <input
+                          type="search"
+                          aria-label="Search connectors"
+                          placeholder="Name, id or target…"
+                          value={connectorSearch}
+                          onChange={(event) =>
+                            setConnectorSearch(event.target.value)
+                          }
+                        />
+                      </div>
+                      <div
+                        className="segmented"
+                        role="group"
+                        aria-label="Filter connectors by status"
+                      >
+                        {connectorFilters.map((filter) => (
+                          <button
+                            key={filter.id}
+                            type="button"
+                            aria-pressed={statusFilter === filter.id}
+                            onClick={() => setStatusFilter(filter.id)}
+                          >
+                            {filter.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                  <div className="panel-footer">
-                    Definitions, verification and desired profile membership
-                  </div>
-                  {connectors.length ? (
-                    <ConnectorList
-                      connectors={connectors}
-                      revision={bootstrap?.revision ?? 0}
-                      observations={observations}
-                      observe={setObservations}
-                      profiles={profiles}
-                      disabled={recoveryBlocked}
-                      runtime={!!bootstrap?.capabilities.runtimeChecks}
-                      secrets={!!bootstrap?.capabilities.secrets}
-                      authenticate={setAuthentication}
-                      operate={setOperation}
-                      refresh={refresh}
-                      openPackage={setPackageSeed}
-                    />
-                  ) : (
+                  {/* Without automatic discovery nothing settles, so the bar
+                      would stay in its loading state. */}
+                  {bootstrap?.capabilities.runtimeChecks &&
+                    !recoveryBlocked && (
+                      <DiscoveryProgress
+                        connectors={connectors}
+                        observations={observations}
+                      />
+                    )}
+                  {connectors.length === 0 ? (
                     <div className="empty-state">
                       <div className="empty-icon">
                         <Icon name="connectors" size={28} />
@@ -409,11 +585,52 @@ export function App() {
                         Creating a profile does not register tools with agents.
                       </small>
                     </div>
+                  ) : (
+                    // The list stays mounted while a filter hides every row:
+                    // it owns the automatic discovery of all connectors.
+                    <>
+                      {visibleConnectors.length === 0 && (
+                        <div
+                          className="empty-state"
+                          data-testid="connector-no-match"
+                        >
+                          <div className="empty-icon">
+                            <Icon name="filter" size={28} />
+                          </div>
+                          <h2>No connectors match</h2>
+                          <p>
+                            No connector matches the current search and status
+                            filter.
+                          </p>
+                          <button type="button" onClick={clearConnectorFilters}>
+                            Clear filters
+                          </button>
+                        </div>
+                      )}
+                      <ConnectorList
+                        connectors={connectors}
+                        visibleIds={visibleIds}
+                        revision={bootstrap?.revision ?? 0}
+                        observations={observations}
+                        observe={setObservations}
+                        profiles={profiles}
+                        disabled={recoveryBlocked}
+                        runtime={!!bootstrap?.capabilities.runtimeChecks}
+                        secrets={!!bootstrap?.capabilities.secrets}
+                        authenticate={setAuthentication}
+                        operate={setOperation}
+                        refresh={refresh}
+                        openPackage={setPackageSeed}
+                      />
+                    </>
                   )}
                   <div className="panel-footer">
                     <Icon name="lock" size={15} />
                     Saving is not execution. Capability discovery calls no
                     tools.
+                    <span className="panel-footer-note">
+                      Definitions, verification and desired profile membership
+                    </span>
                   </div>
                 </section>
               )}
@@ -724,16 +941,16 @@ export function App() {
                         </p>
                       </div>
                     ) : (
-                      <ul className="activity-list">
+                      <ul className="activity-list single-line">
                         {[...activity].reverse().map((event) => (
                           <li key={event.id}>
                             <Icon name="check" size={18} />
                             <div className="row-main">
                               <h3>{event.operation.replaceAll('_', ' ')}</h3>
-                              <p>
+                              <span className="activity-meta">
                                 Registry revision {event.priorRevision} →{' '}
                                 {event.newRevision}
-                              </p>
+                              </span>
                             </div>
                             <time dateTime={event.time}>
                               {new Date(event.time).toLocaleString()}
@@ -866,7 +1083,10 @@ export function App() {
                     </div>
                     <div>
                       <dt>Windows sign-in startup</dt>
-                      <dd>Not implemented · no startup entry installed</dd>
+                      <dd>
+                        Managed by the tray icon · right-click the Waleed MCP
+                        Hub icon and use Start with Windows
+                      </dd>
                     </div>
                   </dl>
                 </section>
@@ -918,6 +1138,25 @@ export function App() {
               ...(version ? { version } : {}),
               arguments: proposal.arguments,
               envNames: proposal.envNames,
+              // The metadata of the imported connector travels with the
+              // install, so the connector keeps its name, identifier,
+              // description, enabled flag and literals.
+              ...(proposal.connectorName
+                ? { connectorName: proposal.connectorName }
+                : {}),
+              ...(proposal.connectorId
+                ? { connectorId: proposal.connectorId }
+                : {}),
+              ...(proposal.description !== undefined
+                ? { description: proposal.description }
+                : {}),
+              ...(proposal.entry ? { entry: proposal.entry } : {}),
+              ...(proposal.enabled !== undefined
+                ? { enabled: proposal.enabled }
+                : {}),
+              ...(proposal.environmentLiterals
+                ? { environmentLiterals: proposal.environmentLiterals }
+                : {}),
             });
           }}
         />

@@ -3,6 +3,9 @@
 // start. A bridge with a catalog answers from the last discovered tools and
 // refreshes them in the background.
 import { afterEach, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -18,13 +21,21 @@ import {
   createAgentBridge,
   type BridgeConnect,
   type BridgeSession,
+  readProtectedText,
 } from '../packages/hub-core/src/integrations/bridge.js';
 import {
+  MAX_BRIDGE_TOOLS,
+  MAX_CATALOG_BYTES,
   parseToolCatalog,
   serializeToolCatalog,
+  writeToolCatalogFile,
   type ToolCatalog,
 } from '../packages/hub-core/src/integrations/tool-catalog.js';
 import { profileState } from './helpers/runtime.js';
+
+// One peer's listing: two of them overflow the shared cap, one alone fits.
+const CAP = MAX_BRIDGE_TOOLS;
+const LARGE = CAP - 56;
 
 const tool = (name: string): Tool => ({
   name,
@@ -273,7 +284,7 @@ it('visits first the connectors the catalog lacks, so a slow startup cannot star
   expect(open.connects.indexOf('connector-0')).toBe(2);
 });
 
-// Issue #13: a first batch that already reached 256 tools ended the discovery,
+// Issue #13: a first batch that already filled the tool cap ended the discovery,
 // and the connectors after it were neither listed nor marked for a retry.
 it('visits every connector even after an earlier one filled the tool cap', async () => {
   const state = profileState([
@@ -287,7 +298,7 @@ it('visits every connector even after an earlier one filled the tool cap', async
     state,
     listing: (id) =>
       id === 'connector-0'
-        ? Array.from({ length: 256 }, (_, index) => tool(`full${index}`))
+        ? Array.from({ length: CAP }, (_, index) => tool(`full${index}`))
         : [tool('read')],
   });
 
@@ -302,7 +313,7 @@ it('visits every connector even after an earlier one filled the tool cap', async
 it('shares the tool cap in registry order, whatever order the connectors were visited in', async () => {
   const state = profileState(['native', 'native']);
   const many = (prefix: string) =>
-    Array.from({ length: 200 }, (_, index) => tool(`${prefix}${index}`));
+    Array.from({ length: LARGE }, (_, index) => tool(`${prefix}${index}`));
   open = await createHarness({
     state,
     catalog: new Map([
@@ -314,9 +325,9 @@ it('shares the tool cap in registry order, whatever order the connectors were vi
   await names(open.agent);
   await expect
     .poll(() => open!.stored.catalog?.get('connector-1')?.tools.length)
-    .toBe(56);
+    .toBe(CAP - LARGE);
   // The connector visited second is not cut to the budget the first one used.
-  expect(open.stored.catalog?.get('connector-0')?.tools).toHaveLength(200);
+  expect(open.stored.catalog?.get('connector-0')?.tools).toHaveLength(LARGE);
 });
 
 it('fills the catalog even when the agent gives up on its first listing', async () => {
@@ -384,14 +395,14 @@ it.each([
     }),
   ],
   [
-    'more than 256 tools',
+    'more tools than the cap',
     JSON.stringify({
       version: 1,
       connectors: [
         {
           id: 'c',
           hash: 'a'.repeat(64),
-          tools: Array.from({ length: 257 }, (_, i) => tool(`t${i}`)),
+          tools: Array.from({ length: CAP + 1 }, (_, i) => tool(`t${i}`)),
         },
       ],
     }),
@@ -400,20 +411,72 @@ it.each([
   expect(parseToolCatalog(text)).toBeUndefined();
 });
 
-it('persists a readable shared-budget catalog when parallel peers each expose 200 tools', async () => {
+it('persists a readable shared-budget catalog when parallel peers each expose more than half the cap', async () => {
   const state = profileState(['native', 'native']);
   open = await createHarness({
     state,
     listing: () =>
-      Array.from({ length: 200 }, (_, index) => tool(`read_${index}`)),
+      Array.from({ length: LARGE }, (_, index) => tool(`read_${index}`)),
   });
-  expect((await open.agent.listTools()).tools).toHaveLength(256);
+  expect((await open.agent.listTools()).tools).toHaveLength(CAP);
   const catalog = open.stored.catalog!;
   expect([...catalog.values()].map((entry) => entry.tools.length)).toEqual([
-    200, 56,
+    LARGE,
+    CAP - LARGE,
   ]);
   expect(parseToolCatalog(serializeToolCatalog(catalog))).toEqual(catalog);
 });
+// 2026-11-05: a workstation with 464 tools across 22 connectors lost every
+// connector after the first 256 tools. All of them must now be advertised.
+it('advertises 464 tools from two connectors without truncation', async () => {
+  const state = profileState(['native', 'native']);
+  open = await createHarness({
+    state,
+    listing: (id) =>
+      Array.from({ length: 232 }, (_, index) => tool(`${id}_${index}`)),
+  });
+  await names(open.agent);
+  await expect.poll(() => open!.stored.catalog?.has('connector-1')).toBe(true);
+  expect(await names(open.agent)).toHaveLength(464);
+});
+
+// A one-tool catalog whose serialized form is exactly `bytes` long.
+const catalogOfSize = (bytes: number): ToolCatalog => {
+  const sized = (description: string): ToolCatalog =>
+    new Map([
+      ['c', { hash: 'a'.repeat(64), tools: [{ ...tool('big'), description }] }],
+    ]);
+  const base = Buffer.byteLength(serializeToolCatalog(sized('')));
+  return sized('x'.repeat(bytes - base));
+};
+
+// The writer and the restart's reader share one size bound: what is written
+// is read back, and a larger catalog never replaces the readable one.
+it.each([
+  ['the largest stored catalog is read back', MAX_CATALOG_BYTES, true],
+  [
+    'an oversized catalog keeps the previous file',
+    MAX_CATALOG_BYTES + 1,
+    false,
+  ],
+])('%s after a restart', async (_case, bytes, stored) => {
+  const directory = await mkdtemp(join(tmpdir(), 'wmh-catalog-'));
+  try {
+    const path = join(directory, 'tool-catalog-claude.json');
+    const previous = catalogOfSize(1024);
+    await writeToolCatalogFile(path, previous);
+    const next = catalogOfSize(bytes);
+    const write = writeToolCatalogFile(path, next);
+    if (stored) await write;
+    else await expect(write).rejects.toThrow();
+    expect(parseToolCatalog(await readProtectedText(path))).toEqual(
+      stored ? next : previous,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 it('bounds merged cached tools when one peer fails and another returns a large fresh catalog', async () => {
   const state = profileState(['native', 'native']);
   const previous: ToolCatalog = new Map([
@@ -421,7 +484,7 @@ it('bounds merged cached tools when one peer fails and another returns a large f
       'connector-0',
       {
         hash: definitionHash(state.connectors[0]!),
-        tools: Array.from({ length: 200 }, (_, index) =>
+        tools: Array.from({ length: LARGE }, (_, index) =>
           tool(`cached_${index}`),
         ),
       },
@@ -433,13 +496,14 @@ it('bounds merged cached tools when one peer fails and another returns a large f
     listing: (id) =>
       id === 'connector-0'
         ? new Error('Unavailable')
-        : Array.from({ length: 200 }, (_, index) => tool(`fresh_${index}`)),
+        : Array.from({ length: LARGE }, (_, index) => tool(`fresh_${index}`)),
   });
   await open.agent.listTools();
   await expect.poll(() => open!.stored.catalog?.has('connector-1')).toBe(true);
   const catalog = open.stored.catalog!;
   expect([...catalog.values()].map((entry) => entry.tools.length)).toEqual([
-    200, 56,
+    LARGE,
+    CAP - LARGE,
   ]);
   expect(parseToolCatalog(serializeToolCatalog(catalog))).toEqual(catalog);
 });
@@ -494,7 +558,7 @@ for (const pooled of [true, false]) {
   it(`keeps blocked tools out of the shared catalog budget (pooled=${pooled})`, async () => {
     const state = profileState(['native', 'native']);
     state.connectors[0]!.toolPolicies = Object.fromEntries(
-      Array.from({ length: 200 }, (_, index) => [
+      Array.from({ length: LARGE }, (_, index) => [
         `read_${index}`,
         'block' as const,
       ]),
@@ -503,18 +567,18 @@ for (const pooled of [true, false]) {
       state,
       pooled,
       listing: () =>
-        Array.from({ length: 200 }, (_, index) => tool(`read_${index}`)),
+        Array.from({ length: LARGE }, (_, index) => tool(`read_${index}`)),
     });
-    expect(await names(open.agent)).toHaveLength(200);
+    expect(await names(open.agent)).toHaveLength(LARGE);
     if (pooled)
       expect(
         [...open.stored.catalog!.values()].map((entry) => entry.tools.length),
-      ).toEqual([0, 200]);
+      ).toEqual([0, LARGE]);
   });
   it(`paginates beyond a blocked prefix to discover allowed tools (pooled=${pooled})`, async () => {
     const state = profileState(['native']);
     state.connectors[0]!.toolPolicies = Object.fromEntries(
-      Array.from({ length: 256 }, (_, index) => [
+      Array.from({ length: CAP }, (_, index) => [
         `blocked_${index}`,
         'block' as const,
       ]),
@@ -524,7 +588,7 @@ for (const pooled of [true, false]) {
       pooled,
       pageSize: 128,
       listing: () => [
-        ...Array.from({ length: 256 }, (_, index) => tool(`blocked_${index}`)),
+        ...Array.from({ length: CAP }, (_, index) => tool(`blocked_${index}`)),
         ...Array.from({ length: 200 }, (_, index) => tool(`allowed_${index}`)),
       ],
     });
@@ -535,7 +599,7 @@ for (const pooled of [true, false]) {
 }
 it('removes blocked cached tools before merging a fresh connector into the shared budget', async () => {
   const state = profileState(['native', 'native']);
-  const blocked = Array.from({ length: 200 }, (_, index) =>
+  const blocked = Array.from({ length: LARGE }, (_, index) =>
     tool(`cached_${index}`),
   );
   state.connectors[0]!.toolPolicies = Object.fromEntries(
@@ -549,12 +613,12 @@ it('removes blocked cached tools before merging a fresh connector into the share
     listing: (id) =>
       id === 'connector-0'
         ? new Error('Unavailable')
-        : Array.from({ length: 200 }, (_, index) => tool(`fresh_${index}`)),
+        : Array.from({ length: LARGE }, (_, index) => tool(`fresh_${index}`)),
   });
   expect(await names(open.agent)).toEqual([]);
   await expect.poll(() => open!.stored.catalog?.has('connector-1')).toBe(true);
   expect(
     [...open.stored.catalog!.values()].map((entry) => entry.tools.length),
-  ).toEqual([0, 200]);
-  expect(await names(open.agent)).toHaveLength(200);
+  ).toEqual([0, LARGE]);
+  expect(await names(open.agent)).toHaveLength(LARGE);
 });

@@ -18,6 +18,8 @@ export async function buildLauncher(root) {
       '/target:winexe',
       '/platform:x64',
       '/reference:System.Windows.Forms.dll',
+      '/reference:System.Drawing.dll',
+      `/win32icon:${join(root, 'apps', 'web', 'public', 'brand', 'favicon.ico')}`,
       `/out:${target}`,
       join(root, 'scripts', 'WaleedMcpHub.cs'),
     ],

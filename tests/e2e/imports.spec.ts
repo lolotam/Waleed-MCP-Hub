@@ -418,3 +418,91 @@ test('failed discard is explicit and can be retried; browser expiry removes the 
     .getByRole('button', { name: 'Cancel and discard', exact: true })
     .click();
 });
+
+test('the registry export round trips through the file loader and deselects an installed entry', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  // The registry owns one connector, saved through the ordinary flow.
+  await paste(page, {
+    mcpServers: {
+      'Round trip': { name: 'Round trip', id: 'round-trip', command: 'tool' },
+    },
+  });
+  await page
+    .getByRole('button', { name: 'Preview local save', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Apply reviewed change', exact: true })
+    .click();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Operation: succeeded' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  const artifact = await download;
+  expect(artifact.suggestedFilename()).toMatch(
+    /^waleed-mcp-hub-connectors-\d{4}-\d{2}-\d{2}\.json$/,
+  );
+  const path = await artifact.path();
+  const exported = await readFile(path!, 'utf8');
+  const document = JSON.parse(exported) as {
+    format: string;
+    version: number;
+    part: number;
+    parts: number;
+    connectors: Array<Record<string, unknown>>;
+  };
+  expect(document).toMatchObject({
+    format: 'waleed-mcp-hub/connectors',
+    version: 1,
+    part: 1,
+    parts: 1,
+  });
+  expect(document.connectors).toHaveLength(1);
+  expect(document.connectors[0]).toMatchObject({
+    id: 'round-trip',
+    name: 'Round trip',
+    executionMode: 'native',
+  });
+  expect(exported).not.toContain(importSecret);
+  await expect(page.getByTestId('export-status')).toContainText(
+    'Exported 1 file',
+  );
+
+  // The same file, loaded again, continues with what is left: the entry that
+  // is already installed is deselected.
+  await page
+    .getByRole('button', { name: 'Add connector', exact: true })
+    .click();
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'waleed-mcp-hub-connectors.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(exported, 'utf8'),
+  });
+  await expect(
+    page.getByLabel('Configuration JSON', { exact: true }),
+  ).toHaveValue(exported);
+  await page
+    .getByRole('button', { name: 'Preview configuration', exact: true })
+    .click();
+  await expect(
+    page.getByRole('heading', {
+      name: 'Review import configuration',
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel('Include entry 1', { exact: true }),
+  ).not.toBeChecked();
+  await expect(page.getByText(/Review blocked: no selection/)).toBeVisible();
+  await page.screenshot({
+    path: 'test-results/import-export-round-trip.png',
+    fullPage: true,
+  });
+  await page
+    .getByRole('button', { name: 'Cancel and discard', exact: true })
+    .click();
+});

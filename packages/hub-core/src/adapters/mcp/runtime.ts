@@ -62,16 +62,21 @@ export function createCapabilityRuntime(options: {
     signal: AbortSignal,
   ) => Promise<SecretLease>;
 }): CapabilityRuntime {
+  const verify = async (connector: Connector, signal: AbortSignal) => {
+    if (connector.executionMode === 'native' && connector.package)
+      await verifyPackage(
+        connector,
+        packagesRoot(options.workingDirectory),
+        signal,
+      );
+  };
   return {
-    async discover(connector, signal) {
+    verify,
+    async discover(connector, signal, discoverOptions) {
       // A managed install is verified first: when the folder is not the
       // approved one, no secret is resolved and no process is started.
-      if (connector.executionMode === 'native' && connector.package)
-        await verifyPackage(
-          connector,
-          packagesRoot(options.workingDirectory),
-          signal,
-        );
+      // A caller that already ran verify() under its own deadline skips it.
+      if (!discoverOptions?.verified) await verify(connector, signal);
       signal.throwIfAborted();
       const bound =
         Object.keys(connector.secretBindings).length ||
