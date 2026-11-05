@@ -558,10 +558,15 @@ export function App() {
                       </div>
                     </div>
                   </div>
-                  <DiscoveryProgress
-                    connectors={connectors}
-                    observations={observations}
-                  />
+                  {/* Without automatic discovery nothing settles, so the bar
+                      would stay in its loading state. */}
+                  {bootstrap?.capabilities.runtimeChecks &&
+                    !recoveryBlocked && (
+                      <DiscoveryProgress
+                        connectors={connectors}
+                        observations={observations}
+                      />
+                    )}
                   {connectors.length === 0 ? (
                     <div className="empty-state">
                       <div className="empty-icon">

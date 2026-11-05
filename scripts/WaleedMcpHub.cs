@@ -253,7 +253,10 @@ namespace WaleedMcpHub
                 if (tray != null || AcquireTrayMutex()) return;
                 redundant = true;
                 mutexTimer.Stop();
-                try { child.Kill(); } catch (InvalidOperationException) { }
+                // The child may end on its own before the kill lands.
+                try { child.Kill(); }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
             });
         }
 
