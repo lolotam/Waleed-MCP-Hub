@@ -4,7 +4,9 @@ import {
   ImportPreviewSchema,
   ImportSelectionSchema,
   type HubState,
+  type ImportEntry,
   type ImportPreview,
+  type ImportWarning,
 } from '@waleed/contracts';
 import { HubError } from '../errors.js';
 import {
@@ -23,6 +25,29 @@ interface Draft {
   timer: ReturnType<typeof setTimeout>;
 }
 const fold = (name: string) => name.normalize('NFKC').trim().toLowerCase();
+
+// The hub export carries the connectors of a registry, so the entries that
+// are already installed are deselected and a proposal of an installed
+// connector is marked. Loading the same file again continues with what is
+// left, and the browser keeps no state of its own.
+const deselectInstalled = (entries: ImportEntry[], state: HubState) => {
+  const ids = new Set(state.connectors.map((connector) => connector.id));
+  const names = new Set(
+    state.connectors.map((connector) => fold(connector.name)),
+  );
+  for (const entry of entries) {
+    if (entry.packageProposal) {
+      const connectorId = entry.packageProposal.connectorId;
+      if (connectorId && ids.has(connectorId))
+        entry.warnings = [
+          ...new Set<ImportWarning>([...entry.warnings, 'already_installed']),
+        ].sort();
+      continue;
+    }
+    if (ids.has(entry.id) || names.has(fold(entry.name)))
+      entry.selected = false;
+  }
+};
 
 // No process/filesystem/network/secret-store adapter is accepted by this module.
 // Its only retained private data is bounded, owner-scoped, short-lived memory.
@@ -178,6 +203,8 @@ export function createImportService(now: () => number = Date.now) {
           'Too many private import previews. Cancel an existing draft or wait for expiry.',
         );
       const normalized = normalizeImport(input.source);
+      if (normalized.format === 'hub')
+        deselectInstalled(normalized.entries, state);
       const id = randomUUID();
       const draft: Draft = {
         id,

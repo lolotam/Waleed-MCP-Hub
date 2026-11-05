@@ -248,9 +248,12 @@ If you already have the server in another app's config:
 
 1. **Connectors → Add connector**.
 2. Paste the JSON into **Configuration JSON**. Accepted shapes: a single server
-   object, an `mcpServers` map, a `servers` map, OpenCode's `mcp.servers`, and Docker
-   image or remote definitions.
-3. **Preview configuration** → review the normalized definition → **Preview local
+   object, an `mcpServers` map, a `servers` map, OpenCode's `mcp.servers`, Docker
+   image or remote definitions, and the hub export of
+   [Export and import connectors](#export-and-import-connectors).
+3. **Load from file…** reads a JSON file of at most 48 KiB into the same field,
+   if you prefer a file over a paste.
+4. **Preview configuration** → review the normalized definition → **Preview local
    save** → **Apply reviewed change**.
 
 Env and header values in the paste become write-only references; re-enter them
@@ -261,6 +264,42 @@ in. Its secret values are dropped from the paste; enter them again in the instal
 form. Applying the import never installs anything. Entries that use `uvx` or `.cmd`
 launchers are saved as data only; convert them as described in
 [Python package](#python-package-uvx). JSONC (comments) and TOML are not accepted; remove comments first.
+
+## Export and import connectors
+
+**Connectors → Export** writes the registry to a JSON file you can keep or move
+to another machine. The file never contains a secret: no credential value, no
+OAuth token, no approval, no observation, no install path and no profile. What
+it does contain are the **names** of the credentials a connector needs, so you
+know what to add again on the other side.
+
+- A file holds at most 32 connectors and at most 40 KiB of text, so it always
+  fits the importer. A registry that fits is one file,
+  `waleed-mcp-hub-connectors-YYYY-MM-DD.json`; a larger one is written as
+  several files, `waleed-mcp-hub-connectors-YYYY-MM-DD-part-N-of-M.json`. The
+  page says how many files it wrote.
+- A connector that is too large for one file is not written. The page says
+  **Not exported:** with the name and the reason, so nothing disappears
+  silently.
+- A managed npm package is written as its package name, version, entry file
+  and arguments. The install folder and the hub's own `node.exe` stay on this
+  machine.
+
+**Connectors → Add connector → Load from file…** reads such a file into the
+**Configuration JSON** field. The file must be JSON and at most 48 KiB, the
+same limit as a paste. The text is cleared with the field, so nothing is kept
+in the browser.
+
+After the preview:
+
+- The definition of every connector is saved value-free. Add the credential
+  values again with **Authentication** on the connector row; the entry shows
+  **Needs credentials after saving** with the names it expects.
+- A managed npm package is listed as a **package proposal**, never applied
+  with the import. **Install** opens the managed install with the name,
+  version, entry and arguments of the original connector.
+- Entries that are already installed are deselected, so loading the same file
+  again continues with what is left.
 
 ## Current limits worth knowing
 

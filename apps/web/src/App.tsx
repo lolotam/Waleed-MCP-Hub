@@ -10,6 +10,7 @@ import {
   type DiscoverySnapshot,
   type AdoptionPreview,
   type CapabilityObservation,
+  type ConnectorExport,
   type Materialization,
   type PackageProposal,
 } from '@waleed/contracts';
@@ -115,6 +116,29 @@ function connectorMatches(
 // The longest wait on one full refresh of the hub state.
 const REFRESH_LIMIT_MS = 20_000;
 
+// One exported part becomes one file in the browser. The hub names the parts
+// after the day and the part number, so a registry of many connectors lands
+// in several files.
+function exportFileName(part: number, parts: number, stamp: string): string {
+  return parts === 1
+    ? `waleed-mcp-hub-connectors-${stamp}.json`
+    : `waleed-mcp-hub-connectors-${stamp}-part-${part}-of-${parts}.json`;
+}
+
+function downloadPart(name: string, text: string) {
+  const url = URL.createObjectURL(
+    new Blob([text], { type: 'application/json' }),
+  );
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  // The download reads the object URL after the click returns.
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 0);
+}
+
 export function App() {
   const [page, setPage] = useState<Page>('Connectors');
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -142,6 +166,8 @@ export function App() {
   const [manual, setManual] = useState(false);
   const [importing, setImporting] = useState(false);
   const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
+  // The result of the last export of the registry.
+  const [exportStatus, setExportStatus] = useState<string>('');
   const [search, setSearch] = useState('');
   // The search and the status filter of the connector list.
   const [connectorSearch, setConnectorSearch] = useState('');
@@ -252,6 +278,36 @@ export function App() {
     setConnectorSearch('');
     setStatusFilter('all');
   };
+  // The export of the registry. The hub writes the files; the browser only
+  // saves them. No credential value is part of an export.
+  async function exportRegistry() {
+    setExportStatus('');
+    try {
+      const result = await api<ConnectorExport>('/api/connectors/export');
+      const stamp = new Date().toISOString().slice(0, 10);
+      result.parts.forEach((part, index) => {
+        downloadPart(
+          exportFileName(index + 1, result.parts.length, stamp),
+          part,
+        );
+      });
+      const files = result.parts.length
+        ? `Exported ${result.parts.length} file${result.parts.length === 1 ? '' : 's'}`
+        : 'No connectors to export.';
+      const skipped = result.skipped.length
+        ? `. Not exported: ${result.skipped
+            .map((connector) => `${connector.name} (${connector.reason})`)
+            .join(', ')}`
+        : '';
+      setExportStatus(`${files}${skipped}`);
+    } catch (failure) {
+      setExportStatus(
+        failure instanceof Error
+          ? failure.message
+          : 'The export failed. Check the terminal and retry.',
+      );
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -347,6 +403,17 @@ export function App() {
                   </button>
                   <button
                     type="button"
+                    disabled={loading || !!error}
+                    aria-describedby="export-help"
+                    onClick={() => {
+                      void exportRegistry();
+                    }}
+                  >
+                    <Icon name="download" size={16} />
+                    Export
+                  </button>
+                  <button
+                    type="button"
                     className="primary"
                     disabled={loading || !!error}
                     onClick={() => setImporting(true)}
@@ -358,6 +425,9 @@ export function App() {
                 </div>
                 <small id="add-help">
                   Preview first · saving and execution are separate
+                </small>
+                <small id="export-help">
+                  Secrets are never exported; credential names are.
                 </small>
               </div>
             ) : (
@@ -372,6 +442,12 @@ export function App() {
               </button>
             )}
           </div>
+
+          {page === 'Connectors' && exportStatus && (
+            <p className="notice" role="status" data-testid="export-status">
+              {exportStatus}
+            </p>
+          )}
 
           <div className="foundation-notice">
             <Icon name="shield" />
@@ -1054,6 +1130,25 @@ export function App() {
               ...(version ? { version } : {}),
               arguments: proposal.arguments,
               envNames: proposal.envNames,
+              // The metadata of the imported connector travels with the
+              // install, so the connector keeps its name, identifier,
+              // description, enabled flag and literals.
+              ...(proposal.connectorName
+                ? { connectorName: proposal.connectorName }
+                : {}),
+              ...(proposal.connectorId
+                ? { connectorId: proposal.connectorId }
+                : {}),
+              ...(proposal.description !== undefined
+                ? { description: proposal.description }
+                : {}),
+              ...(proposal.entry ? { entry: proposal.entry } : {}),
+              ...(proposal.enabled !== undefined
+                ? { enabled: proposal.enabled }
+                : {}),
+              ...(proposal.environmentLiterals
+                ? { environmentLiterals: proposal.environmentLiterals }
+                : {}),
             });
           }}
         />

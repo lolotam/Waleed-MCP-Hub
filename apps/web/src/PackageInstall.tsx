@@ -23,6 +23,14 @@ export type PackageSeed =
   | {
       mode: 'install';
       name?: string;
+      // The metadata of an imported connector. The connector name of the form
+      // is the name of the connector, not the name of the package.
+      connectorName?: string;
+      connectorId?: string;
+      description?: string;
+      entry?: string;
+      enabled?: boolean;
+      environmentLiterals?: Record<string, string>;
       version?: string;
       arguments?: string[];
       envNames?: string[];
@@ -76,7 +84,9 @@ export function PackageInstall({
   const mounted = useRef(true);
   const [step, setStep] = useState<Step>('lookup');
   const [connectorName, setConnectorName] = useState(
-    seed.mode === 'install' ? (seed.name ?? '') : seed.connector.name,
+    seed.mode === 'install'
+      ? (seed.connectorName ?? seed.name ?? '')
+      : seed.connector.name,
   );
   const [packageName, setPackageName] = useState(
     seed.mode === 'install'
@@ -192,7 +202,12 @@ export function PackageInstall({
             ? final.preview.entries[0]!.entry
             : seed.mode === 'replace'
               ? (seed.connector.package.entry ?? '')
-              : '',
+              : seed.entry &&
+                  final.preview.entries.some(
+                    (item) => item.entry === seed.entry,
+                  )
+                ? seed.entry
+                : '',
         );
         setFailureCode(null);
         setStep('preview');
@@ -271,6 +286,17 @@ export function PackageInstall({
         connectorName: connectorName.trim(),
         arguments: argumentsResult.data,
         env: envResult.data,
+        // The metadata of an imported connector travels with the install; a
+        // manual install keeps the defaults of the hub.
+        ...(seed.connectorId ? { connectorId: seed.connectorId } : {}),
+        ...(seed.description !== undefined
+          ? { description: seed.description }
+          : {}),
+        ...(seed.enabled !== undefined ? { enabled: seed.enabled } : {}),
+        ...(seed.environmentLiterals &&
+        Object.keys(seed.environmentLiterals).length
+          ? { environmentLiterals: seed.environmentLiterals }
+          : {}),
       };
     } else {
       body = {
@@ -453,6 +479,8 @@ export function PackageInstall({
     ...shownArguments,
   ].join(' ');
   const envNames = seed.mode === 'install' ? (seed.envNames ?? []) : [];
+  const literals =
+    seed.mode === 'install' ? (seed.environmentLiterals ?? {}) : {};
   const ready =
     !!preview &&
     entry !== '' &&
@@ -520,6 +548,15 @@ export function PackageInstall({
                 <p className="notice">
                   This entry used: {envNames.join(', ')}. Enter their values
                   here.
+                </p>
+              )}
+              {Object.keys(literals).length > 0 && (
+                <p className="notice">
+                  Environment literals of the import:{' '}
+                  {Object.entries(literals)
+                    .map(([name, value]) => `${name}=${value}`)
+                    .join(', ')}
+                  .
                 </p>
               )}
             </div>

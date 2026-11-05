@@ -96,6 +96,15 @@ const PackageEnvSchema = z
     'Environment names starting with NODE_ and the OpenSSL certificate variables are refused on package connectors.',
   )
   .default({});
+// The environment literals of a package connector. They are values, never
+// credentials, but the refused package names never reach a package connector
+// either.
+const PackageLiteralsSchema = z
+  .record(z.string().max(100), z.string().max(100))
+  .refine(
+    (literals) => !Object.keys(literals).some((key) => isPackageEnvName(key)),
+    'Environment names starting with NODE_ and the OpenSSL certificate variables are refused on package connectors.',
+  );
 const ConnectorIdSchema = z
   .string()
   .min(1)
@@ -179,6 +188,12 @@ export const PackageInstallRequestSchema = z.strictObject({
   connectorName: z.string().trim().min(1).max(100),
   arguments: PackageArgumentsSchema,
   env: PackageEnvSchema,
+  // The metadata of an imported package connector. A manual install leaves
+  // them out and the service keeps its own defaults.
+  connectorId: ConnectorIdSchema.optional(),
+  description: z.string().max(1000).optional(),
+  enabled: z.boolean().optional(),
+  environmentLiterals: PackageLiteralsSchema.optional(),
 });
 export const PackageReplaceRequestSchema = z.strictObject({
   connectorId: ConnectorIdSchema,
@@ -217,13 +232,21 @@ export const PackageJobSchema = z.strictObject({
 // An imported npx entry: names and arguments only, never credential values.
 // A range or dist-tag the entry asked for is kept as requestedVersion, so the
 // user sees it before Look up picks an exact release. envNames holds only the
-// names a package connector accepts.
+// names a package connector accepts. The metadata of an imported connector
+// travels with the proposal, so the install keeps the name, the identifier,
+// the description, the enabled flag and the literals of the source connector.
 export const PackageProposalSchema = z.strictObject({
   name: PackageNameSchema,
   version: ExactVersionSchema.nullable(),
   requestedVersion: VersionSelectorSchema.nullable(),
   arguments: PackageArgumentsSchema,
   envNames: z.array(EnvNameSchema).max(64),
+  connectorName: z.string().trim().min(1).max(100).optional(),
+  connectorId: ConnectorIdSchema.optional(),
+  description: z.string().max(1000).optional(),
+  entry: PackageEntrySchema.optional(),
+  enabled: z.boolean().optional(),
+  environmentLiterals: PackageLiteralsSchema.optional(),
 });
 
 export type PackageProvenance = z.infer<typeof PackageProvenanceSchema>;

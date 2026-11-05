@@ -27,6 +27,7 @@ export type {
 } from './discovery/ports.js';
 export { createLifecycle, type HubLifecycle } from './lifecycle.js';
 export { createImportService } from './imports/service.js';
+export { exportConnectors } from './imports/export.js';
 export { definitionHash, profileHash, approved } from './runtime/registry.js';
 export {
   createMaterializer,

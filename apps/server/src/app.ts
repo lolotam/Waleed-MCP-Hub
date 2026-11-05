@@ -22,6 +22,7 @@ import {
   publicError,
   createImportService,
   definitionHash,
+  exportConnectors,
   profileHash,
   type HubLifecycle,
   type DiscoveryService,
@@ -101,6 +102,7 @@ export async function createHubServer(options: ServerOptions) {
     '/api/session/logout': 'logout',
     '/api/bootstrap': 'bootstrap',
     '/api/connectors': 'connectors',
+    '/api/connectors/export': 'connectors_export',
     '/api/profiles': 'profiles',
     '/api/agents': 'agents',
     '/api/activity': 'activity',
@@ -389,6 +391,12 @@ export async function createHubServer(options: ServerOptions) {
     observations: await options.lifecycle.checks.observations(),
     discovering: options.lifecycle.checks.discovering(),
   }));
+  // The export of the registry: the serialized part files and the connectors
+  // that no part can carry. It reads the registry state only; the credential
+  // store is never read.
+  app.get('/api/connectors/export', async () =>
+    exportConnectors((await options.lifecycle.inventory()).connectors),
+  );
   app.get('/api/updates', async () => {
     if (!options.updates)
       throw new HubError('unavailable', 'Release checking is unavailable.');

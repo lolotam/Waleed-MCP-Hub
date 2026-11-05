@@ -453,6 +453,46 @@ describe('package-service', { timeout: 60_000 }, () => {
     });
   });
 
+  it('2b. Install commits the metadata of an imported connector', async () => {
+    const { service, lifecycle } = await setupService();
+
+    const resolveJob = service.resolve(
+      { name: 'srv', version: '1.0.0' },
+      'owner-a',
+    );
+    const resolved = await waitFor(service, resolveJob, 'owner-a');
+    const preview = resolved.preview!;
+
+    const installJob = await service.install(
+      {
+        previewId: preview.previewId,
+        entry: preview.entries[0]!.entry,
+        acknowledgedWarnings: preview.warnings,
+        connectorName: 'Imported name',
+        connectorId: 'imported-connector',
+        description: 'Imported description',
+        enabled: false,
+        environmentLiterals: { NO_COLOR: '1' },
+        arguments: [],
+        env: {},
+      },
+      'owner-a',
+    );
+    const completed = await waitFor(service, installJob, 'owner-a');
+    expect(completed.state).toBe('succeeded');
+
+    const state = await lifecycle.inventory();
+    const connector = state.connectors.find(
+      (c) => c.id === 'imported-connector',
+    );
+    expect(connector).toBeDefined();
+    expect(connector?.name).toBe('Imported name');
+    expect(connector?.description).toBe('Imported description');
+    expect(connector?.enabled).toBe(false);
+    expect(connector?.environmentLiterals).toEqual({ NO_COLOR: '1' });
+    expect(completed.result?.connectorId).toBe('imported-connector');
+  });
+
   it('3. Verify detects tampering', async () => {
     const { service, lifecycle } = await setupService();
 

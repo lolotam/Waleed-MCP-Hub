@@ -411,25 +411,37 @@ export function createPackageService(
     manifestHash: ZERO_HASH,
   });
 
+  // The connector of a managed install. The client may bring the metadata of
+  // an imported connector; a manual install keeps the defaults.
+  interface PackageConnectorInput {
+    id: string;
+    name: string;
+    description: string;
+    enabled: boolean;
+    environmentLiterals: Record<string, string>;
+    arguments: readonly string[];
+    provenance: PackageProvenance;
+  }
   const connectorDefinition = (
-    id: string,
-    name: string,
-    provenance: PackageProvenance,
-    args: readonly string[],
+    input: PackageConnectorInput,
   ): ImportDefinition => ({
-    id,
-    name,
-    description: 'Managed npm package',
-    enabled: true,
-    environmentLiterals: {},
+    id: input.id,
+    name: input.name,
+    description: input.description,
+    enabled: input.enabled,
+    environmentLiterals: input.environmentLiterals,
     secretBindings: {},
     headerBindings: {},
     trustApproval: null,
     executionMode: 'native',
     transport: 'stdio',
     executable: adapter.nodeExecutable,
-    arguments: packageArguments(adapter.packagesDir, provenance, args),
-    package: provenance,
+    arguments: packageArguments(
+      adapter.packagesDir,
+      input.provenance,
+      input.arguments,
+    ),
+    package: input.provenance,
   });
 
   const resolve = (raw: unknown, owner: string): PackageJob => {
@@ -497,7 +509,14 @@ export function createPackageService(
     // The service keeps its own copy of the values and blanks it as soon as
     // the job is over. No value ever reaches a job, a route or an error.
     const env: Record<string, string> = { ...request.env };
-    const connectorId = `package-${randomUUID()}`;
+    const connectorId = request.connectorId ?? `package-${randomUUID()}`;
+    // The metadata of the connector the install commits. An imported
+    // connector brings its own; a manual install keeps the defaults.
+    const metadata = {
+      description: request.description ?? 'Managed npm package',
+      enabled: request.enabled ?? true,
+      environmentLiterals: request.environmentLiterals ?? {},
+    };
     // The slot is taken before the first await, so two installs never pass the
     // check at the same time. The refusal is inside the scope that blanks the
     // values: a busy install keeps no credential value in memory.
@@ -518,12 +537,15 @@ export function createPackageService(
       // and commits nothing. A refused name, an argument or the connector
       // limit is reported before anything is downloaded.
       const placeholder = placeholderProvenance();
-      const definition = connectorDefinition(
-        connectorId,
-        request.connectorName,
-        placeholder,
-        request.arguments,
-      );
+      const definition = connectorDefinition({
+        id: connectorId,
+        name: request.connectorName,
+        description: metadata.description,
+        enabled: metadata.enabled,
+        environmentLiterals: metadata.environmentLiterals,
+        arguments: request.arguments,
+        provenance: placeholder,
+      });
       const state = await host.inventory();
       planRegistry(
         {
@@ -587,12 +609,15 @@ export function createPackageService(
     const savePackageConnector = async (
       provenance: PackageProvenance,
     ): Promise<SaveOutcome> => {
-      const saved = connectorDefinition(
-        connectorId,
-        request.connectorName,
+      const saved = connectorDefinition({
+        id: connectorId,
+        name: request.connectorName,
+        description: metadata.description,
+        enabled: metadata.enabled,
+        environmentLiterals: metadata.environmentLiterals,
+        arguments: request.arguments,
         provenance,
-        request.arguments,
-      );
+      });
       const context = contextFor(provenance);
       let busy = false;
       // The draft of the save. It is built once and applied again while the

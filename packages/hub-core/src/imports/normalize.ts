@@ -9,6 +9,7 @@ import {
   EndpointSchema,
   ImportDefinitionSchema,
   PackageProposalSchema,
+  PortBindingsSchema,
   isPackageEnvName,
   type ImportDefinition,
   type ImportEntry,
@@ -16,8 +17,11 @@ import {
   type ImportPreview,
   type ImportWarning,
   type PackageProposal,
+  type RequiredCredentials,
 } from '@waleed/contracts';
+import { assertBinding } from '../auth/bindings.js';
 import { HubError } from '../errors.js';
+import { HUB_EXPORT_FORMAT } from './export.js';
 
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -72,6 +76,7 @@ const proposalName = PackageProposalSchema.shape.name;
 const proposalVersion = PackageProposalSchema.shape.version;
 const proposalSelector = PackageProposalSchema.shape.requestedVersion;
 const proposalEnvName = PackageProposalSchema.shape.envNames.element;
+const proposalEntry = PackageProposalSchema.shape.entry;
 // A path spec (a leading ".", "/", "\" or "~") or a drive letter.
 const pathSpec = /^[.\\/~]/;
 const driveSpec = /^[a-zA-Z]:/;
@@ -115,6 +120,379 @@ function packageProposal(
   });
   return parsed.success ? parsed.data : null;
 }
+
+// The hub export format: a versioned document of connectors that carries
+// credential names but never a credential value.
+const HUB_FORMAT = HUB_EXPORT_FORMAT;
+const HUB_KEYS = ['connectors', 'format', 'part', 'parts', 'version'];
+const HUB_MODES = ['remote', 'native', 'docker', 'package'] as const;
+type HubMode = (typeof HUB_MODES)[number];
+type CredentialFormat = 'raw' | 'bearer' | 'basic';
+// The metadata an imported package connector carries to its install.
+interface HubProposal {
+  connectorName?: string;
+  connectorId?: string;
+  description?: string;
+  entry?: string;
+  enabled?: boolean;
+  environmentLiterals?: Record<string, string>;
+}
+// What the hub branch knows about one connector before the shared per-entry
+// validation runs: the issues it found itself, the credential names it needs
+// and the fields the shared path does not carry.
+interface HubExtra {
+  issues: ImportIssue[];
+  credentials: RequiredCredentials;
+  portBindings?: { host: number; container: number }[];
+  proposal?: HubProposal;
+}
+// The fields of a hub connector, per execution mode. Every other field of the
+// document is an unsupported field.
+const HUB_MODE_FIELDS: Record<HubMode, readonly string[]> = {
+  remote: ['transport', 'endpoint', 'headerCredentials'],
+  native: [
+    'executable',
+    'arguments',
+    'environmentLiterals',
+    'environmentCredentials',
+  ],
+  docker: [
+    'image',
+    'command',
+    'arguments',
+    'portBindings',
+    'environmentLiterals',
+    'environmentCredentials',
+  ],
+  package: ['package', 'environmentLiterals', 'environmentCredentials'],
+};
+
+// The credential names of one location. Every name is checked with the rule
+// the Authentication dialog enforces for that location, so a name the hub
+// would refuse later is refused here.
+function hubEnvironmentNames(
+  raw: Record<string, unknown>,
+  mode: HubMode,
+  issues: ImportIssue[],
+): string[] {
+  const names: string[] = [];
+  const list = raw.environmentCredentials;
+  if (list === undefined) return names;
+  if (!Array.isArray(list) || list.length > 64) {
+    issues.push({ code: 'invalid_bindings', field: 'environment' });
+    return names;
+  }
+  const literals = Object.keys(object(raw.environmentLiterals) ?? {});
+  const seen = new Set<string>();
+  for (const item of list) {
+    if (typeof item !== 'string') {
+      issues.push({ code: 'invalid_bindings', field: 'environment' });
+      continue;
+    }
+    try {
+      assertBinding('environment', item, 'raw');
+    } catch {
+      issues.push({ code: 'invalid_bindings', field: 'environment' });
+      continue;
+    }
+    if (mode === 'package' && isPackageEnvName(item)) {
+      issues.push({ code: 'invalid_bindings', field: 'environment' });
+      continue;
+    }
+    const comparison = item.toLowerCase();
+    if (
+      seen.has(comparison) ||
+      literals.some((literal) => literal.toLowerCase() === comparison)
+    ) {
+      issues.push({ code: 'invalid_bindings', field: 'environment' });
+      continue;
+    }
+    seen.add(comparison);
+    names.push(item);
+  }
+  return names;
+}
+
+function hubHeaderCredentials(
+  raw: Record<string, unknown>,
+  issues: ImportIssue[],
+): { name: string; format: CredentialFormat }[] {
+  const headers: { name: string; format: CredentialFormat }[] = [];
+  const list = raw.headerCredentials;
+  if (list === undefined) return headers;
+  if (!Array.isArray(list) || list.length > 64) {
+    issues.push({ code: 'invalid_bindings', field: 'header' });
+    return headers;
+  }
+  const seen = new Set<string>();
+  for (const item of list) {
+    const entry = object(item);
+    const name = entry?.name;
+    const format = entry?.format;
+    if (
+      typeof name !== 'string' ||
+      (format !== 'raw' && format !== 'bearer' && format !== 'basic')
+    ) {
+      issues.push({ code: 'invalid_bindings', field: 'header' });
+      continue;
+    }
+    try {
+      assertBinding('header', name, format);
+    } catch {
+      issues.push({ code: 'invalid_bindings', field: 'header' });
+      continue;
+    }
+    const comparison = name.toLowerCase();
+    if (seen.has(comparison)) {
+      issues.push({ code: 'invalid_bindings', field: 'header' });
+      continue;
+    }
+    seen.add(comparison);
+    headers.push({ name, format });
+  }
+  return headers;
+}
+
+// The metadata of a package connector: the install keeps the name, the
+// identifier, the description, the enabled flag and the literals of the
+// source connector.
+function hubProposalMetadata(
+  raw: Record<string, unknown>,
+  pkg: Record<string, unknown> | null,
+): HubProposal {
+  const proposal: HubProposal = {};
+  const name = raw.name;
+  if (typeof name === 'string' && name.trim())
+    proposal.connectorName = name.trim();
+  const id = raw.id;
+  if (typeof id === 'string' && idOk(id)) proposal.connectorId = id;
+  const description = raw.description;
+  if (typeof description === 'string') proposal.description = description;
+  const enabled = raw.enabled;
+  if (typeof enabled === 'boolean') proposal.enabled = enabled;
+  const entry = pkg?.entry;
+  if (typeof entry === 'string') proposal.entry = entry;
+  if (own(raw, 'environmentLiterals')) {
+    const literals: Record<string, string> = {};
+    for (const [key, value] of Object.entries(
+      object(raw.environmentLiterals) ?? {},
+    ))
+      if (typeof value === 'string') literals[key] = value;
+    proposal.environmentLiterals = literals;
+  }
+  return proposal;
+}
+
+// What one execution mode of a hub connector contributes to its entry.
+interface HubPreparation {
+  fields: Record<string, unknown>;
+  credentials: RequiredCredentials;
+  portBindings?: { host: number; container: number }[];
+  proposal?: HubProposal;
+}
+
+const hubRemote = (
+  raw: Record<string, unknown>,
+  issues: ImportIssue[],
+): HubPreparation => ({
+  fields: { transport: raw.transport, url: raw.endpoint },
+  credentials: { environment: [], header: hubHeaderCredentials(raw, issues) },
+});
+
+const hubNative = (
+  raw: Record<string, unknown>,
+  issues: ImportIssue[],
+): HubPreparation => {
+  const fields: Record<string, unknown> = {
+    command: raw.executable,
+    args: raw.arguments,
+  };
+  if (own(raw, 'environmentLiterals'))
+    fields.environmentLiterals = raw.environmentLiterals;
+  return {
+    fields,
+    credentials: {
+      environment: hubEnvironmentNames(raw, 'native', issues),
+      header: [],
+    },
+  };
+};
+
+const hubDocker = (
+  raw: Record<string, unknown>,
+  issues: ImportIssue[],
+): HubPreparation => {
+  const fields: Record<string, unknown> = {
+    image: raw.image,
+    command: raw.command,
+    args: raw.arguments,
+  };
+  if (own(raw, 'environmentLiterals'))
+    fields.environmentLiterals = raw.environmentLiterals;
+  const ports =
+    raw.portBindings === undefined
+      ? null
+      : PortBindingsSchema.safeParse(raw.portBindings);
+  if (ports && !ports.success)
+    issues.push({ code: 'invalid_entry', field: 'portBindings' });
+  return {
+    fields,
+    credentials: {
+      environment: hubEnvironmentNames(raw, 'docker', issues),
+      header: [],
+    },
+    ...(ports?.success ? { portBindings: ports.data } : {}),
+  };
+};
+
+const hubPackage = (
+  raw: Record<string, unknown>,
+  issues: ImportIssue[],
+): HubPreparation => {
+  const pkg = object(raw.package);
+  const packageName = pkg?.name;
+  const packageVersion = pkg?.version;
+  const packageArguments = pkg?.arguments;
+  if (!pkg) issues.push({ code: 'invalid_entry', field: 'package' });
+  else {
+    if (
+      typeof packageName !== 'string' ||
+      !proposalName.safeParse(packageName).success
+    )
+      issues.push({ code: 'invalid_entry', field: 'package.name' });
+    if (
+      typeof packageVersion !== 'string' ||
+      !proposalVersion.safeParse(packageVersion).success
+    )
+      issues.push({ code: 'invalid_entry', field: 'package.version' });
+    if (
+      typeof pkg.entry !== 'string' ||
+      !proposalEntry.safeParse(pkg.entry).success
+    )
+      issues.push({ code: 'invalid_entry', field: 'package.entry' });
+    if (packageArguments !== undefined && !Array.isArray(packageArguments))
+      issues.push({ code: 'invalid_arguments', field: 'package.arguments' });
+  }
+  const fields: Record<string, unknown> = {};
+  if (own(raw, 'environmentLiterals'))
+    fields.environmentLiterals = raw.environmentLiterals;
+  // A managed package connector is the npx shape of its package, so the
+  // shared proposal path builds the proposal from it.
+  if (typeof packageName === 'string' && typeof packageVersion === 'string') {
+    fields.command = 'npx';
+    fields.args = [
+      `${packageName}@${packageVersion}`,
+      ...(Array.isArray(packageArguments) ? packageArguments : []),
+    ];
+  }
+  return {
+    fields,
+    credentials: {
+      environment: hubEnvironmentNames(raw, 'package', issues),
+      header: [],
+    },
+    proposal: hubProposalMetadata(raw, pkg),
+  };
+};
+
+const HUB_PREPARATIONS: Record<
+  HubMode,
+  (raw: Record<string, unknown>, issues: ImportIssue[]) => HubPreparation
+> = {
+  remote: hubRemote,
+  native: hubNative,
+  docker: hubDocker,
+  package: hubPackage,
+};
+
+// One hub connector becomes the source of one entry. The source carries the
+// fields the shared per-entry validation knows, so every name, endpoint,
+// executable, argument, literal and image is checked exactly as it is for
+// every other import shape.
+function prepareHubConnector(connector: unknown): {
+  fallbackName: string;
+  source: unknown;
+  extra: HubExtra;
+} {
+  const issues: ImportIssue[] = [];
+  const raw = object(connector);
+  if (!raw)
+    return {
+      fallbackName: '',
+      source: connector,
+      extra: { issues, credentials: { environment: [], header: [] } },
+    };
+  const mode = raw.executionMode;
+  const preparation = HUB_MODES.includes(mode as HubMode)
+    ? HUB_PREPARATIONS[mode as HubMode](raw, issues)
+    : null;
+  if (!preparation)
+    issues.push({ code: 'invalid_entry', field: 'executionMode' });
+  const source: Record<string, unknown> = {};
+  for (const field of ['id', 'name', 'description', 'enabled'])
+    if (own(raw, field)) source[field] = raw[field];
+  Object.assign(source, preparation?.fields ?? {});
+  const known = new Set([
+    'id',
+    'name',
+    'description',
+    'enabled',
+    'executionMode',
+    ...(HUB_MODES.includes(mode as HubMode)
+      ? HUB_MODE_FIELDS[mode as HubMode]
+      : []),
+  ]);
+  for (const field of sorted(raw))
+    if (!known.has(field))
+      issues.push({ code: 'unsupported_fields', field: fieldLabel(field) });
+  return {
+    fallbackName: typeof raw.name === 'string' ? raw.name : '',
+    source,
+    extra: {
+      issues,
+      credentials: preparation?.credentials ?? { environment: [], header: [] },
+      ...(preparation?.portBindings
+        ? { portBindings: preparation.portBindings }
+        : {}),
+      ...(preparation?.proposal ? { proposal: preparation.proposal } : {}),
+    },
+  };
+}
+
+// The hub document: the envelope is refused when it is not the format the
+// hub wrote, and every connector becomes one entry.
+function prepareHubDocument(document: Record<string, unknown>): {
+  entries: Array<[string, unknown]>;
+  extras: HubExtra[];
+} {
+  const { version, part, parts, connectors } = document;
+  if (version !== 1) throw invalid();
+  if (!Number.isInteger(part) || !Number.isInteger(parts)) throw invalid();
+  if (
+    (part as number) < 1 ||
+    (parts as number) < 1 ||
+    (part as number) > (parts as number)
+  )
+    throw invalid();
+  if (
+    !Array.isArray(connectors) ||
+    connectors.length < 1 ||
+    connectors.length > 32
+  )
+    throw invalid();
+  const entries: Array<[string, unknown]> = [];
+  const extras: HubExtra[] = [];
+  for (const connector of connectors) {
+    const prepared = prepareHubConnector(connector);
+    entries.push([prepared.fallbackName, prepared.source]);
+    extras.push(prepared.extra);
+  }
+  return { entries, extras };
+}
+
+const isHubDocument = (document: Record<string, unknown>): boolean =>
+  document.format === HUB_FORMAT &&
+  sorted(document).join(',') === HUB_KEYS.join(',');
 
 export interface PrivateImport {
   format: ImportPreview['format'];
@@ -166,16 +544,24 @@ export function normalizeImport(
   let format: ImportPreview['format'] = 'single';
   let entries: Array<[string, unknown]>;
   let wrapperIssues: ImportIssue[] = [];
+  // The hub branch owns its own entries; every other shape keeps the shared
+  // per-entry validation.
+  let hubExtras: HubExtra[] = [];
   const wrappers = ['mcpServers', 'servers', 'mcp', 'server'].filter((key) =>
     own(document, key),
   );
-  if (
+  if (isHubDocument(document)) {
+    format = 'hub';
+    const hub = prepareHubDocument(document);
+    entries = hub.entries;
+    hubExtras = hub.extras;
+  } else if (
     wrappers.length > 1 ||
     (wrappers.length &&
       ['command', 'url', 'image', 'remote'].some((key) => own(document, key)))
   )
     throw invalid();
-  if (wrappers.length) {
+  else if (wrappers.length) {
     const wrapper = wrappers[0]!;
     wrapperIssues = sorted(document)
       .filter((key) => key !== wrapper)
@@ -274,7 +660,13 @@ export function normalizeImport(
     for (const [index, [wrapperName, raw]] of entries.entries()) {
       const value = object(raw);
       const key = `entry-${index + 1}`;
-      const issues: ImportIssue[] = structuredClone(wrapperIssues);
+      // The hub branch brings the issues it found itself; every other shape
+      // brings none.
+      const extra = hubExtras[index];
+      const issues: ImportIssue[] = structuredClone([
+        ...wrapperIssues,
+        ...(extra?.issues ?? []),
+      ]);
       const issue = (code: ImportIssue['code'], field: string) => {
         if (issues.length < 100) issues.push({ code, field });
       };
@@ -723,13 +1115,61 @@ export function normalizeImport(
         if (proposal) {
           result.packageProposal = proposal;
           result.selected = false;
-        } else if (!inline) issue('invalid_command', 'package_spec');
+        } else if (!inline) {
+          // A hub entry carries its own package fields, so it reports the
+          // package it refused instead of a command it never had.
+          if (extra) issue('invalid_entry', 'package');
+          else issue('invalid_command', 'package_spec');
+        }
       }
       // Field labels are metadata only. Mask any known extracted value repeated
       // in a property name as well; unknown values never enter the DTO at all.
       for (const item of issues)
         if (containsSecret(item.field)) item.field = '[redacted field]';
       result.warnings = [...warnings].sort();
+    }
+    // The hub entries carry what the shared path does not: the credential
+    // names the user adds after saving, the docker ports and the metadata of
+    // a package connector.
+    for (const [index, entry] of draft.entries.entries()) {
+      const extra = hubExtras[index];
+      if (!extra) continue;
+      entry.requiredCredentials = extra.credentials;
+      if (
+        extra.credentials.environment.length ||
+        extra.credentials.header.length
+      )
+        entry.warnings = [
+          ...new Set<ImportWarning>([
+            ...entry.warnings,
+            'credentials_required',
+          ]),
+        ].sort();
+      if (extra.portBindings && entry.definition) {
+        const withPorts = ImportDefinitionSchema.safeParse({
+          ...entry.definition,
+          portBindings: extra.portBindings,
+        });
+        if (withPorts.success) entry.definition = withPorts.data;
+        else {
+          entry.definition = null;
+          entry.issues.push({ code: 'invalid_entry', field: 'portBindings' });
+        }
+      }
+      if (extra.proposal && entry.packageProposal) {
+        const proposal = PackageProposalSchema.safeParse({
+          ...entry.packageProposal,
+          ...extra.proposal,
+          // The literals travel as literals; only the credential names are
+          // asked for again at the install.
+          envNames: extra.credentials.environment,
+        });
+        if (proposal.success) entry.packageProposal = proposal.data;
+        else {
+          entry.packageProposal = null;
+          entry.issues.push({ code: 'invalid_entry', field: 'package' });
+        }
+      }
     }
     for (const entry of draft.entries)
       for (const item of entry.issues)
