@@ -1078,7 +1078,10 @@ export function App() {
                     </div>
                     <div>
                       <dt>Windows sign-in startup</dt>
-                      <dd>Not implemented · no startup entry installed</dd>
+                      <dd>
+                        Managed by the tray icon · right-click the Waleed MCP
+                        Hub icon and use Start with Windows
+                      </dd>
                     </div>
                   </dl>
                 </section>
