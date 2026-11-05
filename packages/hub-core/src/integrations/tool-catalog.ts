@@ -19,6 +19,9 @@ export interface ToolCatalogStore {
 
 // The most tools one bridge advertises across all of its connectors.
 export const MAX_BRIDGE_TOOLS = 512;
+// The largest catalog file the bridge reads back. A larger catalog is never
+// written, so it cannot replace the last one a restart can still read.
+export const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
 
 // An unreadable, oversized or malformed catalog is no catalog: the bridge
 // then discovers as if it had never listed.
@@ -70,12 +73,15 @@ export function serializeToolCatalog(catalog: ToolCatalog) {
 
 // Replaces the catalog file atomically, readable by the current user only.
 export async function writeToolCatalogFile(path: string, catalog: ToolCatalog) {
+  const text = serializeToolCatalog(catalog);
+  if (Buffer.byteLength(text) > MAX_CATALOG_BYTES)
+    throw new Error('The tool catalog exceeds the readable size.');
   await assertNoLinks(path, true);
   const temporary = join(dirname(path), `.tool-catalog-${randomUUID()}.tmp`);
   const file = await open(temporary, 'wx', 0o600);
   try {
     try {
-      await file.writeFile(serializeToolCatalog(catalog));
+      await file.writeFile(text);
       await file.sync();
     } finally {
       await file.close();

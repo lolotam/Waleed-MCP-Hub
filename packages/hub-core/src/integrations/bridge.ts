@@ -83,6 +83,7 @@ import {
 } from './agent-guide.js';
 import {
   MAX_BRIDGE_TOOLS,
+  MAX_CATALOG_BYTES,
   parseToolCatalog,
   writeToolCatalogFile,
   type CatalogEntry,
@@ -1792,7 +1793,8 @@ export function createAgentBridge(
   return bridgeServer;
 }
 // The largest protected file the bridge reads, and the chunk it reads it in.
-const protectedLimit = 4 * 1024 * 1024;
+// The tool catalog is the largest of them; its writer enforces the same bound.
+const protectedLimit = MAX_CATALOG_BYTES;
 const protectedChunk = 64 * 1024;
 
 // A protected file is opened for reading only. On POSIX the open never blocks

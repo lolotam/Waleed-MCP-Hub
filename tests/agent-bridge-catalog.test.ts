@@ -3,6 +3,9 @@
 // start. A bridge with a catalog answers from the last discovered tools and
 // refreshes them in the background.
 import { afterEach, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -18,11 +21,14 @@ import {
   createAgentBridge,
   type BridgeConnect,
   type BridgeSession,
+  readProtectedText,
 } from '../packages/hub-core/src/integrations/bridge.js';
 import {
   MAX_BRIDGE_TOOLS,
+  MAX_CATALOG_BYTES,
   parseToolCatalog,
   serializeToolCatalog,
+  writeToolCatalogFile,
   type ToolCatalog,
 } from '../packages/hub-core/src/integrations/tool-catalog.js';
 import { profileState } from './helpers/runtime.js';
@@ -432,6 +438,43 @@ it('advertises 464 tools from two connectors without truncation', async () => {
   await names(open.agent);
   await expect.poll(() => open!.stored.catalog?.has('connector-1')).toBe(true);
   expect(await names(open.agent)).toHaveLength(464);
+});
+
+// A one-tool catalog whose serialized form is exactly `bytes` long.
+const catalogOfSize = (bytes: number): ToolCatalog => {
+  const sized = (description: string): ToolCatalog =>
+    new Map([
+      ['c', { hash: 'a'.repeat(64), tools: [{ ...tool('big'), description }] }],
+    ]);
+  const base = Buffer.byteLength(serializeToolCatalog(sized('')));
+  return sized('x'.repeat(bytes - base));
+};
+
+// The writer and the restart's reader share one size bound: what is written
+// is read back, and a larger catalog never replaces the readable one.
+it.each([
+  ['the largest stored catalog is read back', MAX_CATALOG_BYTES, true],
+  [
+    'an oversized catalog keeps the previous file',
+    MAX_CATALOG_BYTES + 1,
+    false,
+  ],
+])('%s after a restart', async (_case, bytes, stored) => {
+  const directory = await mkdtemp(join(tmpdir(), 'wmh-catalog-'));
+  try {
+    const path = join(directory, 'tool-catalog-claude.json');
+    const previous = catalogOfSize(1024);
+    await writeToolCatalogFile(path, previous);
+    const next = catalogOfSize(bytes);
+    const write = writeToolCatalogFile(path, next);
+    if (stored) await write;
+    else await expect(write).rejects.toThrow();
+    expect(parseToolCatalog(await readProtectedText(path))).toEqual(
+      stored ? next : previous,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 it('bounds merged cached tools when one peer fails and another returns a large fresh catalog', async () => {
