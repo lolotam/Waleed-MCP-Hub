@@ -265,7 +265,7 @@ configuration is rewritten. Unknown native versions stay unknown.
 agent connected or authenticated. Follow its reconnect/trust guidance. The bridge
 exposes approved enabled registry connectors as tools; discovery invokes no tools,
 and actual tool calls are forwarded only on explicit agent requests. It is tools-only:
-no resource/prompt forwarding. Two simultaneous requests, 256 tools, eight pages per
+no resource/prompt forwarding. Two simultaneous requests, 512 tools, eight pages per
 peer and bounded contained sessions apply; native peers are restarted per request.
 Secretless Docker transport exists, but live image compatibility/cleanup is unverified;
 keychain-backed Docker bridge execution is unsupported.

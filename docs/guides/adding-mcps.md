@@ -274,7 +274,7 @@ launchers are saved as data only; convert them as described in
 - Each call is capped at 60 seconds and 1 MiB of output; a session at 64 MiB of
   output. One bridge keeps at most 16 live sessions.
 - Agents see **tools only**: resources and prompts are not forwarded.
-- At most 256 tools are exposed across all connectors.
+- At most 512 tools are exposed across all connectors. Blocked tools do not count.
 
 ## When something fails
 

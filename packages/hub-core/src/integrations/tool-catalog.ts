@@ -17,7 +17,8 @@ export interface ToolCatalogStore {
   write(catalog: ToolCatalog): Promise<void>;
 }
 
-const maxTools = 256;
+// The most tools one bridge advertises across all of its connectors.
+export const MAX_BRIDGE_TOOLS = 512;
 
 // An unreadable, oversized or malformed catalog is no catalog: the bridge
 // then discovers as if it had never listed.
@@ -48,7 +49,7 @@ export function parseToolCatalog(text: string): ToolCatalog | undefined {
     )
       return undefined;
     count += tools.length;
-    if (count > maxTools) return undefined;
+    if (count > MAX_BRIDGE_TOOLS) return undefined;
     const parsed: Tool[] = [];
     for (const tool of tools) {
       const checked = ToolSchema.safeParse(tool);

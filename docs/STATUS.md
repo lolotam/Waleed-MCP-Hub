@@ -248,7 +248,7 @@ requests; nothing is deployed.
   browser fixture. It now uses a visibly synthetic spaced value; generated
   `desktop-builds/` joins other generated-output exclusions. Maintained source and
   fixtures continue through the unchanged credential signatures.
-- Bridge supports tools only, at most two simultaneous requests, 256 aggregated
+- Bridge supports tools only, at most two simultaneous requests, 512 aggregated
   tools/eight pages per peer, bounded HTTP/native/Docker sessions, secret-echo refusal
   and isolated cleanup diagnostics. Secretless Docker transport exists but live
   image execution/cleanup is unverified; keychain-backed Docker execution and
