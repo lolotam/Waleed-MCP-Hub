@@ -96,6 +96,9 @@ async function main() {
           },
         )
       : undefined;
+  const { version } = JSON.parse(
+    await readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+  ) as { version: string };
   // Include adapter construction in startup cleanup: argument evaluation can
   // reject before createHubServer's promise exists (for example unsafe scopes).
   const hub = await (async () =>
@@ -110,16 +113,8 @@ async function main() {
         ),
       ),
       webRoot,
-      updates: createUpdateChecker(
-        (
-          JSON.parse(
-            await readFile(
-              new URL('../../../package.json', import.meta.url),
-              'utf8',
-            ),
-          ) as { version: string }
-        ).version,
-      ),
+      updates: createUpdateChecker(version),
+      version,
       ...(process.env.HUB_DESKTOP === '1'
         ? {
             shutdown: () => {

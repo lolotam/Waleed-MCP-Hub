@@ -822,6 +822,35 @@ main {
   font-size: 11px;
   white-space: nowrap;
 }
+/* One compact line per registry change: operation · revision · time. */
+.activity-list.single-line li {
+  gap: 12px;
+  padding-block: 10px;
+  min-height: 0;
+  flex-wrap: nowrap;
+}
+.activity-list.single-line .row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.activity-list.single-line h3 {
+  flex-shrink: 0;
+  margin: 0;
+  font-size: 14px;
+}
+.activity-list.single-line .activity-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 12px;
+}
+.activity-list.single-line time {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 .profile-list .muted,
 .activity-list time {
   font-size: 12px;

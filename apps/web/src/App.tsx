@@ -243,12 +243,13 @@ export function App() {
             Personal workspace <span className="slash">/</span>{' '}
             <strong>{page}</strong>
           </span>
-          <span className="stage-label">
-            {bootstrap?.capabilities.connectorManagement
-              ? 'Lifecycle build'
-              : 'Foundation build'}{' '}
-            <span className="version">v0.1</span>
-          </span>
+          {bootstrap?.version && (
+            <span className="stage-label">
+              <span className="version" title="Installed version">
+                v{bootstrap.version}
+              </span>
+            </span>
+          )}
         </header>
         <main id="main" tabIndex={-1}>
           <div className="page-heading">
@@ -724,16 +725,16 @@ export function App() {
                         </p>
                       </div>
                     ) : (
-                      <ul className="activity-list">
+                      <ul className="activity-list single-line">
                         {[...activity].reverse().map((event) => (
                           <li key={event.id}>
                             <Icon name="check" size={18} />
                             <div className="row-main">
                               <h3>{event.operation.replaceAll('_', ' ')}</h3>
-                              <p>
+                              <span className="activity-meta">
                                 Registry revision {event.priorRevision} →{' '}
                                 {event.newRevision}
-                              </p>
+                              </span>
                             </div>
                             <time dateTime={event.time}>
                               {new Date(event.time).toLocaleString()}

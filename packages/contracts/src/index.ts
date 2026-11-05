@@ -469,6 +469,8 @@ export const SessionResponseSchema = z.strictObject({
 export const ApplyRequestSchema = z.strictObject({ previewId: IdSchema });
 export const BootstrapSchema = z.strictObject({
   stage: z.enum(['foundation', 'discovery']),
+  // The released application version from the root package.json.
+  version: z.string().max(40).optional(),
   revision: Revision,
   runtime: z.strictObject({
     node: z.string().max(40),

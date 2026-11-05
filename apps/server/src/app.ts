@@ -39,6 +39,7 @@ export interface ServerOptions {
   now?: () => number;
   shutdown?: () => void;
   updates?: UpdateChecker;
+  version?: string;
 }
 
 export async function createHubServer(options: ServerOptions) {
@@ -358,6 +359,7 @@ export async function createHubServer(options: ServerOptions) {
   app.get('/api/bootstrap', async () =>
     BootstrapSchema.parse({
       stage: options.discovery ? 'discovery' : 'foundation',
+      ...(options.version ? { version: options.version } : {}),
       revision: (await options.lifecycle.inventory()).revision,
       runtime: { node: process.versions.node, platform: process.platform },
       capabilities: {
