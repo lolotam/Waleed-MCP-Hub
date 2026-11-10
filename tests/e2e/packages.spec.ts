@@ -86,6 +86,13 @@ async function fakePackageApi(
   page: Page,
   options: {
     replacementName?: string;
+    artifactSource?: {
+      kind: 'github-release';
+      repository: string;
+      tag: string;
+      assetName: string;
+      sha256: string;
+    };
     failResolve?: boolean;
     losePolls?: number;
     loseStart?: boolean;
@@ -100,6 +107,7 @@ async function fakePackageApi(
     installPolls: number;
     installBody: Record<string, unknown> | null;
     replaceBody?: Record<string, unknown>;
+    resolveBody?: Record<string, unknown>;
   } = { resolvePolls: 0, installPolls: 0, installBody: null };
   const answer = async (
     route: Parameters<Parameters<Page['route']>[1]>[0],
@@ -132,6 +140,7 @@ async function fakePackageApi(
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === '/api/packages/resolve') {
+      state.resolveBody = request.postDataJSON() as Record<string, unknown>;
       await answer(route, job({}), 202);
       return;
     }
@@ -195,6 +204,9 @@ async function fakePackageApi(
           phase: 'complete',
           preview: {
             ...preview(),
+            ...(options.artifactSource
+              ? { source: options.artifactSource }
+              : {}),
             name: options.replacementName ?? preview().name,
           },
           completedAt: '2026-01-01T00:00:05.000Z',
@@ -604,108 +616,219 @@ test('a failed list reload adds the stale-list sentence', async ({ page }) => {
   );
 });
 
-test('changing a managed package requires explicit publisher confirmation', async ({
-  page,
-}) => {
-  const connectorId = 'package-demo';
-  await page.route('**/api/connectors', (route) =>
-    route.fulfill({
-      contentType: 'application/json',
-      body: JSON.stringify({
-        connectors: [
-          {
-            id: connectorId,
-            name: 'Demo MCP',
-            description: '',
-            enabled: false,
-            revision: 4,
-            executionHash: LOCK_HASH,
-            executionMode: 'native',
-            transport: 'stdio',
-            executable: 'C:/synthetic/node.exe',
-            arguments: [
-              '--no-global-search-paths',
-              'C:/synthetic/bin/demo-mcp.js',
-            ],
-            secretBindings: {},
-            headerBindings: {},
-            trustApproval: null,
-            createdAt: '2026-01-01T00:00:00.000Z',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-            package: {
-              ecosystem: 'npm',
-              name: 'demo-mcp',
-              version: '1.1.0',
-              entry: 'demo-mcp',
-              entryPath: 'bin/demo-mcp.js',
-              installId: INSTALL_JOB,
-              integrity: INTEGRITY,
-              lockHash: LOCK_HASH,
-              manifestHash: LOCK_HASH,
+for (const variant of ['npm', 'github', 'github-update'])
+  test(`changing a managed package requires explicit publisher/source confirmation (${variant})`, async ({
+    page,
+  }) => {
+    const artifact = variant !== 'npm';
+    const fromGithub = variant === 'github-update';
+    const artifactSource = {
+      kind: 'github-release' as const,
+      repository: 'owner/demo',
+      tag: 'v1.2.0',
+      assetName: 'demo.tgz',
+      sha256: 'b'.repeat(64),
+    };
+    const oldSource = {
+      ...artifactSource,
+      tag: 'v1.1.0',
+      sha256: 'c'.repeat(64),
+    };
+    const connectorId = 'package-demo';
+    await page.route('**/api/connectors', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          connectors: [
+            {
+              id: connectorId,
+              name: 'Demo MCP',
+              description: '',
+              enabled: false,
+              revision: 4,
+              executionHash: LOCK_HASH,
+              executionMode: 'native',
+              transport: 'stdio',
+              executable: 'C:/synthetic/node.exe',
+              arguments: [
+                '--no-global-search-paths',
+                'C:/synthetic/bin/demo-mcp.js',
+              ],
+              secretBindings: {},
+              headerBindings: {},
+              trustApproval: null,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              package: {
+                ecosystem: 'npm',
+                ...(fromGithub ? { source: oldSource } : {}),
+                name: 'demo-mcp',
+                version: '1.1.0',
+                entry: 'demo-mcp',
+                entryPath: 'bin/demo-mcp.js',
+                installId: INSTALL_JOB,
+                integrity: INTEGRITY,
+                lockHash: LOCK_HASH,
+                manifestHash: LOCK_HASH,
+              },
             },
-          },
-        ],
-        observations: [],
-        discovering: false,
+          ],
+          observations: [],
+          discovering: false,
+        }),
       }),
-    }),
-  );
-  const state = await fakePackageApi(page, {
-    replacementName: '@owner/demo-mcp',
-  });
-  await page.goto(await launch());
-  await page
-    .getByTestId('connector-package-demo')
-    .getByRole('button', { name: /Demo MCP npm/ })
-    .click();
-  await page
-    .getByRole('button', { name: 'Change package', exact: true })
-    .click();
-  await page
-    .getByLabel('Replacement package name', { exact: true })
-    .fill('@owner/demo-mcp');
-  await page.getByLabel('Replacement version', { exact: true }).fill('1.2.0');
-  await page.getByRole('button', { name: 'Look up', exact: true }).click();
-  await expect(
-    page.getByRole('heading', { name: '@owner/demo-mcp@1.2.0', exact: true }),
-  ).toBeVisible();
-  await page.getByRole('radio', { name: /bin\/demo-mcp-alt\.js/ }).check();
-  await page.getByLabel(/This package has install scripts/).check();
-  await page.getByLabel(/This release is younger than 7 days/).check();
-  const replace = page.getByRole('button', { name: 'Replace', exact: true });
-  await expect(replace).toBeDisabled();
-  await page
-    .getByLabel('I confirm changing the package and publisher', { exact: true })
-    .check();
-  await expect(replace).toBeEnabled();
-  await page
-    .getByRole('button', { name: 'Look up again', exact: true })
-    .click();
-  await page.getByRole('button', { name: 'Look up', exact: true }).click();
-  await expect(
-    page.getByRole('heading', { name: '@owner/demo-mcp@1.2.0', exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByLabel('I confirm changing the package and publisher', {
-      exact: true,
-    }),
-  ).not.toBeChecked();
-  await page.getByRole('radio', { name: /bin\/demo-mcp-alt\.js/ }).check();
-  await page.getByLabel(/This package has install scripts/).check();
-  await page.getByLabel(/This release is younger than 7 days/).check();
-  await expect(replace).toBeDisabled();
-  await page
-    .getByLabel('I confirm changing the package and publisher', { exact: true })
-    .check();
-  await replace.click();
-  await expect
-    .poll(() => state.replaceBody)
-    .toEqual({
-      connectorId,
-      expectedConnectorRevision: 4,
-      previewId: PREVIEW_ID,
-      entry: 'demo-mcp-alt',
-      acknowledgedWarnings: ['install_scripts', 'recent_release'],
-      packageNameChange: { from: 'demo-mcp', to: '@owner/demo-mcp' },
+    );
+    const state = await fakePackageApi(page, {
+      replacementName: '@owner/demo-mcp',
+      ...(artifact ? { artifactSource } : {}),
     });
-});
+    await page.goto(await launch());
+    await page
+      .getByTestId('connector-package-demo')
+      .getByRole('button', {
+        name: fromGithub ? /Demo MCP GitHub/ : /Demo MCP npm/,
+      })
+      .click();
+    if (fromGithub) {
+      await expect(
+        page.getByText('GitHub Release source', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText(oldSource.sha256, { exact: true }),
+      ).toBeVisible();
+    }
+    await page
+      .getByRole('button', { name: 'Change package', exact: true })
+      .click();
+    await page
+      .getByLabel('Replacement package name', { exact: true })
+      .fill('@owner/demo-mcp');
+    await page.getByLabel('Replacement version', { exact: true }).fill('1.2.0');
+    if (artifact) {
+      await page
+        .getByLabel('Package source', { exact: true })
+        .selectOption('github');
+      await page
+        .getByLabel('GitHub repository', { exact: true })
+        .fill(artifactSource.repository);
+      await page
+        .getByLabel('Release tag', { exact: true })
+        .fill(artifactSource.tag);
+      await page
+        .getByLabel('Asset name (.tgz)', { exact: true })
+        .fill(artifactSource.assetName);
+      await page
+        .getByLabel('Expected SHA256', { exact: true })
+        .fill(artifactSource.sha256);
+      if (fromGithub) {
+        const current = page.getByRole('region', {
+          name: 'Currently installed GitHub Release',
+          exact: true,
+        });
+        await expect(current).toContainText(oldSource.tag);
+        await expect(current).toContainText(oldSource.sha256);
+        await expect(
+          page.getByRole('button', { name: 'Check for update', exact: true }),
+        ).toHaveCount(0);
+      }
+    }
+    await page.getByRole('button', { name: 'Look up', exact: true }).click();
+    await expect(
+      page.getByRole('heading', { name: '@owner/demo-mcp@1.2.0', exact: true }),
+    ).toBeVisible();
+    await page.getByRole('radio', { name: /bin\/demo-mcp-alt\.js/ }).check();
+    await page.getByLabel(/This package has install scripts/).check();
+    await page.getByLabel(/This release is younger than 7 days/).check();
+    const replace = page.getByRole('button', { name: 'Replace', exact: true });
+    await expect(replace).toBeDisabled();
+    await page
+      .getByLabel('I confirm changing the package and publisher', {
+        exact: true,
+      })
+      .check();
+    if (artifact) {
+      await expect(replace).toBeDisabled();
+      await expect(
+        page.getByText(`Verified SHA256: ${artifactSource.sha256}`, {
+          exact: true,
+        }),
+      ).toBeVisible();
+      await page
+        .getByLabel(
+          'I confirm changing the package source and reviewed the archive hash',
+          { exact: true },
+        )
+        .check();
+      expect(state.resolveBody).toEqual({
+        name: '@owner/demo-mcp',
+        version: '1.2.0',
+        source: artifactSource,
+      });
+    }
+    await expect(replace).toBeEnabled();
+    await page
+      .getByRole('button', { name: 'Look up again', exact: true })
+      .click();
+    await page.getByRole('button', { name: 'Look up', exact: true }).click();
+    await expect(
+      page.getByRole('heading', { name: '@owner/demo-mcp@1.2.0', exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByLabel('I confirm changing the package and publisher', {
+        exact: true,
+      }),
+    ).not.toBeChecked();
+    if (artifact)
+      await expect(
+        page.getByLabel(
+          'I confirm changing the package source and reviewed the archive hash',
+          { exact: true },
+        ),
+      ).not.toBeChecked();
+    await page.getByRole('radio', { name: /bin\/demo-mcp-alt\.js/ }).check();
+    await page.getByLabel(/This package has install scripts/).check();
+    await page.getByLabel(/This release is younger than 7 days/).check();
+    await expect(replace).toBeDisabled();
+    await page
+      .getByLabel('I confirm changing the package and publisher', {
+        exact: true,
+      })
+      .check();
+    if (artifact)
+      await page
+        .getByLabel(
+          'I confirm changing the package source and reviewed the archive hash',
+          { exact: true },
+        )
+        .check();
+    await replace.click();
+    await expect
+      .poll(() => state.replaceBody)
+      .toEqual({
+        connectorId,
+        expectedConnectorRevision: 4,
+        previewId: PREVIEW_ID,
+        entry: 'demo-mcp-alt',
+        acknowledgedWarnings: ['install_scripts', 'recent_release'],
+        packageNameChange: { from: 'demo-mcp', to: '@owner/demo-mcp' },
+        ...(artifact
+          ? {
+              sourceChange: {
+                from: fromGithub ? oldSource : null,
+                to: artifactSource,
+              },
+            }
+          : {}),
+      });
+    if (fromGithub) {
+      await expect(
+        page.getByText(/Replaced with @owner\/demo-mcp@1\.2\.0\./),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('region', {
+          name: 'Currently installed GitHub Release',
+          exact: true,
+        }),
+      ).toHaveCount(0);
+    }
+  });

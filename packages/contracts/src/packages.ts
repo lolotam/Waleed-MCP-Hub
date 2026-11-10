@@ -111,8 +111,30 @@ const ConnectorIdSchema = z
   .max(80)
   .regex(/^[a-z0-9][a-z0-9_-]*$/);
 
+// Explicit public release identity; no arbitrary URL, path or credential input.
+export const GitHubArtifactSourceSchema = z.strictObject({
+  kind: z.literal('github-release'),
+  repository: z
+    .string()
+    .max(201)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
+  tag: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  assetName: z
+    .string()
+    .min(5)
+    .max(200)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.tgz$/),
+  sha256: Sha256HexSchema,
+});
+export type GitHubArtifactSource = z.infer<typeof GitHubArtifactSourceSchema>;
+
 export const PackageProvenanceSchema = z.strictObject({
   ecosystem: z.literal('npm'),
+  source: GitHubArtifactSourceSchema.optional(),
   name: PackageNameSchema,
   version: ExactVersionSchema,
   entry: PackageEntrySchema,
@@ -153,12 +175,23 @@ export const PackageWarningSchema = z.enum([
   'large_size',
   'size_unknown',
 ]);
-export const PackageResolveRequestSchema = z.strictObject({
-  name: PackageNameSchema,
-  version: z.union([ExactVersionSchema, VersionSelectorSchema]).optional(),
-});
+export const PackageResolveRequestSchema = z
+  .strictObject({
+    name: PackageNameSchema,
+    version: z.union([ExactVersionSchema, VersionSelectorSchema]).optional(),
+    source: GitHubArtifactSourceSchema.optional(),
+  })
+  .refine(
+    (request) =>
+      !request.source || ExactVersionSchema.safeParse(request.version).success,
+    {
+      message: 'GitHub artifacts require an exact package version.',
+      path: ['version'],
+    },
+  );
 // The frozen lock itself stays server-side; only its hash travels here.
 export const PackagePreviewSchema = z.strictObject({
+  source: GitHubArtifactSourceSchema.optional(),
   previewId: z.uuid(),
   name: PackageNameSchema,
   version: ExactVersionSchema,
@@ -196,6 +229,12 @@ export const PackageInstallRequestSchema = z.strictObject({
   environmentLiterals: PackageLiteralsSchema.optional(),
 });
 export const PackageReplaceRequestSchema = z.strictObject({
+  sourceChange: z
+    .strictObject({
+      from: GitHubArtifactSourceSchema.nullable(),
+      to: GitHubArtifactSourceSchema.nullable(),
+    })
+    .optional(),
   connectorId: ConnectorIdSchema,
   expectedConnectorRevision: z.number().int().min(1),
   previewId: z.uuid(),

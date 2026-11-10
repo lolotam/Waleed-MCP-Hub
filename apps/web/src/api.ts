@@ -71,10 +71,10 @@ const packageErrorTexts: Record<PackageErrorCode, string> = {
   unsupported_dependency:
     'A dependency is not a registry package (git, URL, file or alias), so the hub refuses it.',
   registry_unavailable:
-    'The npm registry could not be reached. Try again later.',
+    'The package source could not be reached. Try again later.',
   foreign_host:
-    'The install tried to reach a host other than the npm registry and was stopped.',
-  install_failed: 'npm could not install the package.',
+    'The package operation tried to reach an unapproved host and was stopped.',
+  install_failed: 'The package could not be prepared or installed.',
   install_limit:
     'The package is too large (size, file count, package count or free disk space).',
   integrity_mismatch:

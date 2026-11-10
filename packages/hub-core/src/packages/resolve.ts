@@ -4,12 +4,18 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type {
   PackagePreview,
+  GitHubArtifactSource,
   PackageResolveRequest,
   PackageWarning,
 } from '@waleed/contracts';
 import { PackageProvenanceSchema } from '@waleed/contracts';
 import type { ProcessRunner } from '../ports.js';
 import { PackageFault } from './fault.js';
+import {
+  ROOT_ARTIFACT,
+  downloadArtifact,
+  inspectArtifact,
+} from './artifact.js';
 import { normalizeBin } from './entry.js';
 import { createRegistryFetcher, registryPath } from './fetch.js';
 import {
@@ -181,7 +187,12 @@ export interface ValidatedLock {
 // request asked for.
 export const validateLock = (
   lock: unknown,
-  root: { name: string; version: string; integrity: string },
+  root: {
+    name: string;
+    version: string;
+    integrity: string;
+    source?: GitHubArtifactSource;
+  },
   origin: string,
 ): ValidatedLock => {
   const unsupported = () => new PackageFault('unsupported_dependency');
@@ -221,7 +232,12 @@ export const validateLock = (
     )
       throw unsupported();
     const resolved = entry.resolved;
-    if (typeof resolved !== 'string' || !resolved.startsWith(`${origin}/`))
+    if (
+      typeof resolved !== 'string' ||
+      (isRoot && root.source
+        ? resolved !== `file:${ROOT_ARTIFACT}`
+        : !resolved.startsWith(`${origin}/`))
+    )
       throw unsupported();
     const integrity = entry.integrity;
     if (
@@ -335,10 +351,14 @@ const summarizeDocument = (
 // The staging manifest of one package: the exact bytes the hub writes into
 // the staging project of a lookup and into the install folder of an install.
 // Both have to be the same, so npm resolves and installs the same tree.
-export const stagingPackageJson = (name: string, version: string): string =>
+export const stagingPackageJson = (
+  name: string,
+  version: string,
+  source?: GitHubArtifactSource,
+): string =>
   `${JSON.stringify({
     private: true,
-    dependencies: { [name]: version },
+    dependencies: { [name]: source ? `file:${ROOT_ARTIFACT}` : version },
   })}\n`;
 
 export interface ResolvePackageOptions {
@@ -380,46 +400,67 @@ export const resolvePackage = async (
     ...(registry.ca === undefined ? {} : { ca: registry.ca }),
   });
 
-  // The release: an exact version as given; otherwise the picker of the
-  // bundled npm chooses it from the abbreviated packument, as npx would: a
-  // dist-tag (latest when none is given) names its release; for a range it
-  // prefers the latest tag, then releases that are not deprecated and whose
-  // engines match. The selector is only a key into that document and never
-  // reaches npm. Then the full version document of the picked release.
   let version = request.version ?? 'latest';
-  if (!exactVersion.safeParse(version).success) {
-    if (registrySpecType(version) === null)
-      throw new PackageFault('version_not_found');
-    const packument = asRecord(
-      await fetcher.getJson(registryPath(name), {
-        maxBytes: MAX_ABBREVIATED_BYTES,
-        accept: 'application/vnd.npm.install-v1+json',
+  let document: Record<string, unknown> | null;
+  let artifactBytes: Buffer | undefined;
+  if (request.source) {
+    artifactBytes = await downloadArtifact(request.source, options.signal);
+    const inspected = await inspectArtifact(
+      artifactBytes,
+      request.source,
+      options.signal,
+    );
+    document = {
+      ...inspected.document,
+      dist: {
+        integrity: inspected.integrity,
+        unpackedSize: inspected.unpackedSize,
+        fileCount: inspected.fileCount,
+      },
+    };
+    if (document.name !== name || document.version !== version)
+      throw new PackageFault('integrity_mismatch');
+  } else {
+    // The release: an exact version as given; otherwise the picker of the
+    // bundled npm chooses it from the abbreviated packument, as npx would: a
+    // dist-tag (latest when none is given) names its release; for a range it
+    // prefers the latest tag, then releases that are not deprecated and whose
+    // engines match. The selector is only a key into that document and never
+    // reaches npm. Then the full version document of the picked release.
+
+    if (!exactVersion.safeParse(version).success) {
+      if (registrySpecType(version) === null)
+        throw new PackageFault('version_not_found');
+      const packument = asRecord(
+        await fetcher.getJson(registryPath(name), {
+          maxBytes: MAX_ABBREVIATED_BYTES,
+          accept: 'application/vnd.npm.install-v1+json',
+          signal: options.signal,
+        }),
+      );
+      if (!packument) throw new PackageFault('package_not_found');
+      let picked: unknown;
+      try {
+        picked = pickManifest(packument, version, {
+          npmVersion: bundledNpmVersion,
+        }).version;
+      } catch {
+        throw new PackageFault('version_not_found');
+      }
+      if (typeof picked !== 'string' || !exactVersion.safeParse(picked).success)
+        throw new PackageFault('version_not_found');
+      version = picked;
+    }
+
+    document = asRecord(
+      await fetcher.getJson(registryPath(name, version), {
+        maxBytes: MAX_VERSION_DOCUMENT_BYTES,
         signal: options.signal,
       }),
     );
-    if (!packument) throw new PackageFault('package_not_found');
-    let picked: unknown;
-    try {
-      picked = pickManifest(packument, version, {
-        npmVersion: bundledNpmVersion,
-      }).version;
-    } catch {
+    if (!document || document.name !== name || document.version !== version)
       throw new PackageFault('version_not_found');
-    }
-    if (typeof picked !== 'string' || !exactVersion.safeParse(picked).success)
-      throw new PackageFault('version_not_found');
-    version = picked;
   }
-
-  const document = asRecord(
-    await fetcher.getJson(registryPath(name, version), {
-      maxBytes: MAX_VERSION_DOCUMENT_BYTES,
-      signal: options.signal,
-    }),
-  );
-  if (!document || document.name !== name || document.version !== version)
-    throw new PackageFault('version_not_found');
-
   // The root integrity, the entry candidates and the dependency declarations
   // are checked before npm runs at all.
   const integrity = PackageProvenanceSchema.shape.integrity.safeParse(
@@ -450,29 +491,35 @@ export const resolvePackage = async (
   // The release date: the full packument carries it, but a packument that is
   // too large or without the field only means that the date is unknown.
   let releasedAt: string | null = null;
-  try {
-    const packument = await fetcher.getJson(registryPath(name), {
-      maxBytes: MAX_FULL_PACKUMENT_BYTES,
-      signal: options.signal,
-    });
-    const stamp = asRecord(asRecord(packument)?.time)?.[version];
-    if (typeof stamp === 'string') {
-      const date = new Date(stamp);
-      if (!Number.isNaN(date.getTime())) releasedAt = date.toISOString();
+  if (!request.source)
+    try {
+      const packument = await fetcher.getJson(registryPath(name), {
+        maxBytes: MAX_FULL_PACKUMENT_BYTES,
+        signal: options.signal,
+      });
+      const stamp = asRecord(asRecord(packument)?.time)?.[version];
+      if (typeof stamp === 'string') {
+        const date = new Date(stamp);
+        if (!Number.isNaN(date.getTime())) releasedAt = date.toISOString();
+      }
+    } catch (error) {
+      if (!(error instanceof PackageFault) || error.code !== 'install_limit')
+        throw error;
     }
-  } catch (error) {
-    if (!(error instanceof PackageFault) || error.code !== 'install_limit')
-      throw error;
-  }
 
   const jobId = options.jobId ?? randomUUID();
   try {
     const paths = await prepareJob(options.packagesDir, jobId, registry);
     await writeFile(
       join(paths.project, 'package.json'),
-      stagingPackageJson(name, version),
+      stagingPackageJson(name, version, request.source),
       { flag: 'wx', mode: 0o600 },
     );
+    if (artifactBytes)
+      await writeFile(join(paths.project, ROOT_ARTIFACT), artifactBytes, {
+        flag: 'wx',
+        mode: 0o600,
+      });
     // The watchdog measures the job folder while npm runs. A breach is a
     // limit, not a fault of the run, so it is reported before the run itself.
     const watched = await withWatchdog(
@@ -488,6 +535,7 @@ export const resolvePackage = async (
       async (signal) =>
         runNpm({
           command: 'lock',
+          artifactRoot: !!request.source,
           prefix: paths.project,
           paths,
           registry,
@@ -519,7 +567,12 @@ export const resolvePackage = async (
     }
     const validated = validateLock(
       lock,
-      { name, version, integrity: integrity.data },
+      {
+        name,
+        version,
+        integrity: integrity.data,
+        ...(request.source ? { source: request.source } : {}),
+      },
       registry.origin,
     );
     // A tree that is too wide is refused before a single version document of
@@ -616,6 +669,7 @@ export const resolvePackage = async (
     const ttlMs = options.previews.ttlMs ?? PREVIEW_TTL_MS;
     const preview: PackagePreview = {
       previewId: randomUUID(),
+      ...(request.source ? { source: request.source } : {}),
       name,
       version,
       description:

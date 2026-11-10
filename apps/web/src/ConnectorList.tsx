@@ -45,7 +45,9 @@ export function isManagedPackage(
 export function connectorTarget(connector: ManagedConnector): string {
   const record = isManagedPackage(connector) ? connector.package : null;
   return record
-    ? `npm ${record.name}@${record.version} · ${record.entry}`
+    ? record.source
+      ? `GitHub ${record.source.repository}@${record.source.tag} · ${record.name}@${record.version} · ${record.entry}`
+      : `npm ${record.name}@${record.version} · ${record.entry}`
     : connector.executionMode === 'native'
       ? [connector.executable, ...connector.arguments].join(' ')
       : connector.executionMode === 'docker'
@@ -295,6 +297,8 @@ export function ConnectorList({
   }
   // The update lookup resolves the tree only; it installs nothing.
   async function checkForUpdate(connector: ManagedConnector) {
+    if (connector.executionMode === 'native' && connector.package?.source)
+      return;
     const record = isManagedPackage(connector) ? connector.package : null;
     if (!record) return;
     setError('');
@@ -545,6 +549,16 @@ export function ConnectorList({
                         </dd>
                       </div>
                     )}
+                    {record?.source && (
+                      <div className="wide">
+                        <dt>GitHub Release source</dt>
+                        <dd>
+                          {record.source.repository} / {record.source.tag} /{' '}
+                          {record.source.assetName} · SHA256{' '}
+                          <code>{record.source.sha256}</code>
+                        </dd>
+                      </div>
+                    )}
                     {managed && (
                       <div>
                         <dt>Files</dt>
@@ -735,6 +749,7 @@ function ConnectorActions({
           </button>
         )}
         {managed &&
+          !record?.source &&
           (update?.state === 'found' ? (
             <button
               type="button"

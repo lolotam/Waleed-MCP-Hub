@@ -93,12 +93,32 @@ export function PackageInstall({
       ? (seed.name ?? '')
       : (seed.connector.package.name ?? ''),
   );
-  const [version, setVersion] = useState(seed.version ?? '');
+  const currentSource =
+    seed.mode === 'replace' ? seed.connector.package.source : undefined;
+  const [sourceKind, setSourceKind] = useState(
+    currentSource ? 'github' : 'npm',
+  );
+  const [repository, setRepository] = useState(currentSource?.repository ?? '');
+  const [tag, setTag] = useState(currentSource?.tag ?? '');
+  const [assetName, setAssetName] = useState(currentSource?.assetName ?? '');
+  const [sha256, setSha256] = useState(currentSource?.sha256 ?? '');
+  const [version, setVersion] = useState(
+    seed.version ??
+      (currentSource && seed.mode === 'replace'
+        ? seed.connector.package.version
+        : ''),
+  );
   const [job, setJob] = useState<PackageJob | null>(null);
   const [preview, setPreview] = useState<PackagePreview | null>(null);
   const [entry, setEntry] = useState('');
   const [acknowledged, setAcknowledged] = useState<PackageWarning[]>([]);
   const [nameChangeAcknowledged, setNameChangeAcknowledged] = useState(false);
+  const [sourceAcknowledged, setSourceAcknowledged] = useState(false);
+  const changesSource =
+    seed.mode === 'replace' &&
+    !!preview &&
+    JSON.stringify(currentSource ?? null) !==
+      JSON.stringify(preview.source ?? null);
   const changesPackageName =
     seed.mode === 'replace' &&
     !!preview &&
@@ -161,11 +181,23 @@ export function PackageInstall({
 
   async function lookUp() {
     setNameChangeAcknowledged(false);
+    setSourceAcknowledged(false);
     setError('');
     setNotice('');
     setFailureCode(null);
     const request = PackageResolveRequestSchema.safeParse({
       name: packageName.trim(),
+      ...(sourceKind === 'github'
+        ? {
+            source: {
+              kind: 'github-release',
+              repository,
+              tag,
+              assetName,
+              sha256,
+            },
+          }
+        : {}),
       ...(version.trim() ? { version: version.trim() } : {}),
     });
     if (!request.success) {
@@ -248,6 +280,10 @@ export function PackageInstall({
       setError(packageErrorText('warning_not_acknowledged'));
       return;
     }
+    if (changesSource && !sourceAcknowledged) {
+      setError('Confirm changing the artifact source.');
+      return;
+    }
     if (changesPackageName && !nameChangeAcknowledged) {
       setError(
         'Confirm the change of package and publisher before continuing.',
@@ -314,6 +350,14 @@ export function PackageInstall({
       body = {
         connectorId: seed.connector.id,
         expectedConnectorRevision: seed.connector.revision,
+        ...(changesSource
+          ? {
+              sourceChange: {
+                from: currentSource ?? null,
+                to: preview.source ?? null,
+              },
+            }
+          : {}),
         previewId: preview.previewId,
         entry: selected.entry,
         acknowledgedWarnings: acknowledged,
@@ -505,10 +549,26 @@ export function PackageInstall({
     !!preview &&
     entry !== '' &&
     acknowledged.length === preview.warnings.length &&
-    (!changesPackageName || nameChangeAcknowledged);
+    (!changesPackageName || nameChangeAcknowledged) &&
+    (!changesSource || sourceAcknowledged);
 
   return (
     <div className="package-flow">
+      {currentSource && step !== 'installing' && step !== 'result' && (
+        <section
+          className="notice"
+          aria-label="Currently installed GitHub Release"
+        >
+          <h3>Currently installed GitHub Release</h3>
+          <p>
+            {currentSource.repository} / {currentSource.tag} /{' '}
+            {currentSource.assetName}
+          </p>
+          <p>
+            Current SHA256: <code>{currentSource.sha256}</code>
+          </p>
+        </section>
+      )}
       {notice && (
         <p role="status" className="notice">
           {notice}
@@ -535,6 +595,51 @@ export function PackageInstall({
       {step === 'lookup' && (
         <section className="package-lookup">
           <h3>Look up</h3>
+          <label htmlFor="package-source">Package source</label>
+          <select
+            id="package-source"
+            value={sourceKind}
+            onChange={(event) => setSourceKind(event.target.value)}
+          >
+            <option value="npm">npm registry</option>
+            <option value="github">GitHub Release</option>
+          </select>
+          {sourceKind === 'github' && (
+            <div className="form-fields">
+              <p>
+                Public release asset only. Exact package version and SHA256
+                required. Dependencies still come from npm; no account is
+                needed.
+              </p>
+              <label htmlFor="artifact-repository">GitHub repository</label>
+              <input
+                id="artifact-repository"
+                value={repository}
+                onChange={(event) => setRepository(event.target.value)}
+                placeholder="owner/repository"
+              />
+              <label htmlFor="artifact-tag">Release tag</label>
+              <input
+                id="artifact-tag"
+                value={tag}
+                onChange={(event) => setTag(event.target.value)}
+              />
+              <label htmlFor="artifact-name">Asset name (.tgz)</label>
+              <input
+                id="artifact-name"
+                value={assetName}
+                onChange={(event) => setAssetName(event.target.value)}
+              />
+              <label htmlFor="artifact-sha256">Expected SHA256</label>
+              <input
+                id="artifact-sha256"
+                value={sha256}
+                onChange={(event) => setSha256(event.target.value)}
+                maxLength={64}
+                spellCheck={false}
+              />
+            </div>
+          )}
           {seed.mode === 'install' ? (
             <div className="form-fields">
               <label htmlFor="package-connector-name">Connector name</label>
@@ -553,7 +658,11 @@ export function PackageInstall({
                 spellCheck={false}
                 placeholder="demo-mcp"
               />
-              <label htmlFor="package-version">Version (optional)</label>
+              <label htmlFor="package-version">
+                {sourceKind === 'github'
+                  ? 'Exact version (required)'
+                  : 'Version (optional)'}
+              </label>
               <input
                 id="package-version"
                 value={version}
@@ -562,8 +671,10 @@ export function PackageInstall({
                 placeholder="latest, 1.2.3, ^1.2.0 or next"
               />
               <small>
-                The exact release, a range or a dist-tag. Blank means the latest
-                release. Nothing is installed by the lookup.
+                {sourceKind === 'github'
+                  ? 'An exact package version is required for a GitHub archive.'
+                  : 'The exact release, a range or a dist-tag. Blank means the latest release.'}{' '}
+                Nothing is installed by the lookup.
               </small>
               {envNames.length > 0 && (
                 <p className="notice">
@@ -651,6 +762,34 @@ export function PackageInstall({
           <h3>
             {preview.name}@{preview.version}
           </h3>
+          {preview.source && (
+            <section className="notice">
+              <p>
+                GitHub Release: {preview.source.repository} /{' '}
+                {preview.source.tag} / {preview.source.assetName}
+              </p>
+              <p>
+                Verified SHA256: <code>{preview.source.sha256}</code>
+              </p>
+              <p>
+                Older Hub clients cannot read this source. Update affected
+                clients and back up before installing.
+              </p>
+            </section>
+          )}
+          {changesSource && (
+            <label className="import-check">
+              <input
+                type="checkbox"
+                checked={sourceAcknowledged}
+                onChange={(event) =>
+                  setSourceAcknowledged(event.target.checked)
+                }
+              />
+              I confirm changing the package source and reviewed the archive
+              hash
+            </label>
+          )}
           <p>{preview.description || 'No description'}</p>
           <dl className="package-facts">
             <div>

@@ -741,6 +741,22 @@ export function createPackageService(
       // preview_expired. Another package requires the exact acknowledged pair.
       const preview = previews.peek(request.previewId, owner);
       if (preview) {
+        const fromSource = connector.package.source ?? null;
+        const toSource = preview.source ?? null;
+        const sameSource =
+          JSON.stringify(fromSource) === JSON.stringify(toSource);
+        const sourceChange = request.sourceChange;
+        if (
+          (!sameSource && !sourceChange) ||
+          (sourceChange &&
+            (JSON.stringify(sourceChange.from) !== JSON.stringify(fromSource) ||
+              JSON.stringify(sourceChange.to) !== JSON.stringify(toSource)))
+        ) {
+          throw new HubError(
+            'invalid',
+            'A different artifact source requires exact confirmation of the current and new source.',
+          );
+        }
         const change = request.packageNameChange;
         const changesName = preview.name !== connector.package.name;
         if (

@@ -206,10 +206,13 @@ export const npmArguments = (
   paths: NpmPaths,
   registry: RegistryTarget,
   proxyUrl: string,
+  artifactRoot = false,
 ): string[] => [
   bundledNpmCli(),
   ...(command === 'lock' ? LOCK_FLAGS : CI_FLAGS),
-  ...isolationArguments(paths, registry, proxyUrl),
+  ...isolationArguments(paths, registry, proxyUrl).map((arg) =>
+    artifactRoot && arg === '--allow-file=none' ? '--allow-file=root' : arg,
+  ),
 ];
 
 // The environment of the npm process: nothing of the user's, no PATH, no
@@ -224,6 +227,7 @@ export const npmEnvironment = (paths: NpmPaths): Record<string, string> => ({
 });
 
 export interface NpmRunOptions {
+  artifactRoot?: boolean;
   command: 'lock' | 'ci';
   prefix: string;
   paths: NpmPaths;
@@ -310,7 +314,13 @@ export const runNpm = async (options: NpmRunOptions): Promise<NpmRunResult> => {
   const paths: NpmPaths = { ...options.paths, prefix: options.prefix };
   const execution = await executeNpm({
     arguments: (proxyUrl) =>
-      npmArguments(options.command, paths, options.registry, proxyUrl),
+      npmArguments(
+        options.command,
+        paths,
+        options.registry,
+        proxyUrl,
+        options.artifactRoot,
+      ),
     prefix: options.prefix,
     paths,
     registry: options.registry,

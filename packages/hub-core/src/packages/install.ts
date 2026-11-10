@@ -3,6 +3,7 @@ import { lstat, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import type {
   PackageErrorCode,
+  GitHubArtifactSource,
   PackageProvenance,
   PackageWarning,
 } from '@waleed/contracts';
@@ -11,6 +12,11 @@ import { assertNoLinks } from '../adapters/managed-files.js';
 import type { ProcessRunner } from '../ports.js';
 import { normalizeBin, type NormalizedBin } from './entry.js';
 import { PackageFault } from './fault.js';
+import {
+  ROOT_ARTIFACT,
+  MAX_ARTIFACT_BYTES,
+  artifactIntegrity,
+} from './artifact.js';
 import {
   DEFAULT_REGISTRY,
   assertNoAncestorProject,
@@ -126,9 +132,16 @@ const ensureJobFolder = async (
 
 // The install folder holds the two files and the modules, and nothing npm
 // leaves behind: no ".npmrc" and no "_logs" anywhere in the tree.
-const assertInstallTree = async (installFolder: string): Promise<void> => {
+const assertInstallTree = async (
+  installFolder: string,
+  artifactRoot: boolean,
+): Promise<void> => {
   for (const name of await readdir(installFolder))
-    if (!INSTALL_TOP_LEVEL.has(name)) throw new PackageFault('install_failed');
+    if (
+      !INSTALL_TOP_LEVEL.has(name) &&
+      !(artifactRoot && name === ROOT_ARTIFACT)
+    )
+      throw new PackageFault('install_failed');
   const walk = async (directory: string): Promise<void> => {
     for (const name of await readdir(directory)) {
       if (name === '.npmrc' || name === '_logs')
@@ -149,6 +162,8 @@ const verifyInstall = async (
   name: string,
   candidate: { entry: string; entryPath: string },
   lockHash: string,
+  version: string,
+  source?: GitHubArtifactSource,
 ): Promise<string> => {
   try {
     await assertNoLinks(installFolder, true);
@@ -168,7 +183,8 @@ const verifyInstall = async (
     ).catch(refusedAsMissing);
     if (!manifestBytes) throw new PackageFault('install_failed');
     const installed = asRecord(JSON.parse(manifestBytes.toString('utf8')));
-    if (!installed) throw new PackageFault('install_failed');
+    if (!installed || installed.name !== name || installed.version !== version)
+      throw new PackageFault('install_failed');
     let bins: NormalizedBin[];
     try {
       bins = normalizeBin(name, installed['bin']);
@@ -190,7 +206,15 @@ const verifyInstall = async (
     if (!entryInfo.isFile() || entryInfo.nlink !== 1)
       throw new PackageFault('install_failed');
 
-    await assertInstallTree(installFolder);
+    if (source) {
+      const archive = await readOwnedFile(
+        join(installFolder, ROOT_ARTIFACT),
+        MAX_ARTIFACT_BYTES,
+      );
+      if (!archive) throw new PackageFault('integrity_mismatch');
+      artifactIntegrity(archive, source);
+    }
+    await assertInstallTree(installFolder, !!source);
     return (await buildManifest(installFolder)).hash;
   } catch (error) {
     if (error instanceof PackageFault) throw error;
@@ -253,7 +277,7 @@ export async function installPackage(
     await createPrivateDirectory(installFolder);
     await writeFile(
       join(installFolder, 'package.json'),
-      stagingPackageJson(name, version),
+      stagingPackageJson(name, version, preview.source),
       { flag: 'wx', mode: 0o600 },
     );
     await writeFile(
@@ -261,6 +285,22 @@ export async function installPackage(
       options.record.lock,
       { flag: 'wx', mode: 0o600 },
     );
+
+    if (preview.source) {
+      const archive = await readOwnedFile(
+        join(paths.project, ROOT_ARTIFACT),
+        MAX_ARTIFACT_BYTES,
+      );
+      if (
+        !archive ||
+        artifactIntegrity(archive, preview.source) !== preview.integrity
+      )
+        throw new PackageFault('integrity_mismatch');
+      await writeFile(join(installFolder, ROOT_ARTIFACT), archive, {
+        flag: 'wx',
+        mode: 0o600,
+      });
+    }
 
     // The download: npm ci in the install folder with the frozen lock. The
     // watchdog measures the job folder and the install folder together.
@@ -290,6 +330,7 @@ export async function installPackage(
       async (signal) =>
         runNpm({
           command: 'ci',
+          artifactRoot: !!preview.source,
           prefix: installFolder,
           paths,
           registry,
@@ -313,11 +354,14 @@ export async function installPackage(
       name,
       candidate,
       preview.lockHash,
+      version,
+      preview.source,
     );
 
     // The provenance of the install.
     const provenance: PackageProvenance = {
       ecosystem: 'npm',
+      ...(preview.source ? { source: preview.source } : {}),
       name,
       version,
       entry: options.entry,
