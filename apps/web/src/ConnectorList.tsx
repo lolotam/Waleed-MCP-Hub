@@ -295,6 +295,8 @@ export function ConnectorList({
   }
   // The update lookup resolves the tree only; it installs nothing.
   async function checkForUpdate(connector: ManagedConnector) {
+    if (connector.executionMode === 'native' && connector.package?.source)
+      return;
     const record = isManagedPackage(connector) ? connector.package : null;
     if (!record) return;
     setError('');
@@ -735,6 +737,7 @@ function ConnectorActions({
           </button>
         )}
         {managed &&
+          !record?.source &&
           (update?.state === 'found' ? (
             <button
               type="button"

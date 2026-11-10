@@ -1,3 +1,4 @@
+import { HubError } from '../errors.js';
 import {
   MAX_REQUEST_BYTES,
   type Connector,
@@ -92,6 +93,11 @@ const packageConnector = (
   connector: Extract<Connector, { executionMode: 'native' }>,
 ): HubConnector => {
   const provenance = connector.package!;
+  if (provenance.source)
+    throw new HubError(
+      'invalid',
+      'This export format cannot preserve GitHub artifact provenance.',
+    );
   return {
     id: connector.id,
     name: connector.name,

@@ -188,6 +188,28 @@ or secret, updates Docker/agent files, approves execution, or fixes upstream aut
    sessions. Reapply stale profiles and reconnect clients. Dematerialize owned
    artifacts before removing a profile. Credentials are retained by all these actions.
 
+A managed package can also use **GitHub Release** in the package lookup. Enter a
+public `owner/repository`, release tag, `.tgz` asset name, expected package name,
+exact version and lowercase SHA256. The hub checks the archive bytes before
+inspection and freezes the dependency tree in the usual owner-bound preview.
+Dependencies still come only from the npm registry; no npm or GitHub login is
+needed for a public artifact. Package scripts remain disabled. A hash identifies
+bytes; it does not certify the publisher or prove a source build.
+
+Replacing an npm source with a GitHub artifact requires explicit source/hash
+confirmation as well as any publisher/name confirmation. Execution approval is
+cleared. GitHub sources remain pinned; **Change package** performs a fresh
+artifact lookup rather than following npm latest or a moved release tag.
+The older export format refuses these connectors because it cannot preserve
+artifact provenance. The complete installed closure retains the root archive.
+
+**Compatibility:** older Hub schemas refuse GitHub provenance. Update every
+affected bridge/client to the compatible build before the first save. Preserve a
+consistent private preimage before replacement, including encrypted credential
+bytes and the old referenced package. Rolling back to an old binary requires the
+complete preimage and coordinated writer shutdown; never strip source metadata
+or restore one registry file beside new package/safety data.
+
 For a managed npm connector, **Change package** resolves another package/version
 through the normal registry preview. Changing the package name requires explicit
 confirmation of the exact current/new names and publisher boundary. Replacement
