@@ -616,16 +616,23 @@ test('a failed list reload adds the stale-list sentence', async ({ page }) => {
   );
 });
 
-for (const artifact of [false, true])
-  test(`changing a managed package requires explicit publisher/source confirmation (GitHub=${artifact})`, async ({
+for (const variant of ['npm', 'github', 'github-update'])
+  test(`changing a managed package requires explicit publisher/source confirmation (${variant})`, async ({
     page,
   }) => {
+    const artifact = variant !== 'npm';
+    const fromGithub = variant === 'github-update';
     const artifactSource = {
       kind: 'github-release' as const,
       repository: 'owner/demo',
       tag: 'v1.2.0',
       assetName: 'demo.tgz',
       sha256: 'b'.repeat(64),
+    };
+    const oldSource = {
+      ...artifactSource,
+      tag: 'v1.1.0',
+      sha256: 'c'.repeat(64),
     };
     const connectorId = 'package-demo';
     await page.route('**/api/connectors', (route) =>
@@ -654,6 +661,7 @@ for (const artifact of [false, true])
               updatedAt: '2026-01-01T00:00:00.000Z',
               package: {
                 ecosystem: 'npm',
+                ...(fromGithub ? { source: oldSource } : {}),
                 name: 'demo-mcp',
                 version: '1.1.0',
                 entry: 'demo-mcp',
@@ -677,8 +685,18 @@ for (const artifact of [false, true])
     await page.goto(await launch());
     await page
       .getByTestId('connector-package-demo')
-      .getByRole('button', { name: /Demo MCP npm/ })
+      .getByRole('button', {
+        name: fromGithub ? /Demo MCP GitHub/ : /Demo MCP npm/,
+      })
       .click();
+    if (fromGithub) {
+      await expect(
+        page.getByText('GitHub Release source', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText(oldSource.sha256, { exact: true }),
+      ).toBeVisible();
+    }
     await page
       .getByRole('button', { name: 'Change package', exact: true })
       .click();
@@ -702,6 +720,17 @@ for (const artifact of [false, true])
       await page
         .getByLabel('Expected SHA256', { exact: true })
         .fill(artifactSource.sha256);
+      if (fromGithub) {
+        const current = page.getByRole('region', {
+          name: 'Currently installed GitHub Release',
+          exact: true,
+        });
+        await expect(current).toContainText(oldSource.tag);
+        await expect(current).toContainText(oldSource.sha256);
+        await expect(
+          page.getByRole('button', { name: 'Check for update', exact: true }),
+        ).toHaveCount(0);
+      }
     }
     await page.getByRole('button', { name: 'Look up', exact: true }).click();
     await expect(
@@ -783,7 +812,12 @@ for (const artifact of [false, true])
         acknowledgedWarnings: ['install_scripts', 'recent_release'],
         packageNameChange: { from: 'demo-mcp', to: '@owner/demo-mcp' },
         ...(artifact
-          ? { sourceChange: { from: null, to: artifactSource } }
+          ? {
+              sourceChange: {
+                from: fromGithub ? oldSource : null,
+                to: artifactSource,
+              },
+            }
           : {}),
       });
   });

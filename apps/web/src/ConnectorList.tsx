@@ -45,7 +45,9 @@ export function isManagedPackage(
 export function connectorTarget(connector: ManagedConnector): string {
   const record = isManagedPackage(connector) ? connector.package : null;
   return record
-    ? `npm ${record.name}@${record.version} · ${record.entry}`
+    ? record.source
+      ? `GitHub ${record.source.repository}@${record.source.tag} · ${record.name}@${record.version} · ${record.entry}`
+      : `npm ${record.name}@${record.version} · ${record.entry}`
     : connector.executionMode === 'native'
       ? [connector.executable, ...connector.arguments].join(' ')
       : connector.executionMode === 'docker'
@@ -544,6 +546,16 @@ export function ConnectorList({
                         <dd>
                           {record.name}@{record.version} · {record.entry} ·{' '}
                           {record.integrity.slice(0, 16)}…
+                        </dd>
+                      </div>
+                    )}
+                    {record?.source && (
+                      <div className="wide">
+                        <dt>GitHub Release source</dt>
+                        <dd>
+                          {record.source.repository} / {record.source.tag} /{' '}
+                          {record.source.assetName} · SHA256{' '}
+                          <code>{record.source.sha256}</code>
                         </dd>
                       </div>
                     )}

@@ -554,6 +554,21 @@ export function PackageInstall({
 
   return (
     <div className="package-flow">
+      {currentSource && (
+        <section
+          className="notice"
+          aria-label="Currently installed GitHub Release"
+        >
+          <h3>Currently installed GitHub Release</h3>
+          <p>
+            {currentSource.repository} / {currentSource.tag} /{' '}
+            {currentSource.assetName}
+          </p>
+          <p>
+            Current SHA256: <code>{currentSource.sha256}</code>
+          </p>
+        </section>
+      )}
       {notice && (
         <p role="status" className="notice">
           {notice}
