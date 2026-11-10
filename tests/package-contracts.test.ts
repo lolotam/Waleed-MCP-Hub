@@ -6,6 +6,7 @@ import {
   ManualMcpSchema,
   PackageErrorCodeSchema,
   PackageInstallRequestSchema,
+  PackageReplaceRequestSchema,
   PackageJobSchema,
   PackagePreviewSchema,
   PackageProposalSchema,
@@ -680,4 +681,38 @@ describe('F01 package contracts', () => {
       ).toBe(true);
     });
   });
+});
+
+describe('explicit package-name replacement request', () => {
+  const legacy = {
+    connectorId: 'synthetic-package',
+    expectedConnectorRevision: 1,
+    previewId: '11111111-1111-4111-8111-111111111111',
+    entry: 'srv',
+    acknowledgedWarnings: [],
+  };
+  it('preserves the legacy same-package request shape', () => {
+    expect(PackageReplaceRequestSchema.parse(legacy)).toEqual(legacy);
+  });
+  it('accepts an explicit old/new package pair, including a scoped fork', () => {
+    const request = {
+      ...legacy,
+      packageNameChange: { from: 'srv', to: '@owner/srv' },
+    };
+    expect(PackageReplaceRequestSchema.parse(request)).toEqual(request);
+  });
+  it.each([
+    { from: 'srv', to: 'srv' },
+    { from: 'srv', to: 'file:local.tgz' },
+    { from: 'srv' },
+    { from: 'srv', to: '@owner/srv', extra: true },
+  ])(
+    'rejects malformed or misleading name acknowledgments: %j',
+    (packageNameChange) => {
+      expect(
+        PackageReplaceRequestSchema.safeParse({ ...legacy, packageNameChange })
+          .success,
+      ).toBe(false);
+    },
+  );
 });

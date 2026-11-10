@@ -738,13 +738,23 @@ export function createPackageService(
           'Definition changed. Preview the replacement again.',
         );
       // A preview that is gone is not refused here: the job reports
-      // preview_expired. A preview of another package never runs.
+      // preview_expired. Another package requires the exact acknowledged pair.
       const preview = previews.peek(request.previewId, owner);
-      if (preview && preview.name !== connector.package.name)
-        throw new HubError(
-          'invalid',
-          'The preview is for a different package.',
-        );
+      if (preview) {
+        const change = request.packageNameChange;
+        const changesName = preview.name !== connector.package.name;
+        if (
+          (changesName && !change) ||
+          (change &&
+            (change.from !== connector.package.name ||
+              change.to !== preview.name))
+        ) {
+          throw new HubError(
+            'invalid',
+            'A different package needs explicit confirmation of the current and new package names.',
+          );
+        }
+      }
       reserve();
     } catch (error) {
       installs -= 1;
