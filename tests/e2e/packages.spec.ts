@@ -820,4 +820,15 @@ for (const variant of ['npm', 'github', 'github-update'])
             }
           : {}),
       });
+    if (fromGithub) {
+      await expect(
+        page.getByText(/Replaced with @owner\/demo-mcp@1\.2\.0\./),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('region', {
+          name: 'Currently installed GitHub Release',
+          exact: true,
+        }),
+      ).toHaveCount(0);
+    }
   });

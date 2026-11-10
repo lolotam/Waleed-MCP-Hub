@@ -554,7 +554,7 @@ export function PackageInstall({
 
   return (
     <div className="package-flow">
-      {currentSource && (
+      {currentSource && step !== 'installing' && step !== 'result' && (
         <section
           className="notice"
           aria-label="Currently installed GitHub Release"
