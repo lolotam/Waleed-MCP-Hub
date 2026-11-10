@@ -776,6 +776,23 @@ function ConnectorActions({
                 : 'Check for update'}
             </button>
           ))}
+        {managedConnector && (
+          <button
+            type="button"
+            className="small"
+            disabled={disabled}
+            onClick={() =>
+              openPackage({
+                mode: 'replace',
+                purpose: 'change',
+                connector: managedConnector,
+              })
+            }
+          >
+            <Icon name="package" size={15} />
+            Change package
+          </button>
+        )}
         {managed && reinstall && record && managedConnector && (
           <button
             type="button"

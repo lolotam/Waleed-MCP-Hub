@@ -188,6 +188,17 @@ or secret, updates Docker/agent files, approves execution, or fixes upstream aut
    sessions. Reapply stale profiles and reconnect clients. Dematerialize owned
    artifacts before removing a profile. Credentials are retained by all these actions.
 
+For a managed npm connector, **Change package** resolves another package/version
+through the normal registry preview. Changing the package name requires explicit
+confirmation of the exact current/new names and publisher boundary. Replacement
+keeps the connector ID, user arguments, credential bindings, policies and profile
+membership; execution approval is cleared. Back up the consistent Hub state and
+referenced package first: successful replacement can remove the old package folder.
+The API uses optional `packageNameChange: { from, to }` alongside the fresh connector
+revision and owner-bound preview. Missing or mismatched acknowledgment is refused;
+legacy same-name replacements remain compatible. Older strict API versions reject
+the new request field, so update the Hub before using this transition.
+
 Native execution requires an absolute local `.exe`, explicit argv and an isolated
 environment. `.cmd`/`.bat`, npx/uvx shims and scripts remain data-only. Each generated
 `.mjs` entry starts a fresh contained process per client, revalidates registry,

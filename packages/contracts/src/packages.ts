@@ -201,6 +201,17 @@ export const PackageReplaceRequestSchema = z.strictObject({
   previewId: z.uuid(),
   entry: PackageEntrySchema,
   acknowledgedWarnings: z.array(PackageWarningSchema).max(16),
+  // Explicitly binds a package/publisher change to the current definition and
+  // the reviewed preview. Omitted requests retain same-package-only behavior.
+  packageNameChange: z
+    .strictObject({
+      from: PackageNameSchema,
+      to: PackageNameSchema,
+    })
+    .refine((change) => change.from !== change.to, {
+      message: 'Package names must differ for a name change.',
+    })
+    .optional(),
 });
 export const PackageJobSchema = z.strictObject({
   id: z.uuid(),

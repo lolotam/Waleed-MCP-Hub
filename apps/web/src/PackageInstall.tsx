@@ -39,7 +39,7 @@ export type PackageSeed =
       mode: 'replace';
       connector: ManagedPackageConnector;
       version?: string;
-      purpose: 'update' | 'reinstall';
+      purpose: 'update' | 'reinstall' | 'change';
     };
 
 type Step = 'lookup' | 'resolving' | 'preview' | 'installing' | 'result';
@@ -98,6 +98,11 @@ export function PackageInstall({
   const [preview, setPreview] = useState<PackagePreview | null>(null);
   const [entry, setEntry] = useState('');
   const [acknowledged, setAcknowledged] = useState<PackageWarning[]>([]);
+  const [nameChangeAcknowledged, setNameChangeAcknowledged] = useState(false);
+  const changesPackageName =
+    seed.mode === 'replace' &&
+    !!preview &&
+    preview.name !== seed.connector.package.name;
   const [argumentsText, setArgumentsText] = useState(
     JSON.stringify(seed.mode === 'install' ? (seed.arguments ?? []) : []),
   );
@@ -155,6 +160,7 @@ export function PackageInstall({
   }
 
   async function lookUp() {
+    setNameChangeAcknowledged(false);
     setError('');
     setNotice('');
     setFailureCode(null);
@@ -242,6 +248,12 @@ export function PackageInstall({
       setError(packageErrorText('warning_not_acknowledged'));
       return;
     }
+    if (changesPackageName && !nameChangeAcknowledged) {
+      setError(
+        'Confirm the change of package and publisher before continuing.',
+      );
+      return;
+    }
     let body: Record<string, unknown>;
     if (seed.mode === 'install') {
       if (!connectorName.trim()) {
@@ -305,6 +317,14 @@ export function PackageInstall({
         previewId: preview.previewId,
         entry: selected.entry,
         acknowledgedWarnings: acknowledged,
+        ...(changesPackageName
+          ? {
+              packageNameChange: {
+                from: seed.connector.package.name,
+                to: preview.name,
+              },
+            }
+          : {}),
       };
     }
     // The request object is blanked again when it settles.
@@ -484,7 +504,8 @@ export function PackageInstall({
   const ready =
     !!preview &&
     entry !== '' &&
-    acknowledged.length === preview.warnings.length;
+    acknowledged.length === preview.warnings.length &&
+    (!changesPackageName || nameChangeAcknowledged);
 
   return (
     <div className="package-flow">
@@ -562,10 +583,28 @@ export function PackageInstall({
             </div>
           ) : (
             <div className="form-fields">
+              {seed.purpose !== 'reinstall' && (
+                <>
+                  <label htmlFor="package-name">Replacement package name</label>
+                  <input
+                    id="package-name"
+                    value={packageName}
+                    onChange={(event) => setPackageName(event.target.value)}
+                    spellCheck={false}
+                  />
+                  <label htmlFor="package-version">Replacement version</label>
+                  <input
+                    id="package-version"
+                    value={version}
+                    onChange={(event) => setVersion(event.target.value)}
+                    spellCheck={false}
+                  />
+                </>
+              )}
               <dl className="package-facts">
                 <div>
-                  <dt>Package</dt>
-                  <dd>{packageName}</dd>
+                  <dt>Current package</dt>
+                  <dd>{seed.connector.package.name}</dd>
                 </div>
                 <div>
                   <dt>Version</dt>
@@ -573,7 +612,13 @@ export function PackageInstall({
                 </div>
                 <div>
                   <dt>Purpose</dt>
-                  <dd>{seed.purpose === 'update' ? 'Update' : 'Reinstall'}</dd>
+                  <dd>
+                    {seed.purpose === 'change'
+                      ? 'Change package'
+                      : seed.purpose === 'update'
+                        ? 'Update'
+                        : 'Reinstall'}
+                  </dd>
                 </div>
               </dl>
               <small>
@@ -646,6 +691,27 @@ export function PackageInstall({
               <dd>{new Date(preview.expiresAt).toLocaleTimeString()}</dd>
             </div>
           </dl>
+          {changesPackageName && seed.mode === 'replace' && (
+            <section className="notice">
+              <p>
+                This changes the package and publisher from{' '}
+                <code>{seed.connector.package.name}</code> to{' '}
+                <code>{preview.name}</code>. The connector keeps its credentials
+                and profiles, but execution approval is cleared. Back up first:
+                the old package folder may be removed after replacement.
+              </p>
+              <label className="import-check">
+                <input
+                  type="checkbox"
+                  checked={nameChangeAcknowledged}
+                  onChange={(event) =>
+                    setNameChangeAcknowledged(event.target.checked)
+                  }
+                />
+                I confirm changing the package and publisher
+              </label>
+            </section>
+          )}
           <div className="package-command">
             <h3>Command that will run</h3>
             <code>{command}</code>
@@ -820,9 +886,11 @@ export function PackageDialog({
   const title =
     seed.mode === 'install'
       ? 'Install an npm package'
-      : seed.purpose === 'update'
-        ? 'Update an npm package'
-        : 'Reinstall an npm package';
+      : seed.purpose === 'change'
+        ? 'Change an npm package'
+        : seed.purpose === 'update'
+          ? 'Update an npm package'
+          : 'Reinstall an npm package';
   return (
     <dialog
       ref={dialog}

@@ -849,135 +849,156 @@ $stream = [System.IO.File]::Open('${unrefFile.replace(/'/g, "''")}', [System.IO.
     await waitForPath(folder, false);
   });
 
-  it('7. Replace keeps the connector', async () => {
-    const { lifecycle, service, packagesDir, registry, fakeRunner } =
-      await setupService({
-        packageConfig: { name: 'srv', version: '1.0.0' },
+  it.each(['srv', '@owner/srv'])(
+    '7. Replace keeps the connector (%s)',
+    async (replacementName) => {
+      const { lifecycle, service, packagesDir, registry, fakeRunner } =
+        await setupService({
+          packageConfig: { name: 'srv', version: '1.0.0' },
+        });
+
+      // Seed srv@1.1.0 as well
+      const seeded110 = seedPackage(registry, {
+        name: replacementName,
+        version: '1.1.0',
+        bin: { srv: 'bin/srv.js' },
       });
+      fakeRunner.addPackage(seeded110);
 
-    // Seed srv@1.1.0 as well
-    const seeded110 = seedPackage(registry, { name: 'srv', version: '1.1.0' });
-    fakeRunner.addPackage(seeded110);
+      // Install srv@1.0.0 with arguments ['--flag'], env { API_TOKEN: 'placeholder-a3' }
+      const res1 = service.resolve(
+        { name: 'srv', version: '1.0.0' },
+        'owner-a',
+      );
+      const resolved1 = await waitFor(service, res1, 'owner-a');
+      const instJob = await service.install(
+        {
+          previewId: resolved1.preview!.previewId,
+          entry: 'srv',
+          acknowledgedWarnings: resolved1.preview!.warnings,
+          connectorName: 'Srv Connector',
+          arguments: ['--flag'],
+          env: { API_TOKEN: 'placeholder-a3' },
+        },
+        'owner-a',
+      );
+      const completedInst = await waitFor(service, instJob, 'owner-a');
+      expect(completedInst.state).toBe('succeeded');
 
-    // Install srv@1.0.0 with arguments ['--flag'], env { API_TOKEN: 'placeholder-a3' }
-    const res1 = service.resolve({ name: 'srv', version: '1.0.0' }, 'owner-a');
-    const resolved1 = await waitFor(service, res1, 'owner-a');
-    const instJob = await service.install(
-      {
-        previewId: resolved1.preview!.previewId,
-        entry: 'srv',
-        acknowledgedWarnings: resolved1.preview!.warnings,
-        connectorName: 'Srv Connector',
-        arguments: ['--flag'],
-        env: { API_TOKEN: 'placeholder-a3' },
-      },
-      'owner-a',
-    );
-    const completedInst = await waitFor(service, instJob, 'owner-a');
-    expect(completedInst.state).toBe('succeeded');
+      let state = await lifecycle.inventory();
+      let connector = asNative(
+        state.connectors.find((c) => c.name === 'Srv Connector'),
+      );
+      const oldInstallId = connector.package!.installId;
+      const oldFolder = installDirectory(packagesDir, oldInstallId);
+      expect(await pathExists(oldFolder)).toBe(true);
 
-    let state = await lifecycle.inventory();
-    let connector = asNative(
-      state.connectors.find((c) => c.name === 'Srv Connector'),
-    );
-    const oldInstallId = connector.package!.installId;
-    const oldFolder = installDirectory(packagesDir, oldInstallId);
-    expect(await pathExists(oldFolder)).toBe(true);
+      // Add connector to a profile
+      const profPrev = await lifecycle.preview(
+        {
+          kind: 'create_profile',
+          expectedRevision: state.revision,
+          name: 'Main Profile',
+          description: '',
+          connectorIds: [connector.id],
+        },
+        'owner-a',
+      );
+      const profJob = await lifecycle.apply(profPrev.id, 'owner-a');
+      await lifecycle.drain();
+      expect(lifecycle.job(profJob.id, 'owner-a').state).toBe('succeeded');
 
-    // Add connector to a profile
-    const profPrev = await lifecycle.preview(
-      {
-        kind: 'create_profile',
-        expectedRevision: state.revision,
-        name: 'Main Profile',
-        description: '',
-        connectorIds: [connector.id],
-      },
-      'owner-a',
-    );
-    const profJob = await lifecycle.apply(profPrev.id, 'owner-a');
-    await lifecycle.drain();
-    expect(lifecycle.job(profJob.id, 'owner-a').state).toBe('succeeded');
+      // Approve it (approve_connector)
+      state = await lifecycle.inventory();
+      connector = asNative(state.connectors.find((c) => c.id === connector.id));
+      expect(connector.trustApproval).toBeNull();
+      const appPrev = await lifecycle.preview(
+        {
+          kind: 'approve_connector',
+          expectedRevision: state.revision,
+          connectorId: connector.id,
+          expectedConnectorRevision: connector.revision,
+          definitionHash: definitionHash(connector),
+          approveExecution: true,
+        },
+        'owner-a',
+      );
+      const appJob = await lifecycle.apply(appPrev.id, 'owner-a');
+      await lifecycle.drain();
+      expect(lifecycle.job(appJob.id, 'owner-a').state).toBe('succeeded');
 
-    // Approve it (approve_connector)
-    state = await lifecycle.inventory();
-    connector = asNative(state.connectors.find((c) => c.id === connector.id));
-    expect(connector.trustApproval).toBeNull();
-    const appPrev = await lifecycle.preview(
-      {
-        kind: 'approve_connector',
-        expectedRevision: state.revision,
-        connectorId: connector.id,
-        expectedConnectorRevision: connector.revision,
-        definitionHash: definitionHash(connector),
-        approveExecution: true,
-      },
-      'owner-a',
-    );
-    const appJob = await lifecycle.apply(appPrev.id, 'owner-a');
-    await lifecycle.drain();
-    expect(lifecycle.job(appJob.id, 'owner-a').state).toBe('succeeded');
+      state = await lifecycle.inventory();
+      connector = asNative(state.connectors.find((c) => c.id === connector.id));
+      expect(connector.trustApproval).not.toBeNull();
+      const priorRevision = connector.revision;
 
-    state = await lifecycle.inventory();
-    connector = asNative(state.connectors.find((c) => c.id === connector.id));
-    expect(connector.trustApproval).not.toBeNull();
-    const priorRevision = connector.revision;
+      // Resolve srv@1.1.0
+      const res2 = service.resolve(
+        { name: replacementName, version: '1.1.0' },
+        'owner-a',
+      );
+      const resolved2 = await waitFor(service, res2, 'owner-a');
+      const preview2 = resolved2.preview!;
 
-    // Resolve srv@1.1.0
-    const res2 = service.resolve({ name: 'srv', version: '1.1.0' }, 'owner-a');
-    const resolved2 = await waitFor(service, res2, 'owner-a');
-    const preview2 = resolved2.preview!;
+      // Replace
+      const replaceJob = await service.replace(
+        {
+          connectorId: connector.id,
+          expectedConnectorRevision: connector.revision,
+          previewId: preview2.previewId,
+          entry: 'srv',
+          acknowledgedWarnings: preview2.warnings,
+          ...(replacementName === 'srv'
+            ? {}
+            : { packageNameChange: { from: 'srv', to: replacementName } }),
+        },
+        'owner-a',
+      );
 
-    // Replace
-    const replaceJob = await service.replace(
-      {
-        connectorId: connector.id,
-        expectedConnectorRevision: connector.revision,
-        previewId: preview2.previewId,
-        entry: 'srv',
-        acknowledgedWarnings: preview2.warnings,
-      },
-      'owner-a',
-    );
+      // The job (kind: 'replace') succeeds with outcome: 'saved'
+      expect(replaceJob.kind).toBe('replace');
+      const completedReplace = await waitFor(service, replaceJob, 'owner-a');
+      expect(completedReplace.state).toBe('succeeded');
+      expect(completedReplace.result?.outcome).toBe('saved');
 
-    // The job (kind: 'replace') succeeds with outcome: 'saved'
-    expect(replaceJob.kind).toBe('replace');
-    const completedReplace = await waitFor(service, replaceJob, 'owner-a');
-    expect(completedReplace.state).toBe('succeeded');
-    expect(completedReplace.result?.outcome).toBe('saved');
+      // The stored connector has the new package.version and a new installId
+      state = await lifecycle.inventory();
+      const updated = asNative(
+        state.connectors.find((c) => c.id === connector.id),
+      );
+      expect(updated.package?.version).toBe('1.1.0');
+      expect(updated.package?.name).toBe(replacementName);
+      expect(updated.enabled).toBe(connector.enabled);
+      expect(updated.name).toBe(connector.name);
+      expect(updated.secretBindings).toEqual(connector.secretBindings);
+      expect(updated.headerBindings).toEqual(connector.headerBindings);
+      expect(updated.package?.installId).not.toBe(oldInstallId);
+      const newInstallId = updated.package!.installId;
+      const newFolder = installDirectory(packagesDir, newInstallId);
 
-    // The stored connector has the new package.version and a new installId
-    state = await lifecycle.inventory();
-    const updated = asNative(
-      state.connectors.find((c) => c.id === connector.id),
-    );
-    expect(updated.package?.version).toBe('1.1.0');
-    expect(updated.package?.installId).not.toBe(oldInstallId);
-    const newInstallId = updated.package!.installId;
-    const newFolder = installDirectory(packagesDir, newInstallId);
+      // arguments[1] points into the new install, arguments[2] === '--flag'
+      expect(updated.arguments[0]).toBe('--no-global-search-paths');
+      expect(updated.arguments[1]).toContain(newInstallId);
+      expect(updated.arguments[2]).toBe('--flag');
 
-    // arguments[1] points into the new install, arguments[2] === '--flag'
-    expect(updated.arguments[0]).toBe('--no-global-search-paths');
-    expect(updated.arguments[1]).toContain(newInstallId);
-    expect(updated.arguments[2]).toBe('--flag');
+      // API_TOKEN binding is unchanged
+      expect(updated.secretBindings.API_TOKEN).toBe(
+        connector.secretBindings.API_TOKEN,
+      );
 
-    // API_TOKEN binding is unchanged
-    expect(updated.secretBindings.API_TOKEN).toBe(
-      connector.secretBindings.API_TOKEN,
-    );
+      // Profile still contains it
+      const profile = state.profiles.find((p) => p.name === 'Main Profile')!;
+      expect(profile.connectorIds).toContain(updated.id);
 
-    // Profile still contains it
-    const profile = state.profiles.find((p) => p.name === 'Main Profile')!;
-    expect(profile.connectorIds).toContain(updated.id);
+      // trustApproval is null, and its revision went up
+      expect(updated.trustApproval).toBeNull();
+      expect(updated.revision).toBeGreaterThan(priorRevision);
 
-    // trustApproval is null, and its revision went up
-    expect(updated.trustApproval).toBeNull();
-    expect(updated.revision).toBeGreaterThan(priorRevision);
-
-    // The old install folder is deleted (poll); the new one exists
-    await waitForPath(oldFolder, false);
-    expect(await pathExists(newFolder)).toBe(true);
-  });
+      // The old install folder is deleted (poll); the new one exists
+      await waitForPath(oldFolder, false);
+      expect(await pathExists(newFolder)).toBe(true);
+    },
+  );
 
   it('8. Replace refusals', async () => {
     const { lifecycle, service, registry, fakeRunner } = await setupService({
@@ -1102,6 +1123,26 @@ $stream = [System.IO.File]::Open('${unrefFile.replace(/'/g, "''")}', [System.IO.
         'owner-a',
       ),
     ).rejects.toMatchObject({ code: 'invalid' });
+
+    // Explicit acknowledgments must match both the stored package and preview.
+    for (const packageNameChange of [
+      { from: 'wrong-pkg', to: 'other-pkg' },
+      { from: 'srv', to: 'wrong-pkg' },
+    ]) {
+      await expect(
+        service.replace(
+          {
+            connectorId: srvConn.id,
+            expectedConnectorRevision: srvConn.revision,
+            previewId: previewOther,
+            entry: 'other-pkg',
+            acknowledgedWarnings: [],
+            packageNameChange,
+          },
+          'owner-a',
+        ),
+      ).rejects.toMatchObject({ code: 'invalid' });
+    }
 
     // No jobs created for refusals
     expect(service.activeJobs().size).toBe(jobsBefore);

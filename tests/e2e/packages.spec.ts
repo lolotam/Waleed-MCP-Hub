@@ -85,6 +85,7 @@ function job(overrides: Record<string, unknown>) {
 async function fakePackageApi(
   page: Page,
   options: {
+    replacementName?: string;
     failResolve?: boolean;
     losePolls?: number;
     loseStart?: boolean;
@@ -98,6 +99,7 @@ async function fakePackageApi(
     resolvePolls: number;
     installPolls: number;
     installBody: Record<string, unknown> | null;
+    replaceBody?: Record<string, unknown>;
   } = { resolvePolls: 0, installPolls: 0, installBody: null };
   const answer = async (
     route: Parameters<Parameters<Page['route']>[1]>[0],
@@ -160,6 +162,7 @@ async function fakePackageApi(
       return;
     }
     if (path === '/api/packages/replace') {
+      state.replaceBody = request.postDataJSON() as Record<string, unknown>;
       await answer(
         route,
         job({ id: INSTALL_JOB, kind: 'replace', phase: 'downloading' }),
@@ -190,7 +193,10 @@ async function fakePackageApi(
         job({
           state: 'succeeded',
           phase: 'complete',
-          preview: preview(),
+          preview: {
+            ...preview(),
+            name: options.replacementName ?? preview().name,
+          },
           completedAt: '2026-01-01T00:00:05.000Z',
         }),
       );
@@ -596,4 +602,110 @@ test('a failed list reload adds the stale-list sentence', async ({ page }) => {
   await expect(page.getByRole('dialog').getByRole('alert')).toContainText(
     'The connector list could not be reloaded; reload the page to see it.',
   );
+});
+
+test('changing a managed package requires explicit publisher confirmation', async ({
+  page,
+}) => {
+  const connectorId = 'package-demo';
+  await page.route('**/api/connectors', (route) =>
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        connectors: [
+          {
+            id: connectorId,
+            name: 'Demo MCP',
+            description: '',
+            enabled: false,
+            revision: 4,
+            executionHash: LOCK_HASH,
+            executionMode: 'native',
+            transport: 'stdio',
+            executable: 'C:/synthetic/node.exe',
+            arguments: [
+              '--no-global-search-paths',
+              'C:/synthetic/bin/demo-mcp.js',
+            ],
+            secretBindings: {},
+            headerBindings: {},
+            trustApproval: null,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+            package: {
+              ecosystem: 'npm',
+              name: 'demo-mcp',
+              version: '1.1.0',
+              entry: 'demo-mcp',
+              entryPath: 'bin/demo-mcp.js',
+              installId: INSTALL_JOB,
+              integrity: INTEGRITY,
+              lockHash: LOCK_HASH,
+              manifestHash: LOCK_HASH,
+            },
+          },
+        ],
+        observations: [],
+        discovering: false,
+      }),
+    }),
+  );
+  const state = await fakePackageApi(page, {
+    replacementName: '@owner/demo-mcp',
+  });
+  await page.goto(await launch());
+  await page
+    .getByTestId('connector-package-demo')
+    .getByRole('button', { name: /Demo MCP npm/ })
+    .click();
+  await page
+    .getByRole('button', { name: 'Change package', exact: true })
+    .click();
+  await page
+    .getByLabel('Replacement package name', { exact: true })
+    .fill('@owner/demo-mcp');
+  await page.getByLabel('Replacement version', { exact: true }).fill('1.2.0');
+  await page.getByRole('button', { name: 'Look up', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: '@owner/demo-mcp@1.2.0', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('radio', { name: /bin\/demo-mcp-alt\.js/ }).check();
+  await page.getByLabel(/This package has install scripts/).check();
+  await page.getByLabel(/This release is younger than 7 days/).check();
+  const replace = page.getByRole('button', { name: 'Replace', exact: true });
+  await expect(replace).toBeDisabled();
+  await page
+    .getByLabel('I confirm changing the package and publisher', { exact: true })
+    .check();
+  await expect(replace).toBeEnabled();
+  await page
+    .getByRole('button', { name: 'Look up again', exact: true })
+    .click();
+  await page.getByRole('button', { name: 'Look up', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: '@owner/demo-mcp@1.2.0', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel('I confirm changing the package and publisher', {
+      exact: true,
+    }),
+  ).not.toBeChecked();
+  await page.getByRole('radio', { name: /bin\/demo-mcp-alt\.js/ }).check();
+  await page.getByLabel(/This package has install scripts/).check();
+  await page.getByLabel(/This release is younger than 7 days/).check();
+  await expect(replace).toBeDisabled();
+  await page
+    .getByLabel('I confirm changing the package and publisher', { exact: true })
+    .check();
+  await replace.click();
+  await expect
+    .poll(() => state.replaceBody)
+    .toEqual({
+      connectorId,
+      expectedConnectorRevision: 4,
+      previewId: PREVIEW_ID,
+      entry: 'demo-mcp-alt',
+      acknowledgedWarnings: ['install_scripts', 'recent_release'],
+      packageNameChange: { from: 'demo-mcp', to: '@owner/demo-mcp' },
+    });
 });
