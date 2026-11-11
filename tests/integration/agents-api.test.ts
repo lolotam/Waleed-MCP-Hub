@@ -192,6 +192,36 @@ it('returns a partial-save ID if protected storage fails and clears transient in
     await hub.close();
   }
 });
+it('clears a header value stored under an own __proto__ key in place', async () => {
+  const hub = createLifecycle(memoryStore());
+  const secret = 'SYNTHETIC_proto_private';
+  // JSON.parse creates an own property named __proto__, as a request body
+  // does; a plain assignment to it would never reach that property.
+  const headers = JSON.parse(
+    `{"Authorization":"${secret}","__proto__":"${secret}"}`,
+  ) as Record<string, string>;
+  const input = {
+    expectedRevision: 0,
+    name: secret,
+    type: 'streamable_http',
+    url: 'https://example.test/mcp',
+    headers,
+    confirmSave: true,
+  };
+  try {
+    await expect(addManualMcp(hub, input, 'owner')).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    expect(Object.getOwnPropertyDescriptor(headers, '__proto__')?.value).toBe(
+      '',
+    );
+    expect(headers.Authorization).toBe('');
+    expect(Object.getPrototypeOf(headers)).toBe(Object.prototype);
+    expect(JSON.stringify(headers)).not.toContain(secret);
+  } finally {
+    await hub.close();
+  }
+});
 it('rejects credential echoes before any registry effect, including escaped text', async () => {
   const hub = createLifecycle(memoryStore());
   const secret = 'SYNTHETIC_"manual\\private';

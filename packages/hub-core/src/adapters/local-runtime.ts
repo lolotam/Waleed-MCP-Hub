@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createWindowsDiscoveryPorts } from './discovery-files.js';
 import { createWindowsProcessRunner } from './native/process-runner.js';
-import { managedFiles } from './managed-files.js';
+import { managedFiles, readOwnedFile } from './managed-files.js';
 import {
   dockerCommand,
   dockerProfiles,
@@ -12,12 +12,10 @@ import { createMaterializer } from '../runtime/materialize.js';
 import { createCapabilityRuntime } from './mcp/runtime.js';
 import type { LifecycleAdapters } from '../lifecycle.js';
 import { StateSchema, type HubState } from '@waleed/contracts';
-import { lstat, readFile } from 'node:fs/promises';
 import { windowsSecretStore } from './secrets/windows.js';
 import { dockerSecretStore } from './secrets/docker.js';
 import { createBindingResolver } from '../auth/bindings.js';
 import type { SecretBackends } from '../auth/secrets.js';
-import { assertNoLinks } from './managed-files.js';
 import { windowsAgentTargets } from '../integrations/targets.js';
 import { agentFiles, outsideProtectedPilot } from '../integrations/files.js';
 import { packagesRoot } from '../packages/store.js';
@@ -98,10 +96,10 @@ export async function localRuntimeAdapters(
     readState ??
     (async () => {
       const path = join(directory, 'state.json');
-      await assertNoLinks(path);
-      if ((await lstat(path)).size > 16 * 1024 * 1024)
-        throw new Error('Registry exceeds limit.');
-      return StateSchema.parse(JSON.parse(await readFile(path, 'utf8')));
+      // Checked and read through one handle; over 16 MiB is refused.
+      const bytes = await readOwnedFile(path, 16 * 1024 * 1024);
+      if (bytes === null) throw new Error('Registry is missing.');
+      return StateSchema.parse(JSON.parse(bytes.toString('utf8')));
     });
   return {
     ...(process.platform === 'win32'
