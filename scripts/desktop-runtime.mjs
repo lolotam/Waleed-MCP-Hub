@@ -363,6 +363,9 @@ export async function startDesktop({
       if (retryable && Date.now() < retryUntil) {
         const step = Math.min(BUSY_RETRY_STEP_MS, retryUntil - Date.now());
         await new Promise((resolveRetry) => setTimeout(resolveRetry, step));
+        // A timer can fire late (a sleeping machine); no attempt starts
+        // once the deadline has passed.
+        if (Date.now() >= retryUntil) throw error;
         return startDesktop({
           root,
           directory,

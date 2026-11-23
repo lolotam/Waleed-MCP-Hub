@@ -216,14 +216,21 @@ namespace WaleedMcpHub
                 if (remaining > 0) Thread.Sleep((int)Math.Min(500, remaining));
             }
             string taskkill = Path.Combine(Environment.SystemDirectory, "taskkill.exe");
+            // taskkill answers 0 when it stopped the tree and 128 when the
+            // launcher was already gone. Anything else, or no answer in time,
+            // may have left the manager or backend running.
+            bool stopFailed = false;
             foreach (Process launcher in RunningLaunchers(root))
                 using (launcher)
-                    RunHidden(taskkill, "/PID " + launcher.Id + " /T /F", 10000);
+                {
+                    int code = RunHidden(taskkill, "/PID " + launcher.Id + " /T /F", 10000);
+                    if (code != 0 && code != 128) stopFailed = true;
+                }
             // Starting the new version over a hub that would not stop only
             // moves the failure; say so instead.
             DateTime stopped = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < stopped && CountRunningLaunchers(root) > 0) Thread.Sleep(250);
-            if (CountRunningLaunchers(root) > 0)
+            if (stopFailed || CountRunningLaunchers(root) > 0)
                 throw new IOException("The running Waleed MCP Hub could not be closed. Quit it from its tray icon, then run this setup again.");
         }
 
