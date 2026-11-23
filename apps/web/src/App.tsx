@@ -325,19 +325,41 @@ export function App() {
       } else position.current = landed;
       show(next);
     };
+    // A traversal between two entries of the same address fires no
+    // hashchange, so the position is also read here. A traversal that the
+    // hold is about to refuse keeps the old position: the refusal needs it.
+    const settle = (event: PopStateEvent) => {
+      const landed = positionOf(event.state);
+      if (
+        landed !== null &&
+        (!holding.current ||
+          samePlace(parsePlace(window.location.hash), placeNow.current))
+      )
+        position.current = landed;
+    };
     window.addEventListener('hashchange', read);
-    return () => window.removeEventListener('hashchange', read);
+    window.addEventListener('popstate', settle);
+    return () => {
+      window.removeEventListener('hashchange', read);
+      window.removeEventListener('popstate', settle);
+    };
   }, [show]);
-  // A draft whose discard the hub did not confirm when its page was left.
-  const [strandedDraft, setStrandedDraft] = useState<string | null>(null);
-  useEffect(() => {
-    if (!strandedDraft) return;
-    const timer = window.setTimeout(
-      () => setStrandedDraft(null),
-      DRAFT_LIFETIME_MS,
-    );
-    return () => window.clearTimeout(timer);
-  }, [strandedDraft]);
+  // The drafts whose discard the hub did not confirm when their page was
+  // left. Each one is kept, retried and forgotten on its own.
+  const [strandedDrafts, setStrandedDrafts] = useState<string[]>([]);
+  const forgetDraft = useCallback(
+    (id: string) =>
+      setStrandedDrafts((drafts) => drafts.filter((draft) => draft !== id)),
+    [],
+  );
+  const strandDraft = useCallback(
+    (id: string) => {
+      setStrandedDrafts((drafts) => [...drafts, id]);
+      // The hub drops the draft by itself when its lifetime ends.
+      window.setTimeout(() => forgetDraft(id), DRAFT_LIFETIME_MS);
+    },
+    [forgetDraft],
+  );
   async function retryDiscard(id: string) {
     try {
       await api(`/api/imports/${id}/cancel`, {});
@@ -345,7 +367,7 @@ export function App() {
       // A draft the hub no longer knows is gone, which is the goal.
       if (!(failure instanceof ApiError && failure.status === 404)) return;
     }
-    setStrandedDraft(null);
+    forgetDraft(id);
   }
   // While the hub has not answered, every tab is shown. Once it has, a place
   // that a capability hides moves to its first visible sibling, in place.
@@ -666,16 +688,20 @@ export function App() {
                 </a>
               </section>
             )}
-            {strandedDraft && (
+            {strandedDrafts.length > 0 && (
               <section className="error-panel" role="alert">
-                <h2>A private import draft was not discarded</h2>
+                <h2>
+                  {strandedDrafts.length === 1
+                    ? 'A private import draft was not discarded'
+                    : `${strandedDrafts.length} private import drafts were not discarded`}
+                </h2>
                 <p>
                   The import page was left, but the hub did not confirm that its
-                  draft is gone. The draft expires within five minutes.
+                  draft is gone. A draft expires within five minutes.
                 </p>
                 <button
                   onClick={() => {
-                    void retryDiscard(strandedDraft);
+                    for (const id of strandedDrafts) void retryDiscard(id);
                   }}
                 >
                   Retry discard
@@ -1210,7 +1236,7 @@ export function App() {
                 revision={bootstrap.revision}
                 close={closeAdd}
                 hold={hold}
-                stranded={setStrandedDraft}
+                stranded={strandDraft}
                 refresh={refresh}
                 savePreview={(preview, definitions) => {
                   closeAdd();

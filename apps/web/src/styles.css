@@ -470,6 +470,13 @@ button.tab[aria-selected='true']:hover:not(:disabled) {
   opacity: 0.55;
   pointer-events: none;
 }
+/* A fieldset that only disables its controls and draws nothing. */
+fieldset.form-hold {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
 /* The pills under the Add tab are links to their own addresses, 32 px high
    like the segments of the status filter. */
 .pill-row {

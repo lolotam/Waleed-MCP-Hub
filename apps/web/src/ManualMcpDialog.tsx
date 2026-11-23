@@ -16,11 +16,10 @@ const map = (text: string): Record<string, string> => {
   return value as Record<string, string>;
 };
 // The page is offered only while changes can be made. A page that is already
-// open stays open, so the outcome of its own save is never replaced.
-export function ManualMcpPage({
-  blocked,
-  ...page
-}: Parameters<typeof ManualMcpDialog>[0] & { blocked: string | null }) {
+// open stays open, so the outcome of its own save is never replaced; it takes
+// no new save or install while changes are blocked.
+export function ManualMcpPage(page: Parameters<typeof ManualMcpDialog>[0]) {
+  const { blocked } = page;
   const [admitted, setAdmitted] = useState(!blocked);
   if (!blocked && !admitted) setAdmitted(true);
   return admitted ? (
@@ -37,7 +36,10 @@ export function ManualMcpDialog({
   close,
   hold,
   refresh,
+  blocked,
 }: {
+  // Why no change can be started now, or null.
+  blocked: string | null;
   revision: number;
   close: () => void;
   // Tells the shell that the page waits on the hub and must not be left.
@@ -112,7 +114,7 @@ export function ManualMcpDialog({
   async function save(event: FormEvent) {
     event.preventDefault();
     // The npm package flow has its own buttons and its own request.
-    if (type === 'npm') return;
+    if (type === 'npm' || blocked) return;
     setBusy(true);
     setError('');
     let input: ReturnType<typeof ManualMcpSchema.parse> | undefined;
@@ -229,137 +231,149 @@ export function ManualMcpDialog({
           protected write-only store, never into agent settings. Auto-sync does
           not bypass authentication or agent approval.
         </p>
-        {notice ? (
+        {blocked && !notice && (
           <p role="status" className="notice">
-            {notice}
+            {blocked}
           </p>
-        ) : type === 'npm' ? (
-          <>
-            <div className="form-fields">{typeSelect}</div>
-            <PackageInstall
-              seed={{ mode: 'install' }}
-              close={close}
-              refresh={refresh}
-              onRunning={setPackageRunning}
-              showCancel={false}
-            />
-          </>
-        ) : (
-          <>
-            <div className="form-fields">
-              <label htmlFor="manual-name">MCP name</label>
-              <input id="manual-name" name="name" required maxLength={100} />
-              {typeSelect}
-              {type === 'stdio' && (
-                <>
-                  <label htmlFor="manual-command">
-                    Absolute command (.exe)
-                  </label>
-                  <input
-                    id="manual-command"
-                    name="command"
-                    required
-                    spellCheck={false}
-                    placeholder="C:\Tools\server.exe"
-                  />
-                </>
-              )}
-              {type === 'docker' && (
-                <>
-                  <label htmlFor="manual-image">Docker image</label>
-                  <input
-                    id="manual-image"
-                    name="image"
-                    required
-                    spellCheck={false}
-                  />
-                  <label htmlFor="manual-ports">Loopback ports (JSON)</label>
-                  <input
-                    id="manual-ports"
-                    name="ports"
-                    defaultValue="[]"
-                    spellCheck={false}
-                  />
-                  <small>
-                    Example: [{`{"host":8080,"container":8080}`}]. Published on
-                    127.0.0.1 only.
-                  </small>
-                </>
-              )}
-              {type === 'stdio' || type === 'docker' ? (
-                <>
-                  <label htmlFor="manual-args">
-                    Arguments (JSON array, no shell expansion)
-                  </label>
-                  <textarea
-                    id="manual-args"
-                    name="args"
-                    defaultValue="[]"
-                    spellCheck={false}
-                  />
-                  <label htmlFor="manual-env">
-                    Protected environment values (write-only JSON)
-                  </label>
-                  <textarea
-                    ref={env}
-                    id="manual-env"
-                    spellCheck={false}
-                    aria-describedby="manual-private"
-                  />
-                </>
-              ) : (
-                <>
-                  <label htmlFor="manual-url">HTTPS MCP URL</label>
-                  <input
-                    id="manual-url"
-                    name="url"
-                    type="url"
-                    required
-                    spellCheck={false}
-                  />
-                  <label htmlFor="manual-headers">
-                    Protected headers (write-only JSON)
-                  </label>
-                  <textarea
-                    ref={headers}
-                    id="manual-headers"
-                    spellCheck={false}
-                    aria-describedby="manual-private"
-                  />
-                </>
-              )}
-              <small id="manual-private">
-                Exact credential values are hidden after submission and cleared
-                on error/close. For Authorization, include the documented prefix
-                in the exact value. Never put secrets in args, names or URLs.
-              </small>
-              <label className="import-check">
-                <input name="autoSync" type="checkbox" defaultChecked />
-                Auto-sync currently integrated agents
-              </label>
-              <label className="import-check">
-                <input name="approveExecution" type="checkbox" />I trust this
-                exact executable/image/endpoint and approve its
-                execution/file/network/download permissions.
-              </label>
-              <p className="notice">
-                Agent configuration is not live verification. Docker
-                keychain-backed execution remains unavailable until a verified
-                gateway recipe exists.
-              </p>
-            </div>
-            {validation && (
-              <p role="alert" className="error-message">
-                {validation}
-              </p>
-            )}
-            {error && (
-              <p role="alert" className="error-message">
-                {error}
-              </p>
-            )}
-          </>
         )}
+        {/* A running request or install keeps its own controls. */}
+        <fieldset
+          className="form-hold"
+          disabled={!!blocked && !busy && !packageRunning}
+        >
+          {notice ? (
+            <p role="status" className="notice">
+              {notice}
+            </p>
+          ) : type === 'npm' ? (
+            <>
+              <div className="form-fields">{typeSelect}</div>
+              <PackageInstall
+                seed={{ mode: 'install' }}
+                close={close}
+                refresh={refresh}
+                onRunning={setPackageRunning}
+                showCancel={false}
+              />
+            </>
+          ) : (
+            <>
+              <div className="form-fields">
+                <label htmlFor="manual-name">MCP name</label>
+                <input id="manual-name" name="name" required maxLength={100} />
+                {typeSelect}
+                {type === 'stdio' && (
+                  <>
+                    <label htmlFor="manual-command">
+                      Absolute command (.exe)
+                    </label>
+                    <input
+                      id="manual-command"
+                      name="command"
+                      required
+                      spellCheck={false}
+                      placeholder="C:\Tools\server.exe"
+                    />
+                  </>
+                )}
+                {type === 'docker' && (
+                  <>
+                    <label htmlFor="manual-image">Docker image</label>
+                    <input
+                      id="manual-image"
+                      name="image"
+                      required
+                      spellCheck={false}
+                    />
+                    <label htmlFor="manual-ports">Loopback ports (JSON)</label>
+                    <input
+                      id="manual-ports"
+                      name="ports"
+                      defaultValue="[]"
+                      spellCheck={false}
+                    />
+                    <small>
+                      Example: [{`{"host":8080,"container":8080}`}]. Published
+                      on 127.0.0.1 only.
+                    </small>
+                  </>
+                )}
+                {type === 'stdio' || type === 'docker' ? (
+                  <>
+                    <label htmlFor="manual-args">
+                      Arguments (JSON array, no shell expansion)
+                    </label>
+                    <textarea
+                      id="manual-args"
+                      name="args"
+                      defaultValue="[]"
+                      spellCheck={false}
+                    />
+                    <label htmlFor="manual-env">
+                      Protected environment values (write-only JSON)
+                    </label>
+                    <textarea
+                      ref={env}
+                      id="manual-env"
+                      spellCheck={false}
+                      aria-describedby="manual-private"
+                    />
+                  </>
+                ) : (
+                  <>
+                    <label htmlFor="manual-url">HTTPS MCP URL</label>
+                    <input
+                      id="manual-url"
+                      name="url"
+                      type="url"
+                      required
+                      spellCheck={false}
+                    />
+                    <label htmlFor="manual-headers">
+                      Protected headers (write-only JSON)
+                    </label>
+                    <textarea
+                      ref={headers}
+                      id="manual-headers"
+                      spellCheck={false}
+                      aria-describedby="manual-private"
+                    />
+                  </>
+                )}
+                <small id="manual-private">
+                  Exact credential values are hidden after submission and
+                  cleared on error/close. For Authorization, include the
+                  documented prefix in the exact value. Never put secrets in
+                  args, names or URLs.
+                </small>
+                <label className="import-check">
+                  <input name="autoSync" type="checkbox" defaultChecked />
+                  Auto-sync currently integrated agents
+                </label>
+                <label className="import-check">
+                  <input name="approveExecution" type="checkbox" />I trust this
+                  exact executable/image/endpoint and approve its
+                  execution/file/network/download permissions.
+                </label>
+                <p className="notice">
+                  Agent configuration is not live verification. Docker
+                  keychain-backed execution remains unavailable until a verified
+                  gateway recipe exists.
+                </p>
+              </div>
+              {validation && (
+                <p role="alert" className="error-message">
+                  {validation}
+                </p>
+              )}
+              {error && (
+                <p role="alert" className="error-message">
+                  {error}
+                </p>
+              )}
+            </>
+          )}
+        </fieldset>
         <footer className="dialog-footer">
           <button
             type="button"
@@ -374,7 +388,7 @@ export function ManualMcpDialog({
           {!notice && type !== 'npm' && (
             <button
               className="primary"
-              disabled={busy || !!validation}
+              disabled={busy || !!validation || !!blocked}
               type="submit"
             >
               {busy ? 'Saving…' : 'Save MCP'}
