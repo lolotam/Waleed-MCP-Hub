@@ -631,6 +631,10 @@ main {
   .segmented button[aria-pressed='true'] {
     outline: 2px solid Highlight;
     outline-offset: -2px;
+    /* The underline marks selection on its own, so it is still there when
+       the focus rule below moves the outline outside the button. */
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
   /* Keyboard focus on the pressed segment must still look different from
      selection alone: a wider ring outside the button. */

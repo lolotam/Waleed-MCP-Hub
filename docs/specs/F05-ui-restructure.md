@@ -261,7 +261,9 @@ Answered by the owner on 2026-11-23, who accepted the recommendation on each.
    hash and then erases the whole hash whenever it is not empty, so a page
    hash would be lost on every load. Required change: that cleanup removes
    the launch token and nothing else, still before any asynchronous work, and
-   the launch token never appears in a page address.
+   the launch token never appears in a page address. The "Skip to content"
+   link (`href="#main"` in `App.tsx`) would overwrite a page hash, so it
+   must move focus to `main` without changing the hash.
 5. **Theme control.** Light, Dark and System on Settings › Runtime &
    safeguards. System follows Windows.
 6. **Bell.** Not built in F05. Sidebar entries carry counts; the only count in
