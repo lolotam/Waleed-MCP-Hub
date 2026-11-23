@@ -195,9 +195,11 @@ namespace WaleedMcpHub
             if (CountRunningLaunchers(root) == 0) return;
             string node = Path.Combine(installed, "runtime", "node.exe");
             string quit = "\"" + Path.Combine(installed, "scripts", "desktop.mjs") + "\" --quit";
-            DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+            // One 20-second grace period covers the requests and the waits.
+            Stopwatch grace = Stopwatch.StartNew();
+            const int graceMilliseconds = 20000;
             bool asking = true;
-            while (DateTime.UtcNow < deadline && CountRunningLaunchers(root) > 0)
+            while (grace.ElapsedMilliseconds < graceMilliseconds && CountRunningLaunchers(root) > 0)
             {
                 if (asking)
                 {
@@ -205,11 +207,13 @@ namespace WaleedMcpHub
                     // 4: it is busy. Both are asked again. Anything else is
                     // final: it is quitting, or it cannot be asked.
                     int code;
-                    try { code = RunHidden(node, quit, 10000); }
+                    int left = (int)Math.Max(1, graceMilliseconds - grace.ElapsedMilliseconds);
+                    try { code = RunHidden(node, quit, Math.Min(10000, left)); }
                     catch (System.ComponentModel.Win32Exception) { code = 1; }
                     asking = code == 3 || code == 4;
                 }
-                Thread.Sleep(500);
+                long remaining = graceMilliseconds - grace.ElapsedMilliseconds;
+                if (remaining > 0) Thread.Sleep((int)Math.Min(500, remaining));
             }
             string taskkill = Path.Combine(Environment.SystemDirectory, "taskkill.exe");
             foreach (Process launcher in RunningLaunchers(root))
@@ -220,7 +224,7 @@ namespace WaleedMcpHub
             DateTime stopped = DateTime.UtcNow.AddSeconds(5);
             while (DateTime.UtcNow < stopped && CountRunningLaunchers(root) > 0) Thread.Sleep(250);
             if (CountRunningLaunchers(root) > 0)
-                throw new IOException("The new version is installed, but the running Waleed MCP Hub could not be closed. Quit it from its tray icon, then open Waleed MCP Hub again.");
+                throw new IOException("The running Waleed MCP Hub could not be closed. Quit it from its tray icon, then run this setup again.");
         }
 
         private static void Shortcut(string directory, string executable, string installationRoot)

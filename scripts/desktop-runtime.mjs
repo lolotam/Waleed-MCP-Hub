@@ -279,11 +279,10 @@ export async function startDesktop({
         let acknowledged = false,
           busy = false,
           replace = false;
-        // Inside a busy wait a request may not outlast what is left of it.
-        const replyTimeout = busyDeadline
-          ? Math.max(1000, Math.min(15000, busyDeadline - Date.now()))
-          : 15000;
-        client.setTimeout(replyTimeout, () => {
+        // Every request keeps its full reply time, also inside a busy wait:
+        // a manager that accepted the handoff answers only after its backend
+        // has stopped, and cutting that short would leave no hub running.
+        client.setTimeout(15000, () => {
           client.destroy();
           reject(new Error('Desktop control timed out.'));
         });
@@ -355,7 +354,12 @@ export async function startDesktop({
       // well: that is the old manager finishing its shutdown.
       const retryUntil =
         busyDeadline || (error?.busy ? Date.now() + busyRetryMs : 0);
-      const retryable = error?.busy || (busyDeadline && error?.unavailable);
+      // After a busy answer, a pipe that is gone, or one that closes without
+      // a reply, is the old manager finishing its shutdown and not a legacy
+      // manager. The legacy probe below stays for the first negotiation.
+      const retryable =
+        error?.busy ||
+        (busyDeadline && (error?.unavailable || error?.legacyClose));
       if (retryable && Date.now() < retryUntil) {
         const step = Math.min(BUSY_RETRY_STEP_MS, retryUntil - Date.now());
         await new Promise((resolveRetry) => setTimeout(resolveRetry, step));
