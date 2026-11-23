@@ -1,9 +1,13 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  THEME_COLORS,
   THEME_STORAGE_KEY,
   applyTheme,
+  applyThemeColor,
   readTheme,
   setTheme,
+  type ThemeColorTag,
   type ThemeRoot,
   type ThemeStorage,
 } from '../apps/web/src/theme.js';
@@ -38,6 +42,17 @@ const throwingStorage: ThemeStorage = {
   },
 };
 
+function fakeTag(media: string): ThemeColorTag & { content: string } {
+  const tag = {
+    content: '',
+    getAttribute: (name: string) => (name === 'media' ? media : null),
+    setAttribute: (name: string, value: string) => {
+      if (name === 'content') tag.content = value;
+    },
+  };
+  return tag;
+}
+
 describe('theme choice', () => {
   it('defaults to system when nothing or something unknown is saved', () => {
     expect(readTheme(fakeStorage())).toBe('system');
@@ -70,15 +85,36 @@ describe('theme choice', () => {
   it('saves the choice it applies', () => {
     const root = fakeRoot();
     const storage = fakeStorage();
-    setTheme('dark', root, storage);
+    setTheme('dark', root, storage, []);
     expect(storage.values.get(THEME_STORAGE_KEY)).toBe('dark');
     expect(root.attributes.get('data-theme')).toBe('dark');
+  });
+
+  it('gives both window frame tags the colour of an explicit choice', () => {
+    const light = fakeTag('(prefers-color-scheme: light)');
+    const dark = fakeTag('(prefers-color-scheme: dark)');
+    applyThemeColor('dark', [light, dark]);
+    expect([light.content, dark.content]).toEqual([
+      THEME_COLORS.dark,
+      THEME_COLORS.dark,
+    ]);
+    applyThemeColor('system', [light, dark]);
+    expect([light.content, dark.content]).toEqual([
+      THEME_COLORS.light,
+      THEME_COLORS.dark,
+    ]);
+  });
+
+  it('keeps the early script on the same key and values', () => {
+    const script = readFileSync('apps/web/public/theme-init.js', 'utf8');
+    expect(script).toContain(`getItem('${THEME_STORAGE_KEY}')`);
+    expect(script).toContain("choice === 'light' || choice === 'dark'");
   });
 
   it('does not throw when the storage throws, and still applies', () => {
     const root = fakeRoot();
     expect(readTheme(throwingStorage)).toBe('system');
-    expect(() => setTheme('dark', root, throwingStorage)).not.toThrow();
+    expect(() => setTheme('dark', root, throwingStorage, [])).not.toThrow();
     expect(root.attributes.get('data-theme')).toBe('dark');
   });
 });

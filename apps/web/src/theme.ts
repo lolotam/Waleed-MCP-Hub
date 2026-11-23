@@ -54,14 +54,48 @@ export function applyTheme(
   else root.setAttribute('data-theme', choice);
 }
 
+// The colours of the window frame around the page, one per theme. They match
+// the two `theme-color` tags in index.html.
+export const THEME_COLORS = { light: '#1f53b8', dark: '#0d131c' } as const;
+
+// The part of a `theme-color` meta tag this module needs.
+export interface ThemeColorTag {
+  getAttribute(name: string): string | null;
+  setAttribute(name: string, value: string): void;
+}
+
+function themeColorTags(): ThemeColorTag[] {
+  return Array.from(document.querySelectorAll('meta[name="theme-color"]'));
+}
+
+// The two tags follow Windows through their `media` attribute. An explicit
+// Light or Dark choice gives both the chosen colour, so the window frame
+// matches the page; System gives each its own colour back.
+export function applyThemeColor(
+  choice: ThemeChoice,
+  tags: ThemeColorTag[] = themeColorTags(),
+): void {
+  for (const tag of tags) {
+    const own = (tag.getAttribute('media') ?? '').includes('dark')
+      ? 'dark'
+      : 'light';
+    tag.setAttribute(
+      'content',
+      THEME_COLORS[choice === 'system' ? own : choice],
+    );
+  }
+}
+
 // Applies and remembers a choice. A store that cannot be written still
 // leaves the choice applied for this page.
 export function setTheme(
   choice: ThemeChoice,
   root: ThemeRoot = document.documentElement,
   storage = browserStorage(),
+  tags: ThemeColorTag[] = themeColorTags(),
 ): void {
   applyTheme(choice, root);
+  applyThemeColor(choice, tags);
   try {
     storage?.setItem(THEME_STORAGE_KEY, choice);
   } catch {
@@ -69,7 +103,11 @@ export function setTheme(
   }
 }
 
-// Runs before React renders so the first paint already has the saved theme.
+// Runs when the app module loads. `public/theme-init.js` has already set
+// `data-theme` before the first paint; this repeats it with the validated
+// choice and sets the window frame colour.
 export function applyStoredTheme(): void {
-  applyTheme(readTheme());
+  const choice = readTheme();
+  applyTheme(choice);
+  applyThemeColor(choice);
 }
