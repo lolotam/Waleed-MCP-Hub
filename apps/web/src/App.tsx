@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import {
   BootstrapSchema,
   type Bootstrap,
@@ -33,7 +33,7 @@ import { PillRow, TabPanel, TabRow } from './Tabs.js';
 import { ProfileDialog } from './ProfileDialog.js';
 import { DiscoveryPanel } from './DiscoveryPanel.js';
 import { AgentCloning } from './AgentCloning.js';
-import { UpdateNotice } from './UpdateNotice.js';
+import { UpdateNotice, useUpdateCheck } from './UpdateNotice.js';
 import { ActivityPage } from './ActivityPage.js';
 import {
   AppearancePanel,
@@ -291,6 +291,12 @@ export function App() {
   const tabs = visibleTabs(entry, capabilities);
   const currentTab = tabs.find((tab) => tab.id === place.tab);
   const pills = currentTab ? visiblePills(currentTab, capabilities) : [];
+  const onAdd = place.entry === 'connectors' && place.tab === 'add';
+  // The safety notice belongs to Settings › Runtime & safeguards and the Add
+  // pages only.
+  const showNotice =
+    onAdd || (place.entry === 'settings' && place.tab === 'runtime');
+  const update = useUpdateCheck(!!bootstrap?.capabilities.appUpdates);
 
   const filteredProfiles = profiles.filter((profile) =>
     `${profile.name} ${profile.description}`
@@ -379,25 +385,40 @@ export function App() {
         <div className="workspace-label">MANAGE</div>
         <nav aria-label="Main navigation">
           {entries.map((item) => (
-            <button
-              key={item.id}
-              className={
-                place.entry === item.id ? 'nav-item selected' : 'nav-item'
-              }
-              aria-current={place.entry === item.id ? 'page' : undefined}
-              onClick={() => {
-                go(firstPlace(item, capabilities));
-                setSearch('');
-                setConnectorSearch('');
-                setStatusFilter('all');
-              }}
-            >
-              <Icon name={item.icon} />
-              <span>{item.label}</span>
-              {item.id === 'profiles' && profiles.length > 0 && (
-                <span className="nav-count">{profiles.length}</span>
-              )}
-            </button>
+            <Fragment key={item.id}>
+              <button
+                className={
+                  place.entry === item.id ? 'nav-item selected' : 'nav-item'
+                }
+                aria-current={place.entry === item.id ? 'page' : undefined}
+                onClick={() => {
+                  go(firstPlace(item, capabilities));
+                  setSearch('');
+                  setConnectorSearch('');
+                  setStatusFilter('all');
+                }}
+              >
+                <Icon name={item.icon} />
+                <span>{item.label}</span>
+                {item.id === 'settings' &&
+                  update.status?.state === 'available' && (
+                    // Visual only: the status text below names it, so the
+                    // accessible name of the button stays "Settings".
+                    <span className="nav-count" aria-hidden="true">
+                      1
+                    </span>
+                  )}
+                {item.id === 'profiles' && profiles.length > 0 && (
+                  <span className="nav-count">{profiles.length}</span>
+                )}
+              </button>
+              {item.id === 'settings' &&
+                update.status?.state === 'available' && (
+                  <span className="sr-only" role="status">
+                    Update available
+                  </span>
+                )}
+            </Fragment>
           ))}
         </nav>
         <div className="sidebar-bottom">
@@ -519,29 +540,37 @@ export function App() {
                 href={(pill) => formatPlace({ ...place, pill })}
               />
             )}
-            {place.entry === 'connectors' && exportStatus && (
-              <p className="notice" role="status" data-testid="export-status">
-                {exportStatus}
-              </p>
-            )}
+            {place.entry === 'connectors' &&
+              place.tab === 'all' &&
+              exportStatus && (
+                <p className="notice" role="status" data-testid="export-status">
+                  {exportStatus}
+                </p>
+              )}
 
-            <div className="foundation-notice">
-              <Icon name="shield" />
-              <div>
-                {bootstrap?.capabilities.discovery
-                  ? 'Discovery does not execute connectors; saving, exact execution approval, protected credentials, profile apply and capability checks are separate actions, and pilot adoption and agent synchronization stay disabled.'
-                  : bootstrap?.capabilities.agentApply
-                    ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; agent integration verifies configuration only, and reconnect and trust remain agent-controlled.'
-                    : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; capability tests use available runtime adapters, and agent synchronization remains disabled.'}
+            {showNotice && (
+              <div className="foundation-notice">
+                <Icon name="shield" />
+                <div>
+                  {bootstrap?.capabilities.discovery
+                    ? 'Discovery does not execute connectors; saving, exact execution approval, protected credentials, profile apply and capability checks are separate actions, and pilot adoption and agent synchronization stay disabled.'
+                    : bootstrap?.capabilities.agentApply
+                      ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; agent integration verifies configuration only, and reconnect and trust remain agent-controlled.'
+                      : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; capability tests use available runtime adapters, and agent synchronization remains disabled.'}
+                </div>
+                <span className="read-only-tag">Explicit actions only</span>
               </div>
-              <span className="read-only-tag">Explicit actions only</span>
-            </div>
+            )}
+            {/* The three panels below keep their state and their timers: they
+                stay mounted and are only hidden when their page is not open. */}
             {bootstrap?.capabilities.agentCloning && (
-              <AgentCloning
-                disabled={loading || !!error || recoveryBlocked}
-                refresh={refresh}
-                openManual={() => setManual(true)}
-              />
+              <div hidden={!(onAdd && place.pill === 'agents')}>
+                <AgentCloning
+                  disabled={loading || !!error || recoveryBlocked}
+                  refresh={refresh}
+                  openManual={() => setManual(true)}
+                />
+              </div>
             )}
             {error ? (
               <>
@@ -566,12 +595,23 @@ export function App() {
               </div>
             ) : (
               <>
+                {bootstrap?.capabilities.appUpdates && (
+                  <div
+                    hidden={
+                      !(place.entry === 'settings' && place.tab === 'updates')
+                    }
+                  >
+                    <UpdateNotice {...update} />
+                  </div>
+                )}
                 {bootstrap?.capabilities.discovery && (
-                  <DiscoveryPanel
-                    snapshot={discovery}
-                    preview={adoption}
-                    refresh={refresh}
-                  />
+                  <div hidden={!(onAdd && place.pill === 'discover')}>
+                    <DiscoveryPanel
+                      snapshot={discovery}
+                      preview={adoption}
+                      refresh={refresh}
+                    />
+                  </div>
                 )}
                 {recoveryBlocked && (
                   <section className="error-panel" role="alert">
@@ -588,9 +628,12 @@ export function App() {
                   </section>
                 )}
                 {place.entry === 'connectors' && (
+                  // The list stays mounted on the Add tab: it owns the
+                  // automatic discovery of all connectors.
                   <section
                     className="list-panel"
                     aria-labelledby="connector-list-title"
+                    hidden={place.tab !== 'all'}
                   >
                     <div className="list-toolbar">
                       <div className="list-toolbar-title">
@@ -655,9 +698,22 @@ export function App() {
                         <h2>Your existing tools stay where they are</h2>
                         <p>
                           {discovery?.checkedAt
-                            ? 'Read-only observations are available in the adoption preview above. No connector definition has been imported into the registry or executed.'
+                            ? 'Read-only observations are available in the adoption preview under Add › Discover environment. No connector definition has been imported into the registry or executed.'
                             : 'The hub has not inspected or imported your pilot yet. Use read-only discovery to review your existing setup; adoption remains a separate explicit step.'}
                         </p>
+                        {bootstrap?.capabilities.discovery && (
+                          <button
+                            onClick={() =>
+                              go({
+                                entry: 'connectors',
+                                tab: 'add',
+                                pill: 'discover',
+                              })
+                            }
+                          >
+                            Open discovery <Icon name="arrow" size={16} />
+                          </button>
+                        )}
                         <button onClick={() => go({ entry: 'profiles' })}>
                           Set up a local profile <Icon name="arrow" size={16} />
                         </button>
@@ -1026,9 +1082,6 @@ export function App() {
                     chooseTheme={chooseTheme}
                     stopDesktop={stopDesktop}
                   />
-                )}
-                {place.entry === 'settings' && place.tab === 'updates' && (
-                  <UpdateNotice />
                 )}
                 {place.entry === 'settings' && place.tab === 'recovery' && (
                   <RecoveryStatus blocked={recoveryBlocked} />

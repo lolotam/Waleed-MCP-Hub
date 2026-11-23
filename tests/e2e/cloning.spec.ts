@@ -1,6 +1,13 @@
 import { fork, type ChildProcess } from 'node:child_process';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 let server: ChildProcess;
+// The scan of the agents is the From your agents page under Add.
+async function openAgents(page: Page) {
+  await page.getByRole('tab', { name: 'Add', exact: true }).click();
+  await page
+    .getByRole('link', { name: 'From your agents', exact: true })
+    .click();
+}
 test.beforeEach(async ({ page }) => {
   server = fork('tests/fixtures/cloning-server.mjs', [], {
     execArgv: ['--import', 'tsx'],
@@ -21,6 +28,7 @@ test.beforeEach(async ({ page }) => {
     });
   });
   await page.goto(launch);
+  await openAgents(page);
 });
 test.afterEach(async () => {
   if (server && server.exitCode === null && server.signalCode === null) {
@@ -47,6 +55,15 @@ test('first opening scans agents, clones only the selection with credentials and
   await expect(
     page.getByText('Codex · 1 MCPs · found', { exact: true }),
   ).toBeVisible();
+  // The count on Settings is visual only; the status text names it and the
+  // name of the button stays Settings.
+  await expect(
+    page.getByRole('button', { name: 'Settings', exact: true }),
+  ).toBeVisible();
+  await expect(page.locator('.nav-item .nav-count')).toHaveText('1');
+  await expect(
+    page.getByRole('status').getByText('Update available'),
+  ).toHaveCount(1);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('tab', { name: 'Updates', exact: true }).click();
   await expect(
@@ -62,6 +79,7 @@ test('first opening scans agents, clones only the selection with credentials and
     'SYNTHETIC_FIRST_RUN_COPY_TOKEN',
   );
   await page.getByRole('button', { name: 'Connectors', exact: true }).click();
+  await openAgents(page);
   await page
     .getByLabel('Copy primary from Claude Code', { exact: true })
     .check();
@@ -69,6 +87,7 @@ test('first opening scans agents, clones only the selection with credentials and
   await page
     .getByRole('button', { name: 'Clone and connect (1)', exact: true })
     .click();
+  await page.getByRole('tab', { name: 'All connectors', exact: true }).click();
   const row = page.getByTestId(/^connector-manual-/);
   await expect(row).toHaveCount(1);
   await row.getByTestId('connector-toggle').click();
@@ -98,6 +117,7 @@ test('a copied connector with missing authentication remains available for repai
   await page
     .getByRole('button', { name: 'Clone and connect (1)', exact: true })
     .click();
+  await page.getByRole('tab', { name: 'All connectors', exact: true }).click();
   const row = page.getByTestId(/^connector-manual-/);
   await expect(row).toHaveCount(1);
   await row.getByTestId('connector-toggle').click();
