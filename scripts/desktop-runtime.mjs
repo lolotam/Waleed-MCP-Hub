@@ -302,6 +302,10 @@ export async function startDesktop({
         lastBind,
       });
     }
+    // The one extra bind after a handoff found the pipe still taken. It is
+    // bind-only, so nothing more is asked.
+    if (lastBind)
+      throw fail(new Error('The control pipe is still held by its owner.'));
     // The pipe is still taken and the busy wait is over: stop here instead
     // of opening one more negotiation.
     if (busyDeadline && Date.now() >= busyDeadline)
@@ -421,12 +425,14 @@ export async function startDesktop({
       // A manager that answered busy speaks the current protocol, so a silent
       // close after that is never a legacy manager and gets no legacy open.
       // After a handoff, a pipe that is gone or closes without a reply may
-      // just have been released by the old manager. Try to bind once more;
-      // this starts no new negotiation and happens only once.
+      // just have been released by the old manager. Try to bind once more.
+      // That attempt only binds: it sends no request, happens once, and
+      // never runs past the busy wait.
       if (
         backendStopped &&
         !lastBind &&
-        (error?.unavailable || error?.legacyClose)
+        (error?.unavailable || error?.legacyClose) &&
+        !(busyDeadline && Date.now() >= busyDeadline)
       )
         return startDesktop({
           root,
@@ -435,7 +441,11 @@ export async function startDesktop({
           openWindow,
           log,
           environment,
-          handoffDeadline: Date.now() + 3000,
+          // Three seconds, or what is left of the busy wait if that is less.
+          handoffDeadline: Math.min(
+            Date.now() + 3000,
+            busyDeadline || Infinity,
+          ),
           attach,
           busyRetryMs,
           busyDeadline,
