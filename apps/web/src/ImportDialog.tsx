@@ -13,6 +13,7 @@ import type {
   PackageProposal,
 } from '@waleed/contracts';
 import { api, ApiError } from './api.js';
+import { expiryDelay } from './expiry.js';
 import { Icon } from './Icon.js';
 
 type Mode = 'paste' | 'endpoint' | 'native';
@@ -83,24 +84,19 @@ export function ImportDialog({
   }, []);
   useEffect(() => {
     if (!preview) return;
-    const timer = window.setTimeout(
-      () => {
-        const expiredId = draftId.current;
-        draftId.current = null;
-        if (expiredId)
-          void api(`/api/imports/${expiredId}/cancel`, {}).catch(
-            () => undefined,
-          );
-        setPreview(null);
-        setSelection([]);
-        setExpired(true);
-        form.current?.reset();
-        setError(
-          'Private draft expired. Paste a fresh configuration; nothing was saved.',
-        );
-      },
-      Math.max(0, Date.parse(preview.expiresAt) - Date.now()),
-    );
+    const timer = window.setTimeout(() => {
+      const expiredId = draftId.current;
+      draftId.current = null;
+      if (expiredId)
+        void api(`/api/imports/${expiredId}/cancel`, {}).catch(() => undefined);
+      setPreview(null);
+      setSelection([]);
+      setExpired(true);
+      form.current?.reset();
+      setError(
+        'Private draft expired. Paste a fresh configuration; nothing was saved.',
+      );
+    }, expiryDelay(preview.expiresAt));
     return () => window.clearTimeout(timer);
   }, [preview]);
   useEffect(() => {
