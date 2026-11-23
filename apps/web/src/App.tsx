@@ -351,8 +351,12 @@ export function App() {
   // that a capability hides moves to its first visible sibling, in place.
   useEffect(() => {
     if (!bootstrap) return;
-    const fixed = resolvePlace(place, bootstrap.capabilities);
-    if (samePlace(fixed, place)) return;
+    // Read from the address, not from the state: a pill that was just
+    // followed has changed the address, and its hashchange may still be
+    // queued.
+    const asked = parsePlace(window.location.hash);
+    const fixed = resolvePlace(asked, bootstrap.capabilities);
+    if (samePlace(fixed, asked)) return;
     window.history.replaceState(window.history.state, '', address(fixed));
     show(fixed);
   }, [bootstrap, place, show]);
@@ -585,7 +589,7 @@ export function App() {
                   </button>
                   <button
                     type="button"
-                    disabled={loading || !!error}
+                    disabled={loading || !!error || held}
                     aria-describedby="export-help"
                     onClick={() => {
                       void exportRegistry();
@@ -635,16 +639,16 @@ export function App() {
                 label="Add a connector"
                 pills={pills}
                 current={place.pill}
+                held={held}
                 href={(pill) => formatPlace({ ...place, pill })}
               />
             )}
-            {place.entry === 'connectors' &&
-              place.tab === 'all' &&
-              exportStatus && (
-                <p className="notice" role="status" data-testid="export-status">
-                  {exportStatus}
-                </p>
-              )}
+            {/* Export is offered on both Connectors tabs, so is its result. */}
+            {place.entry === 'connectors' && exportStatus && (
+              <p className="notice" role="status" data-testid="export-status">
+                {exportStatus}
+              </p>
+            )}
 
             {/* Above every page while changes are blocked, also when the
                 hub can no longer be read. */}

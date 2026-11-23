@@ -77,11 +77,14 @@ export function PillRow({
   label,
   pills,
   current,
+  held,
   href,
 }: {
   label: string;
   pills: PillNode[];
   current: string | undefined;
+  // While an Add page holds the place a pill is not followed.
+  held: boolean;
   href: (pill: string) => string;
 }) {
   return (
@@ -91,6 +94,9 @@ export function PillRow({
           key={pill.id}
           className="add-pill"
           href={href(pill.id)}
+          onClick={(event) => {
+            if (held) event.preventDefault();
+          }}
           aria-current={pill.id === current ? 'true' : undefined}
         >
           <Icon name={pill.icon} size={14} />
