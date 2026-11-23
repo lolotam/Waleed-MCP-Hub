@@ -632,6 +632,12 @@ main {
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }
+  /* Keyboard focus on the pressed segment must still look different from
+     selection alone: a wider ring outside the button. */
+  .segmented button[aria-pressed='true']:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
 }
 .count {
   background: var(--muted-surface);

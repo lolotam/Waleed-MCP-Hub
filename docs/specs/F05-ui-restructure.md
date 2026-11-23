@@ -256,9 +256,12 @@ Answered by the owner on 2026-11-23, who accepted the recommendation on each.
    Add pages. Removed from every other page.
 3. **Blocking recovery alert.** Shown above every page while changes are
    blocked, and on Settings › Recovery.
-4. **Page addresses.** Each page gets a hash so a reload stays on it. Condition:
-   `apps/web/src/api.ts` reads the launch token from the hash and erases it
-   (lines 21 to 25) before the page router reads the hash.
+4. **Page addresses.** Each page gets a hash so a reload stays on it. Today
+   `apps/web/src/api.ts` (lines 21 to 29) reads the `launch` value from the
+   hash and then erases the whole hash whenever it is not empty, so a page
+   hash would be lost on every load. Required change: that cleanup removes
+   the launch token and nothing else, still before any asynchronous work, and
+   the launch token never appears in a page address.
 5. **Theme control.** Light, Dark and System on Settings › Runtime &
    safeguards. System follows Windows.
 6. **Bell.** Not built in F05. Sidebar entries carry counts; the only count in
