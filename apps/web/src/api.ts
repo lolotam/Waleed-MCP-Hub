@@ -6,6 +6,7 @@ import {
   type PackageJob,
   type PackageWarning,
 } from '@waleed/contracts';
+import { readLaunchFragment } from './navigation.js';
 
 let csrfToken: string | null = null;
 export class ApiError extends Error {
@@ -17,15 +18,15 @@ export class ApiError extends Error {
     super(message);
   }
 }
-// Consume and erase the fragment before any async work. Never use browser storage.
-let launchToken = new URLSearchParams(window.location.hash.slice(1)).get(
-  'launch',
-);
-if (window.location.hash)
+// Consume the launch token and erase it from the address before any async
+// work. A page address in the same fragment stays. Never use browser storage.
+const launchFragment = readLaunchFragment(window.location.hash);
+let launchToken = launchFragment.token;
+if (window.location.hash !== launchFragment.hash)
   window.history.replaceState(
     null,
     '',
-    window.location.pathname + window.location.search,
+    window.location.pathname + window.location.search + launchFragment.hash,
   );
 
 export async function api<T>(

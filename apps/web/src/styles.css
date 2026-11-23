@@ -421,6 +421,92 @@ button.nav-item.selected {
   font-family: Consolas, monospace;
   font-size: 11px;
 }
+/* The tab row sits under the top bar. A tab is 44 px high; the selected tab
+   has an underline in the action colour and its own text colour. */
+.tab-row {
+  padding-inline: 40px;
+  background: var(--surface);
+  border-block-end: 1px solid var(--border);
+}
+.tab-row [role='tablist'] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-inline: auto;
+  max-width: 1456px;
+}
+button.tab {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+button.tab:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+button.tab:focus-visible {
+  outline-offset: -2px;
+}
+button.tab[aria-selected='true'],
+button.tab[aria-selected='true']:hover:not(:disabled) {
+  border-block-end-color: var(--action);
+  color: var(--selected-text);
+}
+/* The pills under the Add tab are links to their own addresses, 32 px high
+   like the segments of the status filter. */
+.pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block-end: 24px;
+}
+a.add-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  text-decoration: none;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+a.add-pill:hover {
+  background: var(--muted-surface);
+  border-color: var(--outline);
+}
+a.add-pill[aria-current='true'],
+a.add-pill[aria-current='true']:hover {
+  background: var(--selected);
+  border-color: var(--outline);
+  color: var(--selected-text);
+}
+@media (forced-colors: active) {
+  button.tab[aria-selected='true'] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  a.add-pill[aria-current='true'] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  button.tab[aria-selected='true']:focus-visible,
+  a.add-pill[aria-current='true']:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
+}
 main {
   max-width: 1536px;
   margin-inline: auto;
@@ -1404,7 +1490,8 @@ dialog h2 {
     width: calc(100% - 208px);
   }
   main,
-  .topbar {
+  .topbar,
+  .tab-row {
     padding-inline: 24px;
   }
   .read-only-tag {
@@ -1490,6 +1577,9 @@ dialog h2 {
   .workspace {
     width: 100%;
     margin: 0;
+  }
+  .tab-row {
+    padding-inline: 16px;
   }
   .topbar {
     height: 48px;

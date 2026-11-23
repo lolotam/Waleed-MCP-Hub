@@ -152,6 +152,8 @@ test('secure bootstrap, honest empty state, keyboard profile preview/apply, relo
   ).toBeVisible();
   expect(await page.locator('img').count()).toBe(0);
   await page.reload();
+  // A reload now stays on the page it was on, which is Profiles here.
+  await page.getByRole('button', { name: 'Connectors', exact: true }).click();
   await expect(
     page.getByRole('heading', { name: 'Connectors', exact: true }),
   ).toBeVisible();

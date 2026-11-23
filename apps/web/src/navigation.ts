@@ -7,7 +7,9 @@ import type { IconName } from './Icon.js';
 
 export type Capability = keyof Bootstrap['capabilities'];
 // While the hub has not answered there is no set, and nothing is hidden.
-export type Capabilities = Partial<Record<Capability, boolean>> | null;
+export type Capabilities = Partial<
+  Record<Capability, boolean | undefined>
+> | null;
 
 export interface PillNode {
   id: string;
