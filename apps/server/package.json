@@ -9,6 +9,6 @@
     "@fastify/static": "10.1.8",
     "@waleed/contracts": "0.1.0",
     "@waleed/hub-core": "0.1.0",
-    "fastify": "5.12.7"
+    "fastify": "5.12.8"
   }
 }
