@@ -297,6 +297,15 @@ export function App() {
   // Every history entry of the app carries its position, so a refused Back
   // or Forward can be undone instead of overwriting the entry it landed on.
   const position = useRef(0);
+  // A refused traversal is undone with another traversal, which lands a
+  // moment later. A close that arrives in between is shown at once and gets
+  // its history entry when the undo has landed.
+  const undoing = useRef(false);
+  const closeAfterUndo = useRef<Place | null>(null);
+  const push = useCallback((next: Place) => {
+    position.current += 1;
+    window.history.pushState({ position: position.current }, '', address(next));
+  }, []);
   useEffect(() => {
     const known = positionOf(window.history.state);
     if (known === null) window.history.replaceState({ position: 0 }, '');
@@ -304,14 +313,27 @@ export function App() {
     const read = () => {
       const next = parsePlace(window.location.hash);
       const landed = positionOf(window.history.state);
+      if (undoing.current) {
+        undoing.current = false;
+        const closed = closeAfterUndo.current;
+        closeAfterUndo.current = null;
+        if (closed) {
+          if (landed !== null) position.current = landed;
+          push(closed);
+          return;
+        }
+      }
       if (holding.current && !samePlace(next, placeNow.current)) {
         // Refused during the wait. A pill or a typed address made a new
         // entry: step back off it. Back or Forward landed on an old entry:
         // return to the entry it came from.
-        if (landed === null) window.history.back();
-        else if (landed !== position.current)
+        if (landed === null) {
+          undoing.current = true;
+          window.history.back();
+        } else if (landed !== position.current) {
+          undoing.current = true;
           window.history.go(position.current - landed);
-        else
+        } else
           window.history.replaceState(
             window.history.state,
             '',
@@ -343,7 +365,7 @@ export function App() {
       window.removeEventListener('hashchange', read);
       window.removeEventListener('popstate', settle);
     };
-  }, [show]);
+  }, [show, push]);
   // The drafts whose discard the hub did not confirm when their page was
   // left. Each one is kept, retried and forgotten on its own.
   const [strandedDrafts, setStrandedDrafts] = useState<string[]>([]);
@@ -386,16 +408,17 @@ export function App() {
   // A move to another place is a new history entry.
   const move = useCallback(
     (next: Place) => {
+      if (undoing.current) {
+        // The address is mid-way through an undo: do not trust it.
+        closeAfterUndo.current = next;
+        show(next);
+        return;
+      }
       if (samePlace(parsePlace(window.location.hash), next)) return;
-      position.current += 1;
-      window.history.pushState(
-        { position: position.current },
-        '',
-        address(next),
-      );
+      push(next);
       show(next);
     },
-    [show],
+    [show, push],
   );
   // The navigation of the user. It waits while an Add page holds the place.
   const go = useCallback(
@@ -513,6 +536,7 @@ export function App() {
                   place.entry === item.id ? 'nav-item selected' : 'nav-item'
                 }
                 aria-current={place.entry === item.id ? 'page' : undefined}
+                aria-disabled={held || undefined}
                 onClick={() => {
                   // A held page keeps its filters too.
                   if (held) return;
@@ -605,6 +629,7 @@ export function App() {
                   <button
                     type="button"
                     disabled={loading || !!error || recoveryBlocked}
+                    aria-disabled={held || undefined}
                     onClick={() => go(addPlace('manual'))}
                   >
                     <Icon name="upload" size={16} />
@@ -625,6 +650,7 @@ export function App() {
                     type="button"
                     className="primary"
                     disabled={loading || !!error}
+                    aria-disabled={held || undefined}
                     onClick={() => go(addPlace('import'))}
                     aria-describedby="add-help"
                   >
