@@ -119,6 +119,8 @@ describe('theme choice', () => {
     const head = page.slice(0, page.indexOf('</head>'));
     // No async, defer or type=module: the parser waits for it.
     expect(head).toContain('<script src="/theme-init.js"></script>');
+    // Both tags must exist, and come first, for the script to recolour them.
+    expect(head.match(/<meta\s+name="theme-color"/g)).toHaveLength(2);
     expect(head.lastIndexOf('name="theme-color"')).toBeLessThan(
       head.indexOf('/theme-init.js'),
     );
