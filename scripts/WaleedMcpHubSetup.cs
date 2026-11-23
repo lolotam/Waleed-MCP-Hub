@@ -77,10 +77,11 @@ namespace WaleedMcpHub
             return true;
         }
 
-        private static string Install(string root, Action<int, int> progress)
+        private static string Install(string root, Action<int, int> progress, Action<string> status)
         {
             LocalDirectory(root);
             Directory.CreateDirectory(root);
+            status("Checking the installer...");
             using (Stream resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("wmh-payload.zip"))
             {
                 if (resource == null || Hash(resource) != Payload.Sha256) throw new IOException("The installer payload is damaged. Download a fresh installer.");
@@ -90,6 +91,8 @@ namespace WaleedMcpHub
                     string target = Path.Combine(root, Payload.Version + "-" + Payload.Sha256.Substring(0, 16));
                     if (Directory.Exists(target))
                     {
+                        // Hashing an installed copy takes a while and reports no count.
+                        status("Checking the existing installation...");
                         if (Matches(target, archive)) return target;
                         foreach (string previous in Directory.GetDirectories(root, Path.GetFileName(target) + "-repair-*"))
                             if (Matches(previous, archive)) return previous;
@@ -99,6 +102,7 @@ namespace WaleedMcpHub
                     }
                     string staging = Path.Combine(root, ".staging-" + Guid.NewGuid().ToString("N"));
                     Directory.CreateDirectory(staging);
+                    status("Copying files...");
                     try
                     {
                         HashSet<string> paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -130,6 +134,104 @@ namespace WaleedMcpHub
                     return target;
                 }
             }
+        }
+
+        // The launchers of this installation root that run in this Windows
+        // session now. A process in another session, or one whose path cannot
+        // be read, belongs to someone else and is left alone. Each returned
+        // process has its handle open: Windows does not reuse a process id
+        // while a handle to it is open, so the id still names the launcher
+        // that was checked here when it is stopped later.
+        private static List<Process> RunningLaunchers(string root)
+        {
+            List<Process> found = new List<Process>();
+            string prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            int session;
+            using (Process self = Process.GetCurrentProcess()) session = self.SessionId;
+            foreach (Process process in Process.GetProcessesByName("WaleedMcpHub"))
+            {
+                try
+                {
+                    if (process.SessionId == session && process.Handle != IntPtr.Zero && !process.HasExited
+                        && process.MainModule.FileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { found.Add(process); continue; }
+                }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (InvalidOperationException) { }
+                process.Dispose();
+            }
+            return found;
+        }
+
+        private static int CountRunningLaunchers(string root)
+        {
+            List<Process> launchers = RunningLaunchers(root);
+            foreach (Process launcher in launchers) launcher.Dispose();
+            return launchers.Count;
+        }
+
+        // Returns the exit code, or -1 when the program did not end in time.
+        private static int RunHidden(string file, string arguments, int timeoutMilliseconds)
+        {
+            ProcessStartInfo start = new ProcessStartInfo(file, arguments) { UseShellExecute = false, CreateNoWindow = true };
+            using (Process process = Process.Start(start))
+            {
+                if (process.WaitForExit(timeoutMilliseconds)) return process.ExitCode;
+                try { process.Kill(); }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                return -1;
+            }
+        }
+
+        // The owner asked for an update to close the running hub by itself.
+        // The hub is asked to quit first, the way its tray menu does. The
+        // request goes to the manager that owns this user's control pipe, the
+        // one the new version would take over when it opens. A launcher of
+        // this installation root that is still running after the wait is
+        // stopped together with the manager and backend it started. Agent
+        // bridges are started by the agents, not by a launcher, and keep running.
+        private static void CloseRunningHub(string root, string installed)
+        {
+            if (CountRunningLaunchers(root) == 0) return;
+            string node = Path.Combine(installed, "runtime", "node.exe");
+            string quit = "\"" + Path.Combine(installed, "scripts", "desktop.mjs") + "\" --quit";
+            // One 20-second grace period covers the requests and the waits.
+            Stopwatch grace = Stopwatch.StartNew();
+            const int graceMilliseconds = 20000;
+            bool asking = true;
+            while (grace.ElapsedMilliseconds < graceMilliseconds && CountRunningLaunchers(root) > 0)
+            {
+                if (asking)
+                {
+                    // 3: no manager listens yet (the hub is still starting);
+                    // 4: it is busy. Both are asked again. Anything else is
+                    // final: it is quitting, or it cannot be asked.
+                    int code;
+                    int left = (int)Math.Max(1, graceMilliseconds - grace.ElapsedMilliseconds);
+                    try { code = RunHidden(node, quit, Math.Min(10000, left)); }
+                    catch (System.ComponentModel.Win32Exception) { code = 1; }
+                    asking = code == 3 || code == 4;
+                }
+                long remaining = graceMilliseconds - grace.ElapsedMilliseconds;
+                if (remaining > 0) Thread.Sleep((int)Math.Min(500, remaining));
+            }
+            string taskkill = Path.Combine(Environment.SystemDirectory, "taskkill.exe");
+            // taskkill answers 0 when it stopped the tree and 128 when the
+            // launcher was already gone. Anything else, or no answer in time,
+            // may have left the manager or backend running.
+            bool stopFailed = false;
+            foreach (Process launcher in RunningLaunchers(root))
+                using (launcher)
+                {
+                    int code = RunHidden(taskkill, "/PID " + launcher.Id + " /T /F", 10000);
+                    if (code != 0 && code != 128) stopFailed = true;
+                }
+            // Starting the new version over a hub that would not stop only
+            // moves the failure; say so instead.
+            DateTime stopped = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < stopped && CountRunningLaunchers(root) > 0) Thread.Sleep(250);
+            if (stopFailed || CountRunningLaunchers(root) > 0)
+                throw new IOException("The running Waleed MCP Hub could not be closed. Quit it from its tray icon, then run this setup again.");
         }
 
         private static void Shortcut(string directory, string executable, string installationRoot)
@@ -181,16 +283,59 @@ namespace WaleedMcpHub
                         try { owned = mutex.WaitOne(0); } catch (AbandonedMutexException) { owned = true; }
                         if (!owned) throw new IOException("Another Waleed MCP Hub installer is running.");
                         ProgressBar bar = null;
+                        Label label = null;
                         if (!silent)
                         {
                             window = new Form { Text = "Waleed MCP Hub Setup", ClientSize = new Size(450, 110), FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false, ControlBox = false, StartPosition = FormStartPosition.CenterScreen };
-                            window.Controls.Add(new Label { Text = "Installing Waleed MCP Hub and its included packages...", Left = 20, Top = 20, Width = 410 });
-                            bar = new ProgressBar { Left = 20, Top = 55, Width = 410 };
+                            label = new Label { Text = "Installing Waleed MCP Hub and its included packages...", Left = 20, Top = 20, Width = 410 };
+                            window.Controls.Add(label);
+                            // The bar runs as a marquee until files are counted.
+                            bar = new ProgressBar { Left = 20, Top = 55, Width = 410, Style = ProgressBarStyle.Marquee };
                             window.Controls.Add(bar);
                             window.Show();
                             Application.DoEvents();
                         }
-                        string installed = Install(root, delegate(int value, int total) { if (bar != null) { bar.Maximum = total; bar.Value = value; Application.DoEvents(); } });
+                        // The work runs on its own thread and this thread keeps
+                        // answering Windows, so the window never stops responding.
+                        Form shown = window;
+                        Action<string> status = delegate(string text)
+                        {
+                            if (shown != null) shown.BeginInvoke(new Action(delegate { label.Text = text; bar.Style = ProgressBarStyle.Marquee; }));
+                        };
+                        Action<int, int> progress = delegate(int value, int total)
+                        {
+                            // One window message for each percent is enough.
+                            if (shown == null || (value != total && value % Math.Max(1, total / 100) != 0)) return;
+                            shown.BeginInvoke(new Action(delegate
+                            {
+                                bar.Style = ProgressBarStyle.Blocks;
+                                bar.Maximum = total;
+                                bar.Value = value;
+                                label.Text = "Copying files... " + value + " of " + total;
+                            }));
+                        };
+                        string installed = null;
+                        Exception failure = null;
+                        bool closeRunning = launch;
+                        Thread worker = new Thread(new ThreadStart(delegate
+                        {
+                            try
+                            {
+                                string result = Install(root, progress, status);
+                                if (closeRunning)
+                                {
+                                    status("Closing the running Waleed MCP Hub...");
+                                    CloseRunningHub(root, result);
+                                }
+                                status("Starting Waleed MCP Hub...");
+                                installed = result;
+                            }
+                            catch (Exception error) { failure = error; }
+                        }));
+                        worker.IsBackground = true;
+                        worker.Start();
+                        while (!worker.Join(15)) Application.DoEvents();
+                        if (failure != null) throw new IOException(failure.Message, failure);
                         string executable = Path.Combine(installed, "WaleedMcpHub.exe");
                         if (shortcuts)
                         {

@@ -931,13 +931,27 @@ The hub writes nothing into the agents' own folders.
 
 **Consequences.** This entry records the decision only. The navigation code lands in later F05 steps, and `docs/SPECIFICATION.md` is edited then.
 
+## D031 — An update closes the running hub; the hub window loads no extensions (2026-11-23)
+
+**Decision.** Three changes to the desktop update path:
+
+- The installer, when it is going to open the hub and a `WaleedMcpHub.exe` launcher from its installation root runs in the same Windows session, asks the hub to quit through the control pipe (the tray's own Quit request). It asks again while the answer is "no manager yet" or "busy", for up to 20 seconds. A launcher still running after that is stopped with the manager and backend it started (`taskkill /T /F`); the installer keeps the launcher's process handle open, so its process id cannot be reused in between. If a launcher is still running afterwards, setup reports that it could not close the hub and does not open the new version. With `--no-launch` it stops nothing.
+- A new installation that finds the old manager busy (still starting, or closing) starts new attempts until one deadline 30 seconds after the first busy answer. Inside that window a pipe that disappears, or closes without a reply, is retried too. Each attempt keeps its own 15-second reply time, so an accepted handoff is never cut short; the last attempt can therefore end up to 15 seconds after the deadline.
+- The Edge app window starts with `--disable-extensions` and `--disable-sync`, in a new profile folder, `edge-app-profile`. An Edge process still running on the old `edge-profile` folder would otherwise receive the launch and keep its extensions.
+
+D028 to D030 are reserved by pull request #42.
+
+**Why.** The owner reported on 2026-11-23 that an update at sign-in failed because the hub was open, and gave permission to close and stop it automatically. Windows starts the old hub at sign-in; the installer then launched the new version while the old manager was still starting, and the single busy answer ended the launch. Separately, the hub's own Edge profile on the owner's machine was found signed in with sync on and holding 80 extension folders, so extensions could read the page that manages credentials.
+
+**Consequences.** This narrows D023's "no process is stopped". Force-stop is limited to hub launchers under the installer's own installation root in the current session. The quit request is not limited that way: the control pipe is shared by every installation of one user and data folder, so it reaches whichever manager owns that pipe. That is the same manager the new version takes over when it opens. Agent bridges are started by the agents and keep running. The installer window does its work on a second thread and names each phase. The old `edge-profile` folder is left on disk and is no longer used by this version. A manager from before the handoff protocol that was started without a launcher is still reopened as before, in its own window and profile; this change does not reach it. Not verified on a real desktop: the quit and force-stop path, the progress window, and whether `--disable-sync` alone prevents the new profile from being signed in.
+
 ## D032 — Long lists are a split view: list on one side, the chosen entry on the other (2026-11-23)
 
 **Decision.** A list whose entries have content to open is drawn as a split view: a narrow list of names on one side and the chosen entry on the other. This applies to the connector list, "Copy MCPs from your agents", the import review and the tool list of a connector. It amends D030: the connector's five tabs are the detail side of the split view, not a separate page.
 
 **Why.** Every entry was drawn open, one under the other, so the Connectors page measured 5,594 px tall with 19 entries at 1440 px width. The owner compared three prototypes on 2026-11-23 and chose the split view.
 
-**Consequences.** This entry records the decision only; the code lands with F05 step 7 and a follow-up. The Activity logs and the Agents and Profiles lists are not covered. The number D031 is taken by the update-install decision in pull request #43.
+**Consequences.** This entry records the decision only; the code lands with F05 step 7 and a follow-up. The Activity logs and the Agents and Profiles lists are not covered.
 
 ## Open investigations before/during implementation
 

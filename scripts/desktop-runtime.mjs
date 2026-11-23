@@ -78,6 +78,26 @@ export async function requestQuit({ directory }) {
   });
 }
 
+// The arguments of the Edge app window. The profile is the hub's own, so it
+// must stay empty: Edge can sign a new profile in to the Windows account and
+// sync that account's extensions into it, and an extension can read and change
+// the page that manages credentials. Extensions and sync are switched off.
+export function edgeAppArguments(profile, url) {
+  return [
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-extensions',
+    '--disable-sync',
+    `--app=${url}`,
+  ];
+}
+
+// How long a new installation keeps asking a manager that answers busy
+// (still starting, or closing) before it gives up.
+const BUSY_RETRY_MS = 30000;
+const BUSY_RETRY_STEP_MS = 500;
+
 // The hub registers static routes at startup, so a rebuilt web app (new asset
 // hashes) or server code is only served after the backend restarts.
 async function buildFingerprint(root) {
@@ -117,6 +137,15 @@ export async function startDesktop({
   environment = process.env,
   handoffDeadline = 0,
   attach = false,
+  busyRetryMs = BUSY_RETRY_MS,
+  // Set by this function when it starts over inside a busy wait.
+  busyDeadline = 0,
+  // Set by this function once the old manager acknowledged a handoff. The
+  // acknowledgement is sent when its backend has stopped; the manager may
+  // still hold the control pipe.
+  backendStopped = false,
+  // Set by this function for the one extra bind attempt after a handoff.
+  lastBind = false,
 }) {
   const runtime = resolve(directory);
   const rootId = createHash('sha256')
@@ -124,6 +153,20 @@ export async function startDesktop({
     .digest('hex')
     .slice(0, 24);
   const pipe = controlPipe(runtime);
+  // After an acknowledged handoff every failure says what is known: the old
+  // backend stopped and the takeover did not complete. The underlying reason
+  // goes to the log, because the launcher shows only the message.
+  const fail = (error) => {
+    if (!backendStopped) return error;
+    const code = error?.cause?.code ?? error?.code;
+    log(
+      `takeover after handoff failed: ${error?.message ?? error}${code ? ` (${code})` : ''}`,
+    );
+    return new Error(
+      'The previous hub backend stopped, but this installation could not take over the control pipe. Open Waleed MCP Hub again.',
+      { cause: error },
+    );
+  };
   let backend,
     fingerprint,
     closing = false,
@@ -233,7 +276,11 @@ export async function startDesktop({
   });
   if (error) {
     if (error.code !== 'EADDRINUSE')
-      throw new Error('Desktop control unavailable. No lock was removed.');
+      throw fail(
+        new Error('Desktop control unavailable. No lock was removed.', {
+          cause: error,
+        }),
+      );
     // The old Windows pipe can remain reserved briefly after its shutdown
     // reply. Only an acknowledged handoff permits this bounded bind retry.
     if (Date.now() < handoffDeadline) {
@@ -247,8 +294,26 @@ export async function startDesktop({
         environment,
         handoffDeadline,
         attach,
+        // Keep the busy wait: without it a later silent close would be read
+        // as a legacy manager and a later busy answer would start a new wait.
+        busyRetryMs,
+        busyDeadline,
+        backendStopped,
+        lastBind,
       });
     }
+    // The one extra bind after a handoff found the pipe still taken. It is
+    // bind-only, so nothing more is asked.
+    if (lastBind)
+      throw fail(new Error('The control pipe is still held by its owner.'));
+    // The pipe is still taken and the busy wait is over: stop here instead
+    // of opening one more negotiation.
+    if (busyDeadline && Date.now() >= busyDeadline)
+      throw fail(
+        new Error(
+          'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+        ),
+      );
     const requestOwner = (request) =>
       new Promise((resolveClient, reject) => {
         const client = createConnection(pipe, () => client.write(request));
@@ -256,6 +321,9 @@ export async function startDesktop({
         let acknowledged = false,
           busy = false,
           replace = false;
+        // Every request keeps its full reply time, also inside a busy wait:
+        // a manager that accepted the handoff answers only after its backend
+        // has stopped, and cutting that short would leave no hub running.
         client.setTimeout(15000, () => {
           client.destroy();
           reject(new Error('Desktop control timed out.'));
@@ -279,17 +347,24 @@ export async function startDesktop({
         });
         client.once('error', (error) =>
           reject(
-            new Error('Existing desktop unavailable; no process was stopped.', {
-              cause: error,
-            }),
+            Object.assign(
+              new Error(
+                'Existing desktop unavailable; no process was stopped.',
+                { cause: error },
+              ),
+              { unavailable: true },
+            ),
           ),
         );
         client.once('close', () => {
           if (acknowledged) resolveClient(replace);
           else if (busy)
             reject(
-              new Error(
-                'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+              Object.assign(
+                new Error(
+                  'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+                ),
+                { busy: true },
               ),
             );
           else
@@ -312,7 +387,73 @@ export async function startDesktop({
       // that: a manager that is still shutting down would acknowledge open\n
       // and leave no desktop behind. A build older than the busy reply also
       // closes in silence and cannot be told apart from a legacy manager.
-      if (!error?.legacyClose) throw error;
+      // A manager that is still starting or closing settles within seconds.
+      // Start over after a short wait: the pipe is either free by then, or
+      // its owner can answer the request. The wait is bounded.
+      // The first busy answer sets one deadline for the whole wait, so time
+      // spent binding and waiting for replies counts too. Inside that window a
+      // pipe that vanished between the bind and the request is retried as
+      // well: that is the old manager finishing its shutdown.
+      const retryUntil =
+        busyDeadline || (error?.busy ? Date.now() + busyRetryMs : 0);
+      // After a busy answer, a pipe that is gone, or one that closes without
+      // a reply, is the old manager finishing its shutdown and not a legacy
+      // manager. The legacy probe below stays for the first negotiation.
+      const retryable =
+        error?.busy ||
+        (busyDeadline && (error?.unavailable || error?.legacyClose));
+      if (retryable && Date.now() < retryUntil) {
+        const step = Math.min(BUSY_RETRY_STEP_MS, retryUntil - Date.now());
+        await new Promise((resolveRetry) => setTimeout(resolveRetry, step));
+        // A timer can fire late (a sleeping machine); no attempt starts
+        // once the deadline has passed.
+        if (Date.now() >= retryUntil) throw fail(error);
+        return startDesktop({
+          root,
+          directory,
+          port,
+          openWindow,
+          log,
+          environment,
+          attach,
+          busyRetryMs,
+          busyDeadline: retryUntil,
+          backendStopped,
+          lastBind,
+        });
+      }
+      // A manager that answered busy speaks the current protocol, so a silent
+      // close after that is never a legacy manager and gets no legacy open.
+      // After a handoff, a pipe that is gone or closes without a reply may
+      // just have been released by the old manager. Try to bind once more.
+      // That attempt only binds: it sends no request, happens once, and
+      // never runs past the busy wait.
+      if (
+        backendStopped &&
+        !lastBind &&
+        (error?.unavailable || error?.legacyClose) &&
+        !(busyDeadline && Date.now() >= busyDeadline)
+      )
+        return startDesktop({
+          root,
+          directory,
+          port,
+          openWindow,
+          log,
+          environment,
+          // Three seconds, or what is left of the busy wait if that is less.
+          handoffDeadline: Math.min(
+            Date.now() + 3000,
+            busyDeadline || Infinity,
+          ),
+          attach,
+          busyRetryMs,
+          busyDeadline,
+          backendStopped,
+          lastBind: true,
+        });
+      if (!error?.legacyClose || busyDeadline || backendStopped)
+        throw fail(error);
       // Reopen that verified protocol without killing it or deleting its
       // locks; Settings can stop it safely.
       handedOff = await requestOwner('open\n');
@@ -331,6 +472,9 @@ export async function startDesktop({
         environment,
         handoffDeadline: Date.now() + 3000,
         attach,
+        busyRetryMs,
+        busyDeadline,
+        backendStopped: true,
       });
     }
     if (attach) {
