@@ -149,6 +149,26 @@ describe.skipIf(process.platform !== 'win32')(
       expect(requests).toHaveLength(2);
     }, 20000);
 
+    it('sends no legacy open after a handoff that was acknowledged at once', async () => {
+      let asked = 0;
+      const { directory, requests } = await existingOwner(
+        (_request, socket) => {
+          // The handoff is acknowledged on the first request, with no busy
+          // answer before it. This owner keeps the pipe, and closes every
+          // later request without a reply.
+          asked += 1;
+          if (asked === 1) socket.end('wmh-desktop-handoff\n');
+          else socket.destroy();
+        },
+      );
+
+      await expect(open(directory, 0)).rejects.toThrow(
+        'The previous hub backend stopped',
+      );
+      expect(requests).toHaveLength(2);
+      expect(requests).not.toContain('open\n');
+    }, 20000);
+
     it('keeps the hub window free of extensions and account sync', () => {
       expect(
         edgeAppArguments('C:/hub/edge-profile', 'http://127.0.0.1:1/'),

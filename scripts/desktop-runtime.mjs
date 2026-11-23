@@ -151,6 +151,17 @@ export async function startDesktop({
     .digest('hex')
     .slice(0, 24);
   const pipe = controlPipe(runtime);
+  // After an acknowledged handoff every failure says what is known: the old
+  // backend stopped and the takeover did not complete. The underlying reason
+  // goes to the log, because the launcher shows only the message.
+  const fail = (error) => {
+    if (!backendStopped) return error;
+    log(`takeover after handoff failed: ${error?.message ?? error}`);
+    return new Error(
+      'The previous hub backend stopped, but this installation could not take over the control pipe. Open Waleed MCP Hub again.',
+      { cause: error },
+    );
+  };
   let backend,
     fingerprint,
     closing = false,
@@ -260,7 +271,9 @@ export async function startDesktop({
   });
   if (error) {
     if (error.code !== 'EADDRINUSE')
-      throw new Error('Desktop control unavailable. No lock was removed.');
+      throw fail(
+        new Error('Desktop control unavailable. No lock was removed.'),
+      );
     // The old Windows pipe can remain reserved briefly after its shutdown
     // reply. Only an acknowledged handoff permits this bounded bind retry.
     if (Date.now() < handoffDeadline) {
@@ -283,17 +296,6 @@ export async function startDesktop({
     }
     // The pipe is still taken and the busy wait is over: stop here instead
     // of opening one more negotiation.
-    // A handoff deadline means the old manager acknowledged the handoff and
-    // stopped its backend, so "no process was stopped" would be false here.
-    // After an acknowledged handoff every failure says what is known: the
-    // old backend stopped and the takeover did not complete.
-    const fail = (error) =>
-      backendStopped
-        ? new Error(
-            'The previous hub backend stopped, but this installation could not take over the control pipe. Open Waleed MCP Hub again.',
-            { cause: error },
-          )
-        : error;
     if (busyDeadline && Date.now() >= busyDeadline)
       throw fail(
         new Error(
@@ -409,7 +411,8 @@ export async function startDesktop({
       }
       // A manager that answered busy speaks the current protocol, so a silent
       // close after that is never a legacy manager and gets no legacy open.
-      if (!error?.legacyClose || busyDeadline) throw fail(error);
+      if (!error?.legacyClose || busyDeadline || backendStopped)
+        throw fail(error);
       // Reopen that verified protocol without killing it or deleting its
       // locks; Settings can stop it safely.
       handedOff = await requestOwner('open\n');
