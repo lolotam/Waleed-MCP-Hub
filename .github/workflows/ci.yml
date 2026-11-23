@@ -36,3 +36,21 @@ jobs:
       - run: npm run test:windows-runtime
       - run: npm run test:windows-secrets
       - run: node scripts/smoke-sessions.mjs
+
+  browser:
+    name: Browser tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # The suite drives the built server and web app in headless Chromium.
+      - run: npx playwright install chromium
+      - run: npm run test:e2e
