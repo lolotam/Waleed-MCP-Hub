@@ -378,7 +378,9 @@ export async function startDesktop({
           busyDeadline: retryUntil,
         });
       }
-      if (!error?.legacyClose) throw error;
+      // A manager that answered busy speaks the current protocol, so a silent
+      // close after that is never a legacy manager and gets no legacy open.
+      if (!error?.legacyClose || busyDeadline) throw error;
       // Reopen that verified protocol without killing it or deleting its
       // locks; Settings can stop it safely.
       handedOff = await requestOwner('open\n');

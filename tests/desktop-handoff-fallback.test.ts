@@ -85,6 +85,22 @@ describe.skipIf(process.platform !== 'win32')(
       expect(requests).toHaveLength(2);
     });
 
+    it('does not send the legacy open when a busy manager goes silent after the wait', async () => {
+      let asked = 0;
+      const { directory, requests } = await existingOwner(
+        (_request, socket) => {
+          // Busy first; the second request is accepted inside the wait and
+          // closed without a reply only after the wait is over.
+          if (++asked === 1) socket.end('wmh-desktop-busy\n');
+          else setTimeout(() => socket.destroy(), 400);
+        },
+      );
+
+      await expect(open(directory, 600)).rejects.toThrow();
+      expect(requests).toHaveLength(2);
+      expect(requests).not.toContain('open\n');
+    });
+
     it('keeps the hub window free of extensions and account sync', () => {
       expect(
         edgeAppArguments('C:/hub/edge-profile', 'http://127.0.0.1:1/'),
