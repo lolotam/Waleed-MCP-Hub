@@ -1,17 +1,118 @@
 :root {
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  color: #17212b;
-  background: #f6f8fa;
+  color-scheme: light;
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  color: var(--text);
+  background: var(--canvas);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --canvas: #f6f8fa;
-  --surface: #fff;
-  --muted-surface: #eef2f5;
-  --text: #17212b;
-  --muted: #52606d;
-  --border: #d8e0e6;
-  --action: #0d766e;
-  --danger: #b42318;
+  /* The Harbor tokens. Every colour in a component rule below is one of
+     these; the light values sit here, the dark values in the two blocks
+     after this one (system dark, and the explicit Dark choice). */
+  --canvas: oklch(0.972 0.006 250);
+  --surface: oklch(1 0 0);
+  --muted-surface: oklch(0.958 0.008 252);
+  --subtle-surface: oklch(0.985 0.004 250);
+  --hover-chip: oklch(0.985 0.005 252);
+  --pressed: oklch(0.94 0.012 255);
+  --text: oklch(0.25 0.03 258);
+  --muted: oklch(0.48 0.03 256);
+  --border: oklch(0.9 0.012 254);
+  --outline: oklch(0.6 0.03 256);
+  --action: oklch(0.47 0.17 262);
+  --action-hover: oklch(0.42 0.17 262);
+  --action-pressed: oklch(0.37 0.15 262);
+  --on-action: oklch(1 0 0);
+  --selected: oklch(0.93 0.035 262);
+  --selected-text: oklch(0.36 0.14 262);
+  --focus: oklch(0.55 0.19 262);
+  --danger: oklch(0.52 0.2 27);
+  --danger-hover: oklch(0.47 0.19 27);
+  --danger-soft: oklch(0.95 0.03 25);
+  --danger-soft-strong: oklch(0.91 0.045 25);
+  --success: oklch(0.47 0.11 155);
+  --success-soft: oklch(0.95 0.035 155);
+  --success-border: oklch(0.89 0.05 155);
+  --warning: oklch(0.47 0.11 65);
+  --warning-soft: oklch(0.95 0.05 85);
+  --warning-border: oklch(0.89 0.06 85);
+  --sheen: oklch(1 0 0 / 0.45);
+  --scrim: oklch(0 0 0 / 0.4);
+  --shadow: oklch(0.25 0.03 258 / 0.14);
+  --ink: var(--text);
+  --radius-card: 10px;
+  --radius-control: 8px;
+  --radius-pill: 999px;
+  --font-display:
+    'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+}
+/* System dark applies unless the user chose Light. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --canvas: oklch(0.185 0.02 260);
+    --surface: oklch(0.235 0.024 260);
+    --muted-surface: oklch(0.26 0.022 260);
+    --subtle-surface: oklch(0.21 0.022 260);
+    --hover-chip: oklch(0.245 0.023 260);
+    --pressed: oklch(0.29 0.026 260);
+    --text: oklch(0.95 0.008 255);
+    --muted: oklch(0.74 0.02 256);
+    --border: oklch(0.33 0.026 260);
+    --outline: oklch(0.56 0.03 258);
+    --action: oklch(0.74 0.12 262);
+    --action-hover: oklch(0.79 0.12 262);
+    --action-pressed: oklch(0.69 0.12 262);
+    --on-action: oklch(0.2 0.04 262);
+    --selected: oklch(0.31 0.06 262);
+    --selected-text: oklch(0.88 0.07 262);
+    --focus: oklch(0.74 0.12 262);
+    --danger: oklch(0.72 0.15 22);
+    --danger-hover: oklch(0.78 0.14 22);
+    --danger-soft: oklch(0.3 0.05 22);
+    --danger-soft-strong: oklch(0.33 0.055 22);
+    --success: oklch(0.8 0.11 155);
+    --success-soft: oklch(0.3 0.045 155);
+    --success-border: oklch(0.38 0.055 155);
+    --warning: oklch(0.82 0.11 80);
+    --warning-soft: oklch(0.31 0.05 80);
+    --warning-border: oklch(0.4 0.06 80);
+    --sheen: oklch(1 0 0 / 0.25);
+    --scrim: oklch(0 0 0 / 0.6);
+    --shadow: oklch(0 0 0 / 0.5);
+  }
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --canvas: oklch(0.185 0.02 260);
+  --surface: oklch(0.235 0.024 260);
+  --muted-surface: oklch(0.26 0.022 260);
+  --subtle-surface: oklch(0.21 0.022 260);
+  --hover-chip: oklch(0.245 0.023 260);
+  --pressed: oklch(0.29 0.026 260);
+  --text: oklch(0.95 0.008 255);
+  --muted: oklch(0.74 0.02 256);
+  --border: oklch(0.33 0.026 260);
+  --outline: oklch(0.56 0.03 258);
+  --action: oklch(0.74 0.12 262);
+  --action-hover: oklch(0.79 0.12 262);
+  --action-pressed: oklch(0.69 0.12 262);
+  --on-action: oklch(0.2 0.04 262);
+  --selected: oklch(0.31 0.06 262);
+  --selected-text: oklch(0.88 0.07 262);
+  --focus: oklch(0.74 0.12 262);
+  --danger: oklch(0.72 0.15 22);
+  --danger-hover: oklch(0.78 0.14 22);
+  --danger-soft: oklch(0.3 0.05 22);
+  --danger-soft-strong: oklch(0.33 0.055 22);
+  --success: oklch(0.8 0.11 155);
+  --success-soft: oklch(0.3 0.045 155);
+  --success-border: oklch(0.38 0.055 155);
+  --warning: oklch(0.82 0.11 80);
+  --warning-soft: oklch(0.31 0.05 80);
+  --warning-border: oklch(0.4 0.06 80);
+  --sheen: oklch(1 0 0 / 0.25);
+  --scrim: oklch(0 0 0 / 0.6);
+  --shadow: oklch(0 0 0 / 0.5);
 }
 * {
   box-sizing: border-box;
@@ -36,7 +137,7 @@ button {
   min-height: 36px;
   padding: 6px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text);
   font-weight: 600;
@@ -48,22 +149,22 @@ button {
 }
 button:hover:not(:disabled) {
   background: var(--muted-surface);
-  border-color: #a6b5c2;
+  border-color: var(--outline);
 }
 button:active:not(:disabled) {
-  background: #e1e8ed;
+  background: var(--pressed);
 }
 button.primary {
   background: var(--action);
-  color: white;
+  color: var(--on-action);
   border-color: var(--action);
 }
 button.primary:hover:not(:disabled) {
-  background: #095f59;
-  border-color: #095f59;
+  background: var(--action-hover);
+  border-color: var(--action-hover);
 }
 button.primary:active:not(:disabled) {
-  background: color-mix(in srgb, var(--action) 70%, #000);
+  background: var(--action-pressed);
 }
 button.ghost {
   background: transparent;
@@ -76,7 +177,7 @@ button.ghost:hover:not(:disabled) {
   color: var(--text);
 }
 button.ghost:active:not(:disabled) {
-  background: #e1e8ed;
+  background: var(--pressed);
 }
 button.danger {
   background: var(--surface);
@@ -84,11 +185,11 @@ button.danger {
   border-color: var(--danger);
 }
 button.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
-  border-color: color-mix(in srgb, var(--danger) 80%, #000);
+  background: var(--danger-soft);
+  border-color: var(--danger-hover);
 }
 button.danger:active:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  background: var(--danger-soft-strong);
 }
 button.small {
   min-height: 32px;
@@ -99,7 +200,7 @@ button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
-/* A disabled primary keeps its readable contrast instead of a faded teal. */
+/* A disabled primary keeps its readable contrast instead of a faded action colour. */
 button.primary:disabled {
   background: var(--muted-surface);
   border-color: var(--border);
@@ -107,7 +208,7 @@ button.primary:disabled {
   opacity: 1;
 }
 :focus-visible {
-  outline: 2px solid var(--action);
+  outline: 2px solid var(--focus);
   outline-offset: 3px;
 }
 button:focus-visible {
@@ -117,8 +218,8 @@ input,
 textarea {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
   color: var(--text);
   background: var(--surface);
 }
@@ -131,11 +232,16 @@ h3,
 p {
   margin-block: 0;
 }
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+}
 h1 {
   font-size: 28px;
   line-height: 1.25;
-  font-weight: 650;
-  letter-spacing: -0.7px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
   text-wrap: balance;
 }
 h2 {
@@ -169,7 +275,7 @@ svg {
   inset-block-start: -100px;
   inset-inline-start: 16px;
   padding: 12px;
-  background: white;
+  background: var(--surface);
   z-index: 10;
   color: var(--action);
 }
@@ -196,6 +302,7 @@ svg {
   align-items: center;
   gap: 10px;
   padding-inline: 8px;
+  font-family: var(--font-display);
   font-size: 15px;
   font-weight: 650;
   letter-spacing: -0.3px;
@@ -239,8 +346,8 @@ button.nav-item {
   font-weight: 500;
 }
 button.nav-item.selected {
-  background: #e8f2f0;
-  color: var(--action);
+  background: var(--selected);
+  color: var(--selected-text);
   font-weight: 600;
 }
 .nav-count {
@@ -300,7 +407,7 @@ button.nav-item.selected {
 }
 .slash {
   margin-inline: 12px;
-  color: #9ca9b5;
+  color: var(--outline);
 }
 .stage-label {
   display: flex;
@@ -365,7 +472,7 @@ main {
   gap: 10px;
   padding: 10px 14px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   color: var(--muted);
   font-size: 12px;
   margin-block-end: 20px;
@@ -386,7 +493,7 @@ main {
 .list-panel {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   overflow: hidden;
 }
 .safety-section,
@@ -493,21 +600,21 @@ main {
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--muted-surface);
 }
 .segmented button {
   min-height: 32px;
   padding: 3px 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
 }
 .segmented button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  background: var(--hover-chip);
   border-color: transparent;
 }
 .segmented button[aria-pressed='true'] {
@@ -527,7 +634,7 @@ main {
   display: grid;
   grid-template-columns: 1.5fr 1fr 1fr;
   padding: 11px 24px;
-  background: #fafbfc;
+  background: var(--subtle-surface);
   color: var(--muted);
   font-size: 11px;
   border-block-end: 1px solid var(--border);
@@ -578,7 +685,7 @@ main {
   flex-wrap: wrap;
   gap: 8px;
   padding: 13px 24px;
-  background: #fafbfc;
+  background: var(--subtle-surface);
   border-block-start: 1px solid var(--border);
   font-size: 11px;
   color: var(--muted);
@@ -669,7 +776,8 @@ main {
   min-height: 44px;
   padding: 10px;
   font: inherit;
-  border: 1px solid var(--border);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--ink);
 }
@@ -693,7 +801,8 @@ main {
   min-height: 44px;
   width: 100%;
   padding: 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--ink);
   font: inherit;
@@ -731,7 +840,7 @@ main {
   background: var(--muted-surface);
 }
 .connector-summary:focus-visible {
-  outline: 2px solid var(--action);
+  outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 .connector-list > li.is-open > .connector-summary {
@@ -783,13 +892,13 @@ main {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #9aa5b1;
+  background: var(--outline);
 }
 .status-dot.ok {
-  background: #12a150;
+  background: var(--success);
 }
 .status-dot.warn {
-  background: #d97706;
+  background: var(--warning);
 }
 .pills {
   display: flex;
@@ -799,7 +908,7 @@ main {
 .pill {
   padding: 2px 8px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
@@ -807,14 +916,14 @@ main {
   text-transform: capitalize;
 }
 .pill.ok {
-  color: #0b6b3a;
-  background: #e8f6ee;
-  border-color: #bfe3cd;
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: var(--success-border);
 }
 .pill.warn {
-  color: #92400e;
-  background: #fdf3e2;
-  border-color: #f2d6a6;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: var(--warning-border);
 }
 .pill.off {
   color: var(--muted);
@@ -836,7 +945,7 @@ main {
   gap: 14px;
   padding: 16px 24px 20px 48px;
   border-block-start: 1px solid var(--border);
-  background: #fbfcfd;
+  background: var(--subtle-surface);
 }
 /* The panel actions are one toolbar with a separator between the groups. */
 .connector-actions {
@@ -906,7 +1015,7 @@ main {
 .callouts li {
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--muted);
   font-size: 12px;
@@ -961,6 +1070,7 @@ main {
   padding: 12px;
   background: var(--canvas);
   border: 1px solid var(--border);
+  border-radius: var(--radius-control);
 }
 .profile-list li {
   flex-wrap: wrap;
@@ -1055,8 +1165,8 @@ main {
 .error-panel {
   padding: 40px;
   border: 1px solid var(--border);
-  background: white;
-  border-radius: 8px;
+  background: var(--surface);
+  border-radius: var(--radius-card);
 }
 .error-panel p {
   color: var(--muted);
@@ -1067,12 +1177,13 @@ dialog {
   max-height: calc(100dvh - 32px);
   padding: 28px;
   color: var(--text);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 16px 48px #17212b24;
+  box-shadow: 0 16px 48px var(--shadow);
 }
 dialog::backdrop {
-  background: #17212b65;
+  background: var(--scrim);
 }
 .import-dialog {
   width: min(820px, calc(100vw - 32px));
@@ -1087,7 +1198,7 @@ dialog::backdrop {
 .import-modes {
   margin-block: 20px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
@@ -1133,7 +1244,7 @@ dialog::backdrop {
 .import-dialog pre {
   background: var(--canvas);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   padding: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1150,8 +1261,8 @@ dialog::backdrop {
 .import-dialog select {
   width: 100%;
   padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text);
   font: inherit;
@@ -1224,7 +1335,7 @@ dialog h2 {
   padding: 18px;
   background: var(--canvas);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-card);
   overflow-wrap: anywhere;
 }
 .review p {
@@ -1240,7 +1351,7 @@ dialog h2 {
   color: var(--muted);
 }
 .notice {
-  color: #92400e;
+  color: var(--warning);
   font-size: 12px;
 }
 .error-message {
@@ -1254,7 +1365,7 @@ dialog h2 {
   margin-block-start: 20px;
 }
 .success-message svg {
-  color: #166534;
+  color: var(--success);
   margin-block-start: 3px;
 }
 @media (min-width: 1440px) {
@@ -1492,7 +1603,7 @@ dialog h2 {
   padding: 10px 12px;
   background: var(--canvas);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1501,7 +1612,7 @@ dialog h2 {
   margin: 16px 0 0;
   padding: 12px 16px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   min-width: 0;
 }
 .package-entries legend,
@@ -1525,7 +1636,7 @@ dialog h2 {
   margin-block: 20px;
   padding: 14px 16px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: var(--surface);
 }
 .package-progress p {
@@ -1537,7 +1648,7 @@ dialog h2 {
   margin-block: 20px;
   padding: 16px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: var(--canvas);
 }
 .package-proposal {
@@ -1635,7 +1746,7 @@ dialog h2 {
 .clone-package {
   padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
 }
 .update-notice {
   display: flex;
@@ -1646,7 +1757,7 @@ dialog h2 {
   margin-block: 16px;
   padding: 12px 16px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
 }
 /* The discovery progress: how far the tool discovery of the eligible
    connectors has come. */
@@ -1677,7 +1788,7 @@ dialog h2 {
   transition: width 300ms ease;
 }
 .discovery-progress.is-complete .discovery-progress-fill {
-  background: #0b6b3a;
+  background: var(--success);
 }
 /* A soft sheen moves over the filled part while the discovery runs. The
    global reduced-motion rule turns the sheen and the width transition off. */
@@ -1685,7 +1796,7 @@ dialog h2 {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, #ffffff73, transparent);
+  background: linear-gradient(90deg, transparent, var(--sheen), transparent);
   transform: translateX(-100%);
 }
 .discovery-progress.is-loading .discovery-progress-fill::after {

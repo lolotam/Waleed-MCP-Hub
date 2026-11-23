@@ -37,6 +37,12 @@ import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
 import { PackageDialog, type PackageSeed } from './PackageInstall.js';
+import {
+  readTheme,
+  setTheme,
+  themeChoices,
+  type ThemeChoice,
+} from './theme.js';
 
 const pages = [
   'Connectors',
@@ -141,6 +147,7 @@ function downloadPart(name: string, text: string) {
 
 export function App() {
   const [page, setPage] = useState<Page>('Connectors');
+  const [theme, setThemeChoice] = useState<ThemeChoice>(() => readTheme());
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [connectors, setConnectors] = useState<ManagedConnector[]>([]);
@@ -1086,6 +1093,30 @@ export function App() {
                       <dd>
                         Managed by the tray icon · right-click the Waleed MCP
                         Hub icon and use Start with Windows
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Appearance</dt>
+                      <dd>
+                        <div
+                          className="segmented"
+                          role="group"
+                          aria-label="Appearance"
+                        >
+                          {themeChoices.map((choice) => (
+                            <button
+                              key={choice.id}
+                              type="button"
+                              aria-pressed={theme === choice.id}
+                              onClick={() => {
+                                setTheme(choice.id);
+                                setThemeChoice(choice.id);
+                              }}
+                            >
+                              {choice.label}
+                            </button>
+                          ))}
+                        </div>
                       </dd>
                     </div>
                   </dl>
