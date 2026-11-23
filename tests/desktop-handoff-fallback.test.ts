@@ -103,6 +103,28 @@ describe.skipIf(process.platform !== 'win32')(
       expect(requests).not.toContain('open\n');
     });
 
+    it('keeps the busy wait through the pipe bind retries after a handoff', async () => {
+      let asked = 0;
+      const { directory, requests } = await existingOwner(
+        (_request, socket) => {
+          // Busy, then an acknowledged handoff while this owner keeps the
+          // pipe, so the runtime runs out its bind retries and asks a third
+          // time. From then on every request is closed without a reply.
+          asked += 1;
+          if (asked === 1) socket.end('wmh-desktop-busy\n');
+          else if (asked === 2) socket.end('wmh-desktop-handoff\n');
+          else socket.destroy();
+        },
+      );
+
+      // The bind retries take three seconds, so the third request falls
+      // inside the six-second wait. If the wait were lost across the bind
+      // retries, the silent close would be answered with the legacy open.
+      await expect(open(directory, 6000)).rejects.toThrow();
+      expect(requests.length).toBeGreaterThanOrEqual(3);
+      expect(requests).not.toContain('open\n');
+    }, 20000);
+
     it('keeps the hub window free of extensions and account sync', () => {
       expect(
         edgeAppArguments('C:/hub/edge-profile', 'http://127.0.0.1:1/'),

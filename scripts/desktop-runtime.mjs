@@ -276,6 +276,12 @@ export async function startDesktop({
         busyDeadline,
       });
     }
+    // The pipe is still taken and the busy wait is over: stop here instead
+    // of opening one more negotiation.
+    if (busyDeadline && Date.now() >= busyDeadline)
+      throw new Error(
+        'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+      );
     const requestOwner = (request) =>
       new Promise((resolveClient, reject) => {
         const client = createConnection(pipe, () => client.write(request));
