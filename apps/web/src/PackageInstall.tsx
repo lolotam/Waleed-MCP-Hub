@@ -1067,6 +1067,13 @@ export function PackageDialog({
         and runs it with its own Node. Install scripts never run and only the
         npm registry is contacted.
       </p>
+      {/* The recovery alert of the shell is outside this modal. */}
+      {blocked && (
+        <p role="status" className="notice">
+          Changes are blocked until the recovery review is done. A job that
+          already runs can still be followed.
+        </p>
+      )}
       <PackageInstall
         seed={seed}
         close={close}

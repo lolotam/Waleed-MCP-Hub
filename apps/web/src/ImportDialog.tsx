@@ -38,6 +38,9 @@ function sourceFromForm(form: HTMLFormElement, mode: Mode): string {
   });
 }
 
+// The longest wait on the discard that is sent when the page is left.
+const LEAVE_DISCARD_LIMIT_MS = 10_000;
+
 export function ImportDialog({
   revision,
   close,
@@ -87,7 +90,12 @@ export function ImportDialog({
       const id = draftId.current;
       draftId.current = null;
       if (id)
-        void api(`/api/imports/${id}/cancel`, {}).catch((failure: unknown) => {
+        // Bounded: a request that never answers must still end as stranded.
+        void api(
+          `/api/imports/${id}/cancel`,
+          {},
+          AbortSignal.timeout(LEAVE_DISCARD_LIMIT_MS),
+        ).catch((failure: unknown) => {
           // A draft the hub no longer knows is gone, which is the goal.
           if (!(failure instanceof ApiError && failure.status === 404))
             stranded(id);
