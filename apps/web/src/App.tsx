@@ -639,9 +639,9 @@ export function App() {
               </div>
             ) : (
               <>
-                {place.entry === 'settings' && place.tab === 'updates' && (
-                  <UpdateNotice {...update} />
-                )}
+                {bootstrap?.capabilities.appUpdates &&
+                  place.entry === 'settings' &&
+                  place.tab === 'updates' && <UpdateNotice {...update} />}
                 {bootstrap?.capabilities.discovery && (
                   <div hidden={!(onAdd && place.pill === 'discover')}>
                     <DiscoveryPanel
