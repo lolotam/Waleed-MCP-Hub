@@ -144,6 +144,8 @@ export async function startDesktop({
   // acknowledgement is sent when its backend has stopped; the manager may
   // still hold the control pipe.
   backendStopped = false,
+  // Set by this function for the one extra bind attempt after a handoff.
+  lastBind = false,
 }) {
   const runtime = resolve(directory);
   const rootId = createHash('sha256')
@@ -156,7 +158,10 @@ export async function startDesktop({
   // goes to the log, because the launcher shows only the message.
   const fail = (error) => {
     if (!backendStopped) return error;
-    log(`takeover after handoff failed: ${error?.message ?? error}`);
+    const code = error?.cause?.code ?? error?.code;
+    log(
+      `takeover after handoff failed: ${error?.message ?? error}${code ? ` (${code})` : ''}`,
+    );
     return new Error(
       'The previous hub backend stopped, but this installation could not take over the control pipe. Open Waleed MCP Hub again.',
       { cause: error },
@@ -272,7 +277,9 @@ export async function startDesktop({
   if (error) {
     if (error.code !== 'EADDRINUSE')
       throw fail(
-        new Error('Desktop control unavailable. No lock was removed.'),
+        new Error('Desktop control unavailable. No lock was removed.', {
+          cause: error,
+        }),
       );
     // The old Windows pipe can remain reserved briefly after its shutdown
     // reply. Only an acknowledged handoff permits this bounded bind retry.
@@ -292,6 +299,7 @@ export async function startDesktop({
         busyRetryMs,
         busyDeadline,
         backendStopped,
+        lastBind,
       });
     }
     // The pipe is still taken and the busy wait is over: stop here instead
@@ -407,10 +415,33 @@ export async function startDesktop({
           busyRetryMs,
           busyDeadline: retryUntil,
           backendStopped,
+          lastBind,
         });
       }
       // A manager that answered busy speaks the current protocol, so a silent
       // close after that is never a legacy manager and gets no legacy open.
+      // After a handoff, a pipe that is gone or closes without a reply may
+      // just have been released by the old manager. Try to bind once more;
+      // this starts no new negotiation and happens only once.
+      if (
+        backendStopped &&
+        !lastBind &&
+        (error?.unavailable || error?.legacyClose)
+      )
+        return startDesktop({
+          root,
+          directory,
+          port,
+          openWindow,
+          log,
+          environment,
+          handoffDeadline: Date.now() + 3000,
+          attach,
+          busyRetryMs,
+          busyDeadline,
+          backendStopped,
+          lastBind: true,
+        });
       if (!error?.legacyClose || busyDeadline || backendStopped)
         throw fail(error);
       // Reopen that verified protocol without killing it or deleting its

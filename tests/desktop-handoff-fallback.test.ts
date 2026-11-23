@@ -162,10 +162,12 @@ describe.skipIf(process.platform !== 'win32')(
         },
       );
 
+      // Two bind windows: the one after the handoff, and one more after the
+      // first silent close. Each ends in one request; neither is a legacy open.
       await expect(open(directory, 0)).rejects.toThrow(
         'The previous hub backend stopped',
       );
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(requests).not.toContain('open\n');
     }, 20000);
 
