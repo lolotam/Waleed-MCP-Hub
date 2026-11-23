@@ -92,11 +92,13 @@ describe.skipIf(process.platform !== 'win32')(
           // Busy first; the second request is accepted inside the wait and
           // closed without a reply only after the wait is over.
           if (++asked === 1) socket.end('wmh-desktop-busy\n');
-          else setTimeout(() => socket.destroy(), 400);
+          else setTimeout(() => socket.destroy(), 2500);
         },
       );
 
-      await expect(open(directory, 600)).rejects.toThrow();
+      // The wait is four retry steps long, so a slow runner still sends the
+      // second request inside it; that request is closed after the wait.
+      await expect(open(directory, 2000)).rejects.toThrow();
       expect(requests).toHaveLength(2);
       expect(requests).not.toContain('open\n');
     });

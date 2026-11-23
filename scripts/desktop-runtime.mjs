@@ -270,6 +270,10 @@ export async function startDesktop({
         environment,
         handoffDeadline,
         attach,
+        // Keep the busy wait: without it a later silent close would be read
+        // as a legacy manager and a later busy answer would start a new wait.
+        busyRetryMs,
+        busyDeadline,
       });
     }
     const requestOwner = (request) =>
