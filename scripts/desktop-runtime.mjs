@@ -78,6 +78,26 @@ export async function requestQuit({ directory }) {
   });
 }
 
+// The arguments of the Edge app window. The profile is the hub's own, so it
+// must stay empty: Edge can sign a new profile in to the Windows account and
+// sync that account's extensions into it, and an extension can read and change
+// the page that manages credentials. Extensions and sync are switched off.
+export function edgeAppArguments(profile, url) {
+  return [
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-extensions',
+    '--disable-sync',
+    `--app=${url}`,
+  ];
+}
+
+// How long a new installation keeps asking a manager that answers busy
+// (still starting, or closing) before it gives up.
+const BUSY_RETRY_MS = 30000;
+const BUSY_RETRY_STEP_MS = 500;
+
 // The hub registers static routes at startup, so a rebuilt web app (new asset
 // hashes) or server code is only served after the backend restarts.
 async function buildFingerprint(root) {
@@ -117,6 +137,7 @@ export async function startDesktop({
   environment = process.env,
   handoffDeadline = 0,
   attach = false,
+  busyRetryMs = BUSY_RETRY_MS,
 }) {
   const runtime = resolve(directory);
   const rootId = createHash('sha256')
@@ -288,8 +309,11 @@ export async function startDesktop({
           if (acknowledged) resolveClient(replace);
           else if (busy)
             reject(
-              new Error(
-                'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+              Object.assign(
+                new Error(
+                  'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+                ),
+                { busy: true },
               ),
             );
           else
@@ -312,6 +336,23 @@ export async function startDesktop({
       // that: a manager that is still shutting down would acknowledge open\n
       // and leave no desktop behind. A build older than the busy reply also
       // closes in silence and cannot be told apart from a legacy manager.
+      // A manager that is still starting or closing settles within seconds.
+      // Start over after a short wait: the pipe is either free by then, or
+      // its owner can answer the request. The wait is bounded.
+      if (error?.busy && busyRetryMs > 0) {
+        const step = Math.min(BUSY_RETRY_STEP_MS, busyRetryMs);
+        await new Promise((resolveRetry) => setTimeout(resolveRetry, step));
+        return startDesktop({
+          root,
+          directory,
+          port,
+          openWindow,
+          log,
+          environment,
+          attach,
+          busyRetryMs: busyRetryMs - step,
+        });
+      }
       if (!error?.legacyClose) throw error;
       // Reopen that verified protocol without killing it or deleting its
       // locks; Settings can stop it safely.

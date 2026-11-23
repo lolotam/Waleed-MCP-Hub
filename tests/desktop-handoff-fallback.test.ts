@@ -7,7 +7,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 // @ts-expect-error The desktop runtime is a plain ES module without types.
-import { startDesktop } from '../scripts/desktop-runtime.mjs';
+import { edgeAppArguments, startDesktop } from '../scripts/desktop-runtime.mjs';
 
 describe.skipIf(process.platform !== 'win32')(
   'desktop handoff to an existing manager',
@@ -42,11 +42,12 @@ describe.skipIf(process.platform !== 'win32')(
       });
       return { directory, requests };
     }
-    const open = (directory: string) =>
+    const open = (directory: string, busyRetryMs = 0) =>
       startDesktop({
         root: directory,
         directory,
         openWindow: () => undefined,
+        busyRetryMs,
       }) as Promise<{ reused: boolean }>;
 
     it('does not fall back to the legacy open when the owner answers with something unknown', async () => {
@@ -70,6 +71,31 @@ describe.skipIf(process.platform !== 'win32')(
         'The existing desktop manager is closing or starting.',
       );
       expect(requests).toHaveLength(1);
+    });
+
+    it('asks again when the manager was busy, and reuses it once it answers', async () => {
+      let asked = 0;
+      const { directory, requests } = await existingOwner((_request, socket) =>
+        socket.end(++asked === 1 ? 'wmh-desktop-busy\n' : 'wmh-desktop-v1\n'),
+      );
+
+      await expect(open(directory, 5000)).resolves.toMatchObject({
+        reused: true,
+      });
+      expect(requests).toHaveLength(2);
+    });
+
+    it('keeps the hub window free of extensions and account sync', () => {
+      expect(
+        edgeAppArguments('C:/hub/edge-profile', 'http://127.0.0.1:1/'),
+      ).toEqual([
+        '--user-data-dir=C:/hub/edge-profile',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-extensions',
+        '--disable-sync',
+        '--app=http://127.0.0.1:1/',
+      ]);
     });
 
     it('reopens a legacy manager that closes the handoff request without a reply', async () => {

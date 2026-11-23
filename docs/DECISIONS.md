@@ -907,6 +907,20 @@ The hub writes nothing into the agents' own folders.
 
 **Deferred.** An opt-in `SKILL.md` per agent, only for a CLI that receives none of the three, needs its own decision.
 
+## D031 — An update closes the running hub; the hub window loads no extensions (2026-11-23)
+
+**Decision.** Three changes to the desktop update path:
+
+- The installer, when it is going to open the hub, first asks the running hub to quit through the control pipe (the tray's own Quit request). It waits up to 20 seconds, then stops any `WaleedMcpHub.exe` launcher still running from the installation root, with the manager and backend that launcher started (`taskkill /T /F`). With `--no-launch` it stops nothing.
+- A new installation that finds the old manager busy (still starting, or closing) asks again for up to 30 seconds before it reports the failure.
+- The Edge app window starts with `--disable-extensions` and `--disable-sync`.
+
+D028 to D030 are reserved by pull request #42.
+
+**Why.** The owner reported on 2026-11-23 that an update at sign-in failed because the hub was open, and gave permission to close and stop it automatically. Windows starts the old hub at sign-in; the installer then launched the new version while the old manager was still starting, and the single busy answer ended the launch. Separately, the hub's own Edge profile on the owner's machine was found signed in with sync on and holding 80 extension folders, so extensions could read the page that manages credentials.
+
+**Consequences.** This narrows D023's "no process is stopped": the installer may stop hub launchers under its own installation root, and nothing else. Agent bridges are started by the agents and keep running. The installer window does its work on a second thread and names each phase. Not verified on a real desktop: the quit and force-stop path, the progress window, and whether `--disable-sync` alone prevents the profile from being signed in. An existing profile keeps its synced extension files; they no longer load.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint

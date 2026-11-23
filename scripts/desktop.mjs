@@ -4,7 +4,11 @@ import { access } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { requestQuit, startDesktop } from './desktop-runtime.mjs';
+import {
+  edgeAppArguments,
+  requestQuit,
+  startDesktop,
+} from './desktop-runtime.mjs';
 
 if (process.platform !== 'win32' || !process.versions.node.startsWith('24.'))
   throw new Error('Desktop mode requires Node 24 on Windows.');
@@ -85,16 +89,10 @@ if (mode === 'open') await findBrowser();
 const edgeProfile = join(directory, 'edge-profile');
 async function openEdgeWindow(url) {
   const executable = await findBrowser();
-  const app = spawn(
-    executable,
-    [
-      `--user-data-dir=${edgeProfile}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      `--app=${url}`,
-    ],
-    { shell: false, stdio: 'ignore' },
-  );
+  const app = spawn(executable, edgeAppArguments(edgeProfile, url), {
+    shell: false,
+    stdio: 'ignore',
+  });
   // An open Edge window must not keep this manager alive after it closes.
   app.unref();
   log('opening Edge app window');
