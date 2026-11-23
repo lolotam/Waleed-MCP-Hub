@@ -1362,6 +1362,7 @@ export function App() {
           seed={packageSeed}
           close={() => setPackageSeed(null)}
           refresh={refresh}
+          blocked={recoveryBlocked}
         />
       )}
       {operation && bootstrap && (

@@ -1014,10 +1014,13 @@ export function PackageDialog({
   seed,
   close,
   refresh,
+  blocked,
 }: {
   seed: PackageSeed;
   close: () => void;
   refresh: () => Promise<boolean>;
+  // Changes are blocked: no new lookup or install may start.
+  blocked: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [running, setRunning] = useState(false);
@@ -1069,6 +1072,7 @@ export function PackageDialog({
         close={close}
         refresh={refresh}
         onRunning={setRunning}
+        blocked={blocked}
       />
     </dialog>
   );
