@@ -234,6 +234,22 @@ test('an unlaunched browser cannot see inventory', async ({ page }) => {
   ).toBe(401);
 });
 
+test('a saved theme is applied before the app module loads, without a session', async ({
+  page,
+}) => {
+  const script = await page.request.get('http://127.0.0.1:4187/theme-init.js');
+  expect(script.status()).toBe(200);
+  expect(script.headers()['content-type']).toContain('javascript');
+
+  // Hold back the app bundle: only the head script can set the theme.
+  await page.route('**/assets/**', (route) => route.abort());
+  await page.addInitScript(() =>
+    window.localStorage.setItem('wmh-theme-v1', 'dark'),
+  );
+  await page.goto('http://127.0.0.1:4187/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
 test('source-mode server starts on Node 24 and releases its writer lock on shutdown', async () => {
   const sourceDirectory = await mkdtemp(
     join(process.env.HUB_TEST_TEMP ?? tmpdir(), 'hub-source-'),

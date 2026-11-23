@@ -141,7 +141,9 @@ the navigation.
 | Recovery alert                 | Alert on every page when blocked | Above every page when blocked, and Settings › Recovery |
 
 New pages: Connector detail, Profile detail, Updates, Recovery. No page is
-removed.
+removed. Under D032 the connector detail is the detail side of the connector
+list, not a page of its own; it keeps its place "Connectors › All connectors ›
+{name}" and its own hash (see "Long lists").
 
 ## Page layout rules
 
@@ -166,6 +168,13 @@ A list whose entries have content to open is drawn as a split view. One side
 is a narrow list with one line per entry (name, state). The other side shows
 the chosen entry and nothing else. Choosing another entry replaces the detail;
 the page does not grow. With no entry chosen the detail side says so.
+
+The chosen connector is part of the place. The hash of Connectors › All
+connectors names the chosen connector and its tab, so a reload or the Back
+button restores both. A hash with no connector means nothing is chosen. A
+hash that names a connector that no longer exists shows the list with nothing
+chosen. In the other three lists the choice is page state only: they are
+steps inside a flow and a reload starts the flow again, as it does today.
 
 | List                       | Today                                       | With the split view                                       |
 | -------------------------- | ------------------------------------------- | --------------------------------------------------------- |
