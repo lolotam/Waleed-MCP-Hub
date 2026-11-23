@@ -1,5 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { privateMarker } from '../fixtures/discovery.js';
 
 let server: ChildProcess;
@@ -30,6 +30,13 @@ async function launch(scenario: 'healthy' | 'docker_down' | 'slow') {
     });
   });
 }
+// The discovery panel is the Discover environment page under Add.
+async function openDiscovery(page: Page) {
+  await page.getByRole('tab', { name: 'Add', exact: true }).click();
+  await page
+    .getByRole('link', { name: 'Discover environment', exact: true })
+    .click();
+}
 test.afterEach(async () => {
   if (server?.connected) {
     const exited = new Promise<void>((resolve) =>
@@ -46,6 +53,7 @@ test('explicit discovery displays sanitized observations and a non-applicable pi
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto(await launch('healthy'));
+  await openDiscovery(page);
   await expect(
     page.getByText(
       'Synthetic discovery fixture — not your installed environment.',
@@ -124,6 +132,7 @@ test('Docker stopped remains a useful degraded view without erasing agent/native
   page,
 }) => {
   await page.goto(await launch('docker_down'));
+  await openDiscovery(page);
   await page
     .getByRole('button', { name: 'Discover environment', exact: true })
     .click();
@@ -156,6 +165,7 @@ test('a running scan can be cancelled without publishing partial discovery', asy
   page,
 }) => {
   await page.goto(await launch('slow'));
+  await openDiscovery(page);
   await page
     .getByRole('button', { name: 'Discover environment', exact: true })
     .click();

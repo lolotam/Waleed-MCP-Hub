@@ -24,13 +24,8 @@ const paths = {
   filter: 'M4 6h16l-6 7v5l-4 2v-7L4 6Z',
   package: 'M12 3 3 8v8l9 5 9-5V8l-9-5Zm0 0v18M3 8l9 5 9-5',
 } as const;
-export function Icon({
-  name,
-  size = 20,
-}: {
-  name: keyof typeof paths;
-  size?: number;
-}) {
+export type IconName = keyof typeof paths;
+export function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   return (
     <svg
       width={size}

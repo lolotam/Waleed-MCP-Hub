@@ -262,6 +262,9 @@ svg {
 .muted {
   color: var(--muted);
 }
+[hidden] {
+  display: none !important;
+}
 .sr-only {
   position: absolute;
   width: 1px;
@@ -420,6 +423,108 @@ button.nav-item.selected {
   padding: 2px 7px;
   font-family: Consolas, monospace;
   font-size: 11px;
+}
+/* The tab row sits under the top bar. A tab is 44 px high; the selected tab
+   has an underline in the action colour and its own text colour. */
+.tab-row {
+  padding-inline: 40px;
+  background: var(--surface);
+  border-block-end: 1px solid var(--border);
+}
+.tab-row [role='tablist'] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-inline: auto;
+  max-width: 1456px;
+}
+button.tab {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+button.tab:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+button.tab:focus-visible {
+  outline-offset: -2px;
+}
+button.tab[aria-selected='true'],
+button.tab[aria-selected='true']:hover:not(:disabled) {
+  border-block-end-color: var(--action);
+  color: var(--selected-text);
+}
+/* While an Add page waits on the hub the navigation is held: it is dimmed
+   and takes no pointer. The shell also refuses the move itself. */
+.app-shell[data-held] .sidebar nav,
+.app-shell[data-held] .tab-row,
+.app-shell[data-held] .pill-row,
+.app-shell[data-held] .page-actions {
+  opacity: 0.55;
+  pointer-events: none;
+}
+/* A fieldset that only disables its controls and draws nothing. */
+fieldset.form-hold {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* The pills under the Add tab are links to their own addresses, 32 px high
+   like the segments of the status filter. */
+.pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block-end: 24px;
+}
+a.add-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  text-decoration: none;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+a.add-pill:hover {
+  background: var(--muted-surface);
+  border-color: var(--outline);
+}
+a.add-pill[aria-current='true'],
+a.add-pill[aria-current='true']:hover {
+  background: var(--selected);
+  border-color: var(--outline);
+  color: var(--selected-text);
+}
+@media (forced-colors: active) {
+  button.tab[aria-selected='true'] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  a.add-pill[aria-current='true'] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  button.tab[aria-selected='true']:focus-visible,
+  a.add-pill[aria-current='true']:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
 }
 main {
   max-width: 1536px;
@@ -1312,6 +1417,27 @@ dialog h2 {
   font-size: 22px;
   margin-block-end: 10px;
 }
+/* The two Add forms are pages, not dialogs: one panel of form-only width. */
+.import-dialog.add-page {
+  width: 100%;
+  max-width: 840px;
+  max-height: none;
+  padding: 28px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.add-page h2 {
+  font-size: 22px;
+  margin-block-end: 10px;
+}
+@media (max-width: 600px) {
+  .import-dialog.add-page {
+    width: 100%;
+    padding: 16px;
+  }
+}
 .dialog-header {
   display: flex;
   justify-content: space-between;
@@ -1404,7 +1530,8 @@ dialog h2 {
     width: calc(100% - 208px);
   }
   main,
-  .topbar {
+  .topbar,
+  .tab-row {
     padding-inline: 24px;
   }
   .read-only-tag {
@@ -1490,6 +1617,9 @@ dialog h2 {
   .workspace {
     width: 100%;
     margin: 0;
+  }
+  .tab-row {
+    padding-inline: 16px;
   }
   .topbar {
     height: 48px;

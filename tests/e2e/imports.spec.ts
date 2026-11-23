@@ -102,9 +102,15 @@ test('paste/select/review/export is sanitized, responsive, keyboard accessible a
       exact: true,
     }),
   ).toBeDisabled();
-  expect(await page.locator('dialog').innerText()).not.toContain(importSecret);
+  expect(await page.getByTestId('add-import-page').innerText()).not.toContain(
+    importSecret,
+  );
   expect(
-    await page.locator('dialog textarea, dialog input[type=password]').count(),
+    await page
+      .locator(
+        '[data-testid="add-import-page"] textarea, [data-testid="add-import-page"] input[type=password]',
+      )
+      .count(),
   ).toBe(0);
   expect(preview.entries).toHaveLength(3);
   expect(JSON.stringify(preview)).not.toContain(importSecret);
@@ -121,7 +127,7 @@ test('paste/select/review/export is sanitized, responsive, keyboard accessible a
     ).toBe(true);
     expect(
       await page
-        .locator('dialog')
+        .getByTestId('add-import-page')
         .evaluate((element) => element.scrollWidth <= element.clientWidth),
     ).toBe(true);
     await page.screenshot({
@@ -143,7 +149,7 @@ test('paste/select/review/export is sanitized, responsive, keyboard accessible a
     effects: { registryWrites: false },
   });
   await page.keyboard.press('Escape');
-  await expect(page.locator('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('add-import-page')).toHaveCount(0);
   await expect(
     page.getByRole('button', { name: 'Add connector', exact: true }),
   ).toBeFocused();
@@ -217,7 +223,9 @@ test('partial configurations and duplicate name/ID conflicts require explicit se
       },
     ),
   ).toBeVisible();
-  expect(await page.locator('dialog img').count()).toBe(0);
+  expect(
+    await page.locator('[data-testid="add-import-page"] img').count(),
+  ).toBe(0);
   await expect(
     page.getByRole('heading', { name: `Entry 3: ${markup}`, exact: true }),
   ).toBeVisible();
@@ -267,7 +275,9 @@ test('guided native forms preserve inert argument arrays and clear write-only en
     arguments: args,
     trustApproval: null,
   });
-  expect(await page.locator('dialog').innerText()).not.toContain(importSecret);
+  expect(await page.getByTestId('add-import-page').innerText()).not.toContain(
+    importSecret,
+  );
   await expect(page.getByText(/package download/).first()).toBeVisible();
   await page
     .getByRole('button', { name: 'Cancel and discard', exact: true })
@@ -373,7 +383,9 @@ test('guided HTTPS preview reports invalid URLs without contacting them', async 
   await expect(
     page.getByText('invalid endpoint: url', { exact: true }),
   ).toBeVisible();
-  expect(await page.locator('dialog').innerText()).not.toContain(importSecret);
+  expect(await page.getByTestId('add-import-page').innerText()).not.toContain(
+    importSecret,
+  );
   expect(external).toEqual([]);
   await page
     .getByRole('button', { name: 'Cancel and discard', exact: true })
@@ -398,12 +410,14 @@ test('failed discard is explicit and can be retried; browser expiry removes the 
   await expect(page.getByRole('alert')).toContainText(
     'Server discard could not be confirmed',
   );
-  expect(await page.locator('dialog').innerText()).not.toContain(importSecret);
+  expect(await page.getByTestId('add-import-page').innerText()).not.toContain(
+    importSecret,
+  );
   await page.unroute('**/api/imports/*/cancel');
   await page
     .getByRole('button', { name: 'Cancel and discard', exact: true })
     .click();
-  await expect(page.locator('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('add-import-page')).toHaveCount(0);
   await page.clock.install();
   await paste(page, mixedImport);
   await page.clock.fastForward(5 * 60_000 + 1000);
@@ -505,4 +519,28 @@ test('the registry export round trips through the file loader and deselects an i
   await page
     .getByRole('button', { name: 'Cancel and discard', exact: true })
     .click();
+});
+
+test('a draft whose discard fails when its page is left stays visible and can be retried', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await paste(page, mixedImport);
+  await page.route('**/api/imports/*/cancel', (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Synthetic discard failure.' }),
+    }),
+  );
+  await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+  const warning = page.getByRole('alert').filter({
+    hasText: 'A private import draft was not discarded',
+  });
+  await expect(warning).toBeVisible();
+  await page.unroute('**/api/imports/*/cancel');
+  await warning
+    .getByRole('button', { name: 'Retry discard', exact: true })
+    .click();
+  await expect(warning).toHaveCount(0);
 });

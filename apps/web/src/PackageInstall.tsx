@@ -73,12 +73,16 @@ export function PackageInstall({
   refresh,
   onRunning,
   showCancel = true,
+  blocked = false,
 }: {
   seed: PackageSeed;
   close: () => void;
   refresh: () => Promise<boolean>;
   onRunning?: (running: boolean) => void;
   showCancel?: boolean;
+  // No new lookup or install may start. A job that already runs can still
+  // be followed, checked again and cancelled.
+  blocked?: boolean;
 }) {
   const abort = useRef<AbortController | null>(null);
   const mounted = useRef(true);
@@ -180,6 +184,7 @@ export function PackageInstall({
   }
 
   async function lookUp() {
+    if (blocked) return;
     setNameChangeAcknowledged(false);
     setSourceAcknowledged(false);
     setError('');
@@ -264,6 +269,7 @@ export function PackageInstall({
   }
 
   async function install() {
+    if (blocked) return;
     setError('');
     setFailureCode(null);
     // The protected values leave the form at once: every refusal below and
@@ -963,7 +969,7 @@ export function PackageInstall({
               <button
                 className="primary"
                 type="button"
-                disabled={running}
+                disabled={running || blocked}
                 onClick={() => void lookUp()}
               >
                 Look up
@@ -988,7 +994,7 @@ export function PackageInstall({
                 <button
                   className="primary"
                   type="button"
-                  disabled={running || !ready}
+                  disabled={running || !ready || blocked}
                   onClick={() => void install()}
                 >
                   {seed.mode === 'install' ? 'Install' : 'Replace'}
@@ -1008,10 +1014,13 @@ export function PackageDialog({
   seed,
   close,
   refresh,
+  blocked,
 }: {
   seed: PackageSeed;
   close: () => void;
   refresh: () => Promise<boolean>;
+  // Changes are blocked: no new lookup or install may start.
+  blocked: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [running, setRunning] = useState(false);
@@ -1058,11 +1067,19 @@ export function PackageDialog({
         and runs it with its own Node. Install scripts never run and only the
         npm registry is contacted.
       </p>
+      {/* The recovery alert of the shell is outside this modal. */}
+      {/* The region is always there, so its text is announced when it
+          arrives. */}
+      <p role="status" className={blocked ? 'notice' : undefined}>
+        {blocked &&
+          'Changes are blocked until the recovery review is done. A job that already runs can still be followed.'}
+      </p>
       <PackageInstall
         seed={seed}
         close={close}
         refresh={refresh}
         onRunning={setRunning}
+        blocked={blocked}
       />
     </dialog>
   );

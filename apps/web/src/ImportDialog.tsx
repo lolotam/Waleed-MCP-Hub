@@ -38,6 +38,12 @@ function sourceFromForm(form: HTMLFormElement, mode: Mode): string {
   });
 }
 
+// The longest wait on the discard that is sent when the page is left.
+const LEAVE_DISCARD_LIMIT_MS = 10_000;
+// The longest wait on a request that holds the page. A hub that never
+// answers must not keep the navigation held.
+const HELD_REQUEST_LIMIT_MS = 30_000;
+
 export function ImportDialog({
   revision,
   close,
@@ -45,6 +51,8 @@ export function ImportDialog({
   savePreview,
   installProposal,
   installBlocked,
+  hold,
+  stranded,
 }: {
   revision: number;
   close: () => void;
@@ -55,8 +63,12 @@ export function ImportDialog({
   ) => void;
   installProposal: (proposal: PackageProposal) => void;
   installBlocked: boolean;
+  // Tells the shell that the page waits on the hub and must not be left.
+  hold: (busy: boolean) => void;
+  // Tells the shell that the page was left and the hub did not confirm the
+  // discard of this draft.
+  stranded: (draftId: string) => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
@@ -71,17 +83,31 @@ export function ImportDialog({
   useEffect(() => {
     mounted.current = true;
     const previous = document.activeElement as HTMLElement | null;
-    dialog.current?.showModal();
-    form.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+    // A tab that opened the page with an arrow key keeps the focus.
+    if (previous?.getAttribute('role') !== 'tab')
+      form.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
     return () => {
       mounted.current = false;
+      hold(false);
       form.current?.reset();
       const id = draftId.current;
       draftId.current = null;
-      if (id) void api(`/api/imports/${id}/cancel`, {}).catch(() => undefined);
-      previous?.focus();
+      if (id)
+        // Bounded: a request that never answers must still end as stranded.
+        void api(
+          `/api/imports/${id}/cancel`,
+          {},
+          AbortSignal.timeout(LEAVE_DISCARD_LIMIT_MS),
+        ).catch((failure: unknown) => {
+          // A draft the hub no longer knows is gone, which is the goal.
+          if (!(failure instanceof ApiError && failure.status === 404))
+            stranded(id);
+        });
+      // Only a focus that went away with the page is given back.
+      if (document.activeElement === document.body) previous?.focus();
     };
-  }, []);
+  }, [hold, stranded]);
+  useEffect(() => hold(busy), [busy, hold]);
   useEffect(() => {
     if (!preview) return;
     const timer = window.setTimeout(() => {
@@ -132,7 +158,11 @@ export function ImportDialog({
     setError('');
     try {
       if (draftId.current)
-        await api(`/api/imports/${draftId.current}/cancel`, {});
+        await api(
+          `/api/imports/${draftId.current}/cancel`,
+          {},
+          AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
+        );
       draftId.current = null;
       setPreview(null);
       setSelection([]);
@@ -195,10 +225,11 @@ export function ImportDialog({
         } finally {
           form.current?.reset();
         }
-        const request = api<ImportPreview>('/api/imports/preview', {
-          source,
-          expectedRevision: revision,
-        });
+        const request = api<ImportPreview>(
+          '/api/imports/preview',
+          { source, expectedRevision: revision },
+          AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
+        );
         source = '';
         const next = await request;
         if (!mounted.current) {
@@ -210,6 +241,7 @@ export function ImportDialog({
         const next = await api<ImportPreview>(
           `/api/imports/${preview.id}/selection`,
           { expectedRevision: preview.expectedRevision, entries: selection },
+          AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
         );
         if (mounted.current) accept(next);
       }
@@ -261,6 +293,7 @@ export function ImportDialog({
       const operation = await api<OperationPreview>(
         `/api/imports/${preview.id}/save-preview`,
         { expectedRevision: preview.expectedRevision },
+        AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
       );
       draftId.current = null;
       savePreview(
@@ -285,13 +318,16 @@ export function ImportDialog({
     .map((entry) => entry.packageProposal)
     .filter((proposal): proposal is PackageProposal => !!proposal);
   return (
-    <dialog
-      ref={dialog}
-      className="import-dialog"
+    <section
+      className="import-dialog add-page"
       aria-labelledby="import-title"
-      onCancel={(event) => {
-        event.preventDefault();
-        if (!busy) void discard();
+      data-testid="add-import-page"
+      onKeyDown={(event) => {
+        // A page has no cancel event; Escape still discards the draft.
+        if (event.key === 'Escape' && !busy) {
+          event.preventDefault();
+          void discard();
+        }
       }}
     >
       <form
@@ -306,7 +342,7 @@ export function ImportDialog({
           <button
             className="icon-button"
             type="button"
-            aria-label="Close import dialog"
+            aria-label="Close import page"
             disabled={busy}
             onClick={() => {
               void discard();
@@ -768,6 +804,6 @@ export function ImportDialog({
           )}
         </footer>
       </form>
-    </dialog>
+    </section>
   );
 }

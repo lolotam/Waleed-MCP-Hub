@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   BootstrapSchema,
   type Bootstrap,
@@ -14,13 +14,32 @@ import {
   type Materialization,
   type PackageProposal,
 } from '@waleed/contracts';
-import { api, sessionReady } from './api.js';
+import { api, ApiError, sessionReady } from './api.js';
 import { latestRunner, untilAborted } from './latest.js';
 import { Icon } from './Icon.js';
+import {
+  entries,
+  entryOf,
+  firstPlace,
+  formatPlace,
+  parsePlace,
+  resolvePlace,
+  samePlace,
+  visiblePills,
+  visibleTabs,
+  type Place,
+} from './navigation.js';
+import { PillRow, TabPanel, TabRow } from './Tabs.js';
 import { ProfileDialog } from './ProfileDialog.js';
 import { DiscoveryPanel } from './DiscoveryPanel.js';
 import { AgentCloning } from './AgentCloning.js';
-import { UpdateNotice } from './UpdateNotice.js';
+import { UpdateNotice, useUpdateCheck } from './UpdateNotice.js';
+import { ActivityPage } from './ActivityPage.js';
+import {
+  AppearancePanel,
+  RecoveryStatus,
+  RuntimeSettings,
+} from './SettingsPage.js';
 import { ImportDialog } from './ImportDialog.js';
 import {
   OperationDialog,
@@ -35,37 +54,10 @@ import { DiscoveryProgress } from './DiscoveryProgress.js';
 import { currentObservation, isApproved } from './discovery-progress.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
-import { ManualMcpDialog } from './ManualMcpDialog.js';
+import { ManualMcpPage } from './ManualMcpDialog.js';
 import { PackageDialog, type PackageSeed } from './PackageInstall.js';
-import {
-  readTheme,
-  setTheme,
-  themeChoices,
-  type ThemeChoice,
-} from './theme.js';
+import { readTheme, setTheme, type ThemeChoice } from './theme.js';
 
-const pages = [
-  'Connectors',
-  'Agents',
-  'Profiles',
-  'Activity',
-  'Settings',
-] as const;
-type Page = (typeof pages)[number];
-const iconNames = [
-  'connectors',
-  'agents',
-  'profiles',
-  'activity',
-  'settings',
-] as const;
-const descriptions: Record<Page, string> = {
-  Connectors: 'One place for your tools. Explicit control over where they run.',
-  Agents: 'Installed, configured, and verified are three different things.',
-  Profiles: 'Organize tools around the way you work.',
-  Activity: 'A local record of changes. No credentials or raw payloads.',
-  Settings: 'Your machine. Your configuration. Nothing enabled silently.',
-};
 const agentNames: Record<string, string> = {
   opencode: 'OpenCode',
   codex: 'Codex',
@@ -145,8 +137,33 @@ function downloadPart(name: string, text: string) {
   }, 0);
 }
 
+// The address of a place on this page, for a history entry.
+const address = (target: Place) =>
+  window.location.pathname + window.location.search + formatPlace(target);
+
+// The position of a history entry, as this app wrote it into the entry.
+function positionOf(state: unknown): number | null {
+  const position = (state as { position?: unknown } | null)?.position;
+  return typeof position === 'number' ? position : null;
+}
+
+// A private import draft lives five minutes on the hub.
+const DRAFT_LIFETIME_MS = 5 * 60_000;
+
+// The place of one pill under Add.
+const addPlace = (pill: string): Place => ({
+  entry: 'connectors',
+  tab: 'add',
+  pill,
+});
+
 export function App() {
-  const [page, setPage] = useState<Page>('Connectors');
+  // The place is held in the address, so a reload and the Back button stay on
+  // the page. It is read here, not at module load, so the launch token has
+  // already been taken out of the address by api.ts.
+  const [place, setPlace] = useState<Place>(() =>
+    parsePlace(window.location.hash),
+  );
   const [theme, setThemeChoice] = useState<ThemeChoice>(() => readTheme());
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -170,8 +187,6 @@ export function App() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
-  const [manual, setManual] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
   // The result of the last export of the registry.
   const [exportStatus, setExportStatus] = useState<string>('');
@@ -265,6 +280,178 @@ export function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  // The place as the address handlers see it, without waiting for a render.
+  const placeNow = useRef(place);
+  const show = useCallback((next: Place) => {
+    placeNow.current = next;
+    setPlace(next);
+  }, []);
+  // An Add page that waits on the hub holds the place. As a dialog it was
+  // modal, so nothing could leave it mid-request and lose the outcome.
+  const holding = useRef(false);
+  const [held, setHeld] = useState(false);
+  const hold = useCallback((busy: boolean) => {
+    holding.current = busy;
+    setHeld(busy);
+  }, []);
+  // Every history entry of the app carries its position, so a refused Back
+  // or Forward can be undone instead of overwriting the entry it landed on.
+  const position = useRef(0);
+  // A refused traversal is undone with another traversal, which lands a
+  // moment later. A close that arrives in between is shown at once and gets
+  // its history entry when the undo has landed.
+  const undoing = useRef(false);
+  const closeAfterUndo = useRef<Place | null>(null);
+  const push = useCallback((next: Place) => {
+    position.current += 1;
+    window.history.pushState({ position: position.current }, '', address(next));
+  }, []);
+  useEffect(() => {
+    const known = positionOf(window.history.state);
+    if (known === null) window.history.replaceState({ position: 0 }, '');
+    else position.current = known;
+    const read = () => {
+      const next = parsePlace(window.location.hash);
+      const landed = positionOf(window.history.state);
+      if (undoing.current) {
+        // Only the entry the undo was sent to ends it. Another Back or
+        // Forward in between is sent there as well.
+        if (landed !== position.current) {
+          if (landed === null) window.history.back();
+          else window.history.go(position.current - landed);
+          return;
+        }
+        undoing.current = false;
+        const closed = closeAfterUndo.current;
+        closeAfterUndo.current = null;
+        if (closed) {
+          push(closed);
+          return;
+        }
+      }
+      if (holding.current && !samePlace(next, placeNow.current)) {
+        // Refused during the wait. A pill or a typed address made a new
+        // entry: step back off it. Back or Forward landed on an old entry:
+        // return to the entry it came from.
+        if (landed === null) {
+          undoing.current = true;
+          window.history.back();
+        } else if (landed !== position.current) {
+          undoing.current = true;
+          window.history.go(position.current - landed);
+        } else
+          window.history.replaceState(
+            window.history.state,
+            '',
+            address(placeNow.current),
+          );
+        return;
+      }
+      if (landed === null) {
+        position.current += 1;
+        window.history.replaceState({ position: position.current }, '');
+      } else position.current = landed;
+      show(next);
+    };
+    // A traversal between two entries of the same address fires no
+    // hashchange, so the position is also read here. A traversal that the
+    // hold is about to refuse keeps the old position: the refusal needs it.
+    const settle = (event: PopStateEvent) => {
+      const landed = positionOf(event.state);
+      if (
+        landed !== null &&
+        !undoing.current &&
+        (!holding.current ||
+          samePlace(parsePlace(window.location.hash), placeNow.current))
+      )
+        position.current = landed;
+    };
+    window.addEventListener('hashchange', read);
+    window.addEventListener('popstate', settle);
+    return () => {
+      window.removeEventListener('hashchange', read);
+      window.removeEventListener('popstate', settle);
+    };
+  }, [show, push]);
+  // The drafts whose discard the hub did not confirm when their page was
+  // left. Each one is kept, retried and forgotten on its own.
+  const [strandedDrafts, setStrandedDrafts] = useState<string[]>([]);
+  const forgetDraft = useCallback(
+    (id: string) =>
+      setStrandedDrafts((drafts) => drafts.filter((draft) => draft !== id)),
+    [],
+  );
+  const strandDraft = useCallback(
+    (id: string) => {
+      setStrandedDrafts((drafts) => [...drafts, id]);
+      // The hub drops the draft by itself when its lifetime ends.
+      window.setTimeout(() => forgetDraft(id), DRAFT_LIFETIME_MS);
+    },
+    [forgetDraft],
+  );
+  async function retryDiscard(id: string) {
+    try {
+      await api(`/api/imports/${id}/cancel`, {});
+    } catch (failure) {
+      // A draft the hub no longer knows is gone, which is the goal.
+      if (!(failure instanceof ApiError && failure.status === 404)) return;
+    }
+    forgetDraft(id);
+  }
+  // While the hub has not answered, every tab is shown. Once it has, a place
+  // that a capability hides moves to its first visible sibling, in place.
+  useEffect(() => {
+    // A held page stays: the address may be mid-way through a refused move,
+    // also for a moment after the page has closed.
+    if (!bootstrap || holding.current || undoing.current) return;
+    // Read from the address, not from the state: a pill that was just
+    // followed has changed the address, and its hashchange may still be
+    // queued.
+    const asked = parsePlace(window.location.hash);
+    const fixed = resolvePlace(asked, bootstrap.capabilities);
+    if (samePlace(fixed, asked)) return;
+    window.history.replaceState(window.history.state, '', address(fixed));
+    show(fixed);
+  }, [bootstrap, place, show]);
+  // A move to another place is a new history entry.
+  const move = useCallback(
+    (next: Place) => {
+      if (undoing.current) {
+        // The address is mid-way through an undo: do not trust it.
+        closeAfterUndo.current = next;
+        show(next);
+        return;
+      }
+      if (samePlace(placeNow.current, next)) return;
+      // A Back that already changed the address to this place, with its
+      // hashchange still queued, is the move: it needs no entry of its own.
+      if (!samePlace(parsePlace(window.location.hash), next)) push(next);
+      show(next);
+    },
+    [show, push],
+  );
+  // The navigation of the user. It waits while an Add page holds the place.
+  const go = useCallback(
+    (next: Place) => {
+      if (!holding.current) move(next);
+    },
+    [move],
+  );
+  // An Add page closes itself to the list of connectors, also while it holds
+  // the place: closing is how its own request ends.
+  const closeAdd = () => move({ entry: 'connectors', tab: 'all' });
+  const entry = entryOf(place.entry);
+  const page = entry.label;
+  const capabilities = bootstrap?.capabilities ?? null;
+  const tabs = visibleTabs(entry, capabilities);
+  const currentTab = tabs.find((tab) => tab.id === place.tab);
+  const pills = currentTab ? visiblePills(currentTab, capabilities) : [];
+  const onAdd = place.entry === 'connectors' && place.tab === 'add';
+  // The safety notice belongs to Settings › Runtime & safeguards and the Add
+  // pages only.
+  const showNotice =
+    onAdd || (place.entry === 'settings' && place.tab === 'runtime');
+  const update = useUpdateCheck(!!bootstrap?.capabilities.appUpdates);
 
   const filteredProfiles = profiles.filter((profile) =>
     `${profile.name} ${profile.description}`
@@ -316,9 +503,29 @@ export function App() {
     }
   }
 
+  function chooseTheme(choice: ThemeChoice) {
+    setTheme(choice);
+    setThemeChoice(choice);
+  }
+  function stopDesktop() {
+    void api('/api/desktop/shutdown', {})
+      .then(() =>
+        setError('Desktop manager stopped. You can close this window.'),
+      )
+      .catch(() => setError('Shutdown could not be confirmed.'));
+  }
+
   return (
-    <div className="app-shell">
-      <a className="skip-link" href="#main">
+    <div className="app-shell" data-held={held || undefined}>
+      <a
+        className="skip-link"
+        href="#main"
+        onClick={(event) => {
+          // The link would replace the page address with #main.
+          event.preventDefault();
+          document.getElementById('main')?.focus();
+        }}
+      >
         Skip to content
       </a>
       <aside className="sidebar">
@@ -332,24 +539,44 @@ export function App() {
         </div>
         <div className="workspace-label">MANAGE</div>
         <nav aria-label="Main navigation">
-          {pages.map((item, index) => (
-            <button
-              key={item}
-              className={page === item ? 'nav-item selected' : 'nav-item'}
-              aria-current={page === item ? 'page' : undefined}
-              onClick={() => {
-                setPage(item);
-                setSearch('');
-                setConnectorSearch('');
-                setStatusFilter('all');
-              }}
-            >
-              <Icon name={iconNames[index]!} />
-              <span>{item}</span>
-              {item === 'Profiles' && profiles.length > 0 && (
-                <span className="nav-count">{profiles.length}</span>
-              )}
-            </button>
+          {entries.map((item) => (
+            <Fragment key={item.id}>
+              <button
+                className={
+                  place.entry === item.id ? 'nav-item selected' : 'nav-item'
+                }
+                aria-current={place.entry === item.id ? 'page' : undefined}
+                aria-disabled={held || undefined}
+                onClick={() => {
+                  // A held page keeps its filters too.
+                  if (held) return;
+                  go(firstPlace(item, capabilities));
+                  setSearch('');
+                  setConnectorSearch('');
+                  setStatusFilter('all');
+                }}
+              >
+                <Icon name={item.icon} />
+                <span>{item.label}</span>
+                {item.id === 'settings' &&
+                  update.status?.state === 'available' && (
+                    // Visual only: the status text below names it, so the
+                    // accessible name of the button stays "Settings".
+                    <span className="nav-count" aria-hidden="true">
+                      1
+                    </span>
+                  )}
+                {item.id === 'profiles' && profiles.length > 0 && (
+                  <span className="nav-count">{profiles.length}</span>
+                )}
+              </button>
+              {item.id === 'settings' &&
+                update.status?.state === 'available' && (
+                  <span className="sr-only" role="status">
+                    Update available
+                  </span>
+                )}
+            </Fragment>
           ))}
         </nav>
         <div className="sidebar-bottom">
@@ -381,14 +608,23 @@ export function App() {
             </span>
           )}
         </header>
+        {tabs.length > 1 && (
+          <TabRow
+            entry={entry}
+            tabs={tabs}
+            current={currentTab?.id}
+            held={held}
+            open={(tab) => go(firstPlace(entry, capabilities, tab))}
+          />
+        )}
         <main id="main" tabIndex={-1}>
           <div className="page-heading">
             <div>
               <div className="eyebrow">MCP CONTROL PANEL</div>
               <h1>{page}</h1>
-              <p>{descriptions[page]}</p>
+              <p>{entry.description}</p>
             </div>
-            {page === 'Profiles' ? (
+            {place.entry === 'profiles' ? (
               <button
                 className="primary"
                 disabled={loading || !!error || recoveryBlocked}
@@ -397,20 +633,21 @@ export function App() {
                 <Icon name="plus" size={18} />
                 Create profile
               </button>
-            ) : page === 'Connectors' ? (
+            ) : place.entry === 'connectors' ? (
               <div className="action-with-help">
                 <div className="page-actions">
                   <button
                     type="button"
                     disabled={loading || !!error || recoveryBlocked}
-                    onClick={() => setManual(true)}
+                    aria-disabled={held || undefined}
+                    onClick={() => go(addPlace('manual'))}
                   >
                     <Icon name="upload" size={16} />
                     Add Manual MCP
                   </button>
                   <button
                     type="button"
-                    disabled={loading || !!error}
+                    disabled={loading || !!error || held}
                     aria-describedby="export-help"
                     onClick={() => {
                       void exportRegistry();
@@ -423,7 +660,8 @@ export function App() {
                     type="button"
                     className="primary"
                     disabled={loading || !!error}
-                    onClick={() => setImporting(true)}
+                    aria-disabled={held || undefined}
+                    onClick={() => go(addPlace('import'))}
                     aria-describedby="add-help"
                   >
                     <Icon name="plus" size={18} />
@@ -450,680 +688,655 @@ export function App() {
             )}
           </div>
 
-          {page === 'Connectors' && exportStatus && (
-            <p className="notice" role="status" data-testid="export-status">
-              {exportStatus}
-            </p>
-          )}
+          <TabPanel
+            entry={entry}
+            capabilities={capabilities}
+            current={currentTab?.id}
+          >
+            {place.tab === 'add' && (
+              <PillRow
+                label="Add a connector"
+                pills={pills}
+                current={place.pill}
+                held={held}
+                href={(pill) => formatPlace({ ...place, pill })}
+              />
+            )}
+            {/* Export is offered on both Connectors tabs, so is its result. */}
+            {place.entry === 'connectors' && exportStatus && (
+              <p className="notice" role="status" data-testid="export-status">
+                {exportStatus}
+              </p>
+            )}
 
-          <div className="foundation-notice">
-            <Icon name="shield" />
-            <div>
-              {bootstrap?.capabilities.discovery
-                ? 'Discovery does not execute connectors; saving, exact execution approval, protected credentials, profile apply and capability checks are separate actions, and pilot adoption and agent synchronization stay disabled.'
-                : bootstrap?.capabilities.agentApply
-                  ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; agent integration verifies configuration only, and reconnect and trust remain agent-controlled.'
-                  : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; capability tests use available runtime adapters, and agent synchronization remains disabled.'}
-            </div>
-            <span className="read-only-tag">Explicit actions only</span>
-          </div>
-          {bootstrap?.capabilities.agentCloning && (
-            <AgentCloning
-              disabled={loading || !!error || recoveryBlocked}
-              refresh={refresh}
-              openManual={() => setManual(true)}
-            />
-          )}
-          {error ? (
-            <section className="error-panel" role="alert">
-              <h2>Unable to load this workspace</h2>
-              <p>{error}</p>
-              <button
-                onClick={() => {
-                  void refresh();
-                }}
-              >
-                Retry
-              </button>
-            </section>
-          ) : loading && !bootstrap ? (
-            <div className="loading-state" role="status">
-              Opening your local workspace…
-            </div>
-          ) : (
-            <>
-              {bootstrap?.capabilities.appUpdates && <UpdateNotice />}
-              {bootstrap?.capabilities.discovery && (
-                <DiscoveryPanel
-                  snapshot={discovery}
-                  preview={adoption}
-                  refresh={refresh}
-                />
-              )}
-              {recoveryBlocked && (
-                <section className="error-panel" role="alert">
-                  <h2>Recovery review required</h2>
-                  <p>
-                    An unfinished operation needs recovery review. Further
-                    changes are blocked; nothing will be replayed or rolled back
-                    automatically. Inspect the local runtime using the README
-                    recovery instructions before retrying.
-                  </p>
-                  <a href="/api/recovery" target="_blank" rel="noreferrer">
-                    Inspect recovery metadata
-                  </a>
-                </section>
-              )}
-              {page === 'Connectors' && (
-                <section
-                  className="list-panel"
-                  aria-labelledby="connector-list-title"
+            {/* Above every page while changes are blocked, also when the
+                hub can no longer be read. */}
+            {recoveryBlocked && (
+              <section className="error-panel" role="alert">
+                <h2>Recovery review required</h2>
+                <p>
+                  An unfinished operation needs recovery review. Further changes
+                  are blocked; nothing will be replayed or rolled back
+                  automatically. Inspect the local runtime using the README
+                  recovery instructions before retrying.
+                </p>
+                <a href="/api/recovery" target="_blank" rel="noreferrer">
+                  Inspect recovery metadata
+                </a>
+              </section>
+            )}
+            {strandedDrafts.length > 0 && (
+              <section className="error-panel" role="alert">
+                <h2>
+                  {strandedDrafts.length === 1
+                    ? 'A private import draft was not discarded'
+                    : `${strandedDrafts.length} private import drafts were not discarded`}
+                </h2>
+                <p>
+                  The import page was left, but the hub did not confirm that its
+                  draft is gone. A draft expires within five minutes.
+                </p>
+                <button
+                  onClick={() => {
+                    for (const id of strandedDrafts) void retryDiscard(id);
+                  }}
                 >
-                  <div className="list-toolbar">
-                    <div className="list-toolbar-title">
-                      <h2 id="connector-list-title">
-                        Your connectors{' '}
-                        <span className="count">
-                          {visibleConnectors.length}
-                        </span>
-                      </h2>
-                      {visibleConnectors.length !== connectors.length && (
-                        <span className="muted">of {connectors.length}</span>
-                      )}
-                      <span className="muted">
-                        Desired state · not a live verification
-                      </span>
-                    </div>
-                    <div className="list-toolbar-controls">
-                      <div className="search">
-                        <Icon name="search" size={16} />
-                        <input
-                          type="search"
-                          aria-label="Search connectors"
-                          placeholder="Name, id or target…"
-                          value={connectorSearch}
-                          onChange={(event) =>
-                            setConnectorSearch(event.target.value)
-                          }
-                        />
-                      </div>
-                      <div
-                        className="segmented"
-                        role="group"
-                        aria-label="Filter connectors by status"
-                      >
-                        {connectorFilters.map((filter) => (
-                          <button
-                            key={filter.id}
-                            type="button"
-                            aria-pressed={statusFilter === filter.id}
-                            onClick={() => setStatusFilter(filter.id)}
-                          >
-                            {filter.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                  {/* Without automatic discovery nothing settles, so the bar
-                      would stay in its loading state. */}
-                  {bootstrap?.capabilities.runtimeChecks &&
-                    !recoveryBlocked && (
-                      <DiscoveryProgress
-                        connectors={connectors}
-                        observations={observations}
-                      />
-                    )}
-                  {connectors.length === 0 ? (
-                    <div className="empty-state">
-                      <div className="empty-icon">
-                        <Icon name="connectors" size={28} />
-                      </div>
-                      <h2>Your existing tools stay where they are</h2>
-                      <p>
-                        {discovery?.checkedAt
-                          ? 'Read-only observations are available in the adoption preview above. No connector definition has been imported into the registry or executed.'
-                          : 'The hub has not inspected or imported your pilot yet. Use read-only discovery to review your existing setup; adoption remains a separate explicit step.'}
-                      </p>
-                      <button onClick={() => setPage('Profiles')}>
-                        Set up a local profile <Icon name="arrow" size={16} />
-                      </button>
-                      <small>
-                        Creating a profile does not register tools with agents.
-                      </small>
-                    </div>
-                  ) : (
-                    // The list stays mounted while a filter hides every row:
-                    // it owns the automatic discovery of all connectors.
-                    <>
-                      {visibleConnectors.length === 0 && (
-                        <div
-                          className="empty-state"
-                          data-testid="connector-no-match"
-                        >
-                          <div className="empty-icon">
-                            <Icon name="filter" size={28} />
-                          </div>
-                          <h2>No connectors match</h2>
-                          <p>
-                            No connector matches the current search and status
-                            filter.
-                          </p>
-                          <button type="button" onClick={clearConnectorFilters}>
-                            Clear filters
-                          </button>
-                        </div>
-                      )}
-                      <ConnectorList
-                        connectors={connectors}
-                        visibleIds={visibleIds}
-                        revision={bootstrap?.revision ?? 0}
-                        observations={observations}
-                        observe={setObservations}
-                        profiles={profiles}
-                        disabled={recoveryBlocked}
-                        runtime={!!bootstrap?.capabilities.runtimeChecks}
-                        secrets={!!bootstrap?.capabilities.secrets}
-                        authenticate={setAuthentication}
-                        operate={setOperation}
-                        refresh={refresh}
-                        openPackage={setPackageSeed}
-                      />
-                    </>
-                  )}
-                  <div className="panel-footer">
-                    <Icon name="lock" size={15} />
-                    Saving is not execution. Capability discovery calls no
-                    tools.
-                    <span className="panel-footer-note">
-                      Definitions, verification and desired profile membership
-                    </span>
-                  </div>
-                </section>
-              )}
-              {page === 'Profiles' && (
-                <section className="list-panel">
-                  <div className="list-toolbar">
-                    <h2>
-                      Local profiles{' '}
-                      <span className="count">{profiles.length}</span>
-                    </h2>
-                    <label className="search">
-                      <Icon name="search" size={17} />
-                      <span className="sr-only">Search profiles</span>
-                      <input
-                        type="search"
-                        placeholder="Search profiles…"
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                      />
-                    </label>
-                  </div>
-                  {profiles.length === 0 ? (
-                    <div className="empty-state">
-                      <div className="empty-icon">
-                        <Icon name="profiles" size={28} />
-                      </div>
-                      <h2>A place for each workflow</h2>
-                      <p>
-                        Create a profile, edit its connector membership, then
-                        explicitly preview and apply its owned runtime files.
-                      </p>
-                      <button
-                        disabled={recoveryBlocked}
-                        onClick={() => setCreating(true)}
-                      >
-                        <Icon name="plus" size={17} />
-                        Create your first profile
-                      </button>
-                    </div>
-                  ) : filteredProfiles.length === 0 ? (
-                    <div className="empty-state">
-                      <h2>No matching profiles</h2>
-                      <p>Try a different name or description.</p>
-                    </div>
-                  ) : (
-                    <ul className="profile-list">
-                      {filteredProfiles.map((profile) => (
-                        <li key={profile.id}>
-                          <span className="row-icon">
-                            <Icon name="profiles" />
-                          </span>
-                          <div className="row-main">
-                            <h3>{profile.name}</h3>
-                            <p>{profile.description || 'No description'}</p>
-                          </div>
-                          <span className="badge">
-                            {materializations.some(
-                              (record) =>
-                                record.profileId === profile.id && record.stale,
-                            )
-                              ? 'Snapshot stale — apply again'
-                              : profile.enabled === false
-                                ? 'Disabled'
-                                : materializations.some(
-                                      (record) =>
-                                        record.profileId === profile.id,
-                                    )
-                                  ? 'Snapshot applied — reconnect may be needed'
-                                  : 'Local only'}
-                          </span>
-                          <span className="muted">
-                            {profile.connectorIds.length} connectors
-                          </span>
-                          <div
-                            className="row-actions"
-                            role="group"
-                            aria-label={`Actions for profile ${profile.name}`}
-                          >
-                            <button
-                              disabled={recoveryBlocked}
-                              onClick={() =>
-                                setOperation({
-                                  title: 'Edit profile membership',
-                                  operation: {
-                                    kind: 'edit_profile',
-                                    profileId: profile.id,
-                                  },
-                                  editor: 'profile',
-                                  context: {
-                                    name: profile.name,
-                                    description: profile.description,
-                                    connectorIds: profile.connectorIds,
-                                    enabled: profile.enabled !== false,
-                                  },
-                                })
-                              }
-                            >
-                              Edit membership
-                            </button>
-                            <button
-                              disabled={recoveryBlocked}
-                              onClick={() =>
-                                setOperation({
-                                  title:
-                                    profile.enabled === false
-                                      ? 'Enable profile'
-                                      : 'Disable profile',
-                                  operation: {
-                                    kind: 'set_profile_enabled',
-                                    profileId: profile.id,
-                                    enabled: profile.enabled === false,
-                                  },
-                                  context: {
-                                    effect:
-                                      'Desired state only; apply the profile and reconnect existing clients.',
-                                  },
-                                })
-                              }
-                            >
-                              {profile.enabled === false
-                                ? 'Enable profile'
-                                : 'Disable profile'}
-                            </button>
-                            <button
-                              disabled={
-                                recoveryBlocked ||
-                                !bootstrap?.capabilities.materialization
-                              }
-                              onClick={() =>
-                                setOperation({
-                                  title: 'Apply owned profile snapshot',
-                                  operation: {
-                                    kind: 'materialize_profile',
-                                    profileId: profile.id,
-                                  },
-                                  context: {
-                                    connectorIds: profile.connectorIds,
-                                    effect:
-                                      'Writes generated catalogs/launchers and isolated Docker profile only; never starts a connector or edits agent settings.',
-                                  },
-                                })
-                              }
-                            >
-                              Apply profile
-                            </button>
-                            <button
-                              disabled={
-                                recoveryBlocked ||
-                                !materializations.some(
-                                  (record) => record.profileId === profile.id,
-                                )
-                              }
-                              onClick={() =>
-                                setOperation({
-                                  title: 'Remove owned materialization',
-                                  operation: {
-                                    kind: 'dematerialize_profile',
-                                    profileId: profile.id,
-                                  },
-                                })
-                              }
-                            >
-                              Dematerialize
-                            </button>
-                            <button
-                              disabled={
-                                recoveryBlocked ||
-                                materializations.some(
-                                  (record) => record.profileId === profile.id,
-                                )
-                              }
-                              onClick={() =>
-                                setOperation({
-                                  title: 'Remove local profile',
-                                  operation: {
-                                    kind: 'remove_profile',
-                                    profileId: profile.id,
-                                  },
-                                  context: {
-                                    effect:
-                                      'Removes profile definition, not its connector definitions or credentials.',
-                                  },
-                                })
-                              }
-                            >
-                              Remove profile
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <div className="panel-footer">
-                    Registry revision {bootstrap?.revision} · Changes require a
-                    preview before apply
-                  </div>
-                </section>
-              )}
-              {page === 'Agents' && bootstrap?.capabilities.agentApply && (
-                <AgentIntegrations
-                  revision={bootstrap.revision}
-                  blocked={recoveryBlocked}
+                  Retry discard
+                </button>
+              </section>
+            )}
+            {showNotice && (
+              <div className="foundation-notice">
+                <Icon name="shield" />
+                <div>
+                  {bootstrap?.capabilities.discovery
+                    ? 'Discovery does not execute connectors; saving, exact execution approval, protected credentials, profile apply and capability checks are separate actions, and pilot adoption and agent synchronization stay disabled.'
+                    : bootstrap?.capabilities.agentApply
+                      ? 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; agent integration verifies configuration only, and reconnect and trust remain agent-controlled.'
+                      : 'Save definitions locally, approve exact execution separately, and manage protected credentials explicitly; capability tests use available runtime adapters, and agent synchronization remains disabled.'}
+                </div>
+                <span className="read-only-tag">Explicit actions only</span>
+              </div>
+            )}
+            {/* The agent and discovery panels keep their state and their
+                timers: they stay mounted and are only hidden when their page
+                is not open. */}
+            {bootstrap?.capabilities.agentCloning && (
+              <div hidden={!(onAdd && place.pill === 'agents')}>
+                <AgentCloning
+                  disabled={loading || !!error || recoveryBlocked}
                   refresh={refresh}
+                  openManual={() => go(addPlace('manual'))}
                 />
-              )}
-              {page === 'Agents' && !bootstrap?.capabilities.agentApply && (
-                <section className="list-panel">
-                  <div className="list-toolbar">
-                    <h2>
-                      Integration targets <span className="count">8</span>
-                    </h2>
-                    <span className="muted">
-                      {discovery?.checkedAt
-                        ? 'User-file observations · not live MCP verification'
-                        : 'Not an installed inventory'}
-                    </span>
-                  </div>
-                  <ul className="agent-list">
-                    {agents.map((agent) => (
-                      <li key={agent.agentId}>
-                        <span className="agent-initials">
-                          {agentNames[agent.agentId]?.slice(0, 2)}
-                        </span>
-                        <div className="row-main">
-                          <h3>{agentNames[agent.agentId]}</h3>
-                          {agent.checkedAt ? (
-                            <>
-                              <p>
-                                {agent.detected === true
-                                  ? 'Executable found'
-                                  : agent.detected === false
-                                    ? 'Executable not found'
-                                    : 'Executable discovery error'}{' '}
-                                ·{' '}
-                                {agent.version
-                                  ? `${agent.version} (${agent.versionSource ?? 'observed'})`
-                                  : 'version unknown'}{' '}
-                                · user bindings:{' '}
-                                {agent.configSummary ?? 'pending'}
-                              </p>
-                              <p>
-                                {agent.executable ??
-                                  'No resolved executable path'}
-                              </p>
-                              {agent.configFiles &&
-                              agent.configFiles.length > 0 ? (
-                                <details>
-                                  <summary>Observed user configuration</summary>
-                                  <ul>
-                                    {agent.configFiles.map((file) => (
-                                      <li key={file.path}>
-                                        {file.path} · {file.status} ·{' '}
-                                        {file.entryCount === null
-                                          ? 'entries unknown'
-                                          : `${file.entryCount} entries`}{' '}
-                                        · hub pointers:{' '}
-                                        {file.hubEntries.join(', ') ||
-                                          'none observed'}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </details>
-                              ) : (
-                                <p>
-                                  Version-specific configuration scope is
-                                  pending; no schema was guessed.
-                                </p>
-                              )}
-                            </>
-                          ) : (
-                            <p>
-                              Executable, version, and configuration have not
-                              been inspected.
-                            </p>
-                          )}
-                        </div>
-                        <span className="badge">
-                          <Icon name="clock" size={14} />
-                          Adapter pending
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                  <div className="panel-footer">
-                    {discovery?.checkedAt
-                      ? 'Selected user configuration files were read only. Credential caches were not read; token values are excluded from discovery output. No MCP discovery was performed.'
-                      : 'No CLI configuration files have been opened or modified.'}
-                  </div>
-                </section>
-              )}
-              {page === 'Activity' && (
-                <>
-                  <section className="list-panel">
-                    <div className="list-toolbar">
-                      <h2>Registry activity</h2>
-                      <span className="muted">
-                        Last 200 successful local changes
-                      </span>
-                    </div>
-                    {activity.length === 0 ? (
-                      <div className="empty-state">
-                        <Icon name="activity" size={28} />
-                        <h2>No registry changes yet</h2>
-                        <p>
-                          Successful local profile changes will appear here.
-                          Refused requests are recorded separately below; no
-                          request payloads are stored.
-                        </p>
-                      </div>
-                    ) : (
-                      <ul className="activity-list single-line">
-                        {[...activity].reverse().map((event) => (
-                          <li key={event.id}>
-                            <Icon name="check" size={18} />
-                            <div className="row-main">
-                              <h3>{event.operation.replaceAll('_', ' ')}</h3>
-                              <span className="activity-meta">
-                                Registry revision {event.priorRevision} →{' '}
-                                {event.newRevision}
-                              </span>
-                            </div>
-                            <time dateTime={event.time}>
-                              {new Date(event.time).toLocaleString()}
-                            </time>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </section>
-                  <section
-                    className="list-panel safety-section"
-                    aria-labelledby="security-activity-title"
-                  >
-                    <div className="list-toolbar">
-                      <h2 id="security-activity-title">Security refusals</h2>
-                      <span className="muted">Latest 200 · metadata only</span>
-                    </div>
-                    {securityEvents.length === 0 ? (
-                      <div className="empty-state">
-                        <Icon name="shield" size={28} />
-                        <h2>No refused requests recorded</h2>
-                        <p>
-                          Denied origins, missing sessions, invalid inputs, and
-                          conflicts appear here without headers, credentials, or
-                          request bodies.
-                        </p>
-                      </div>
-                    ) : (
-                      <ul className="activity-list">
-                        {[...securityEvents].reverse().map((event) => (
-                          <li key={event.id}>
-                            <Icon name="shield" size={18} />
-                            <div className="row-main">
-                              <h3>{event.reason.replaceAll('_', ' ')}</h3>
-                              <p>
-                                {event.method} ·{' '}
-                                {event.route.replaceAll('_', ' ')} · HTTP{' '}
-                                {event.status}
-                              </p>
-                            </div>
-                            <time dateTime={event.time}>
-                              {new Date(event.time).toLocaleString()}
-                            </time>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </section>
-                </>
-              )}
-              {page === 'Settings' && bootstrap?.capabilities.desktop && (
-                <section className="list-panel integration-guidance">
-                  <h2>Windows desktop session</h2>
-                  <p>
-                    Closing the app window leaves the same-user manager running.
-                    Use this action to release its locks and shut down
-                    gracefully; independent agent bridges remain agent-owned.
-                  </p>
+              </div>
+            )}
+            {error ? (
+              <>
+                <section className="error-panel" role="alert">
+                  <h2>Unable to load this workspace</h2>
+                  <p>{error}</p>
                   <button
                     onClick={() => {
-                      void api('/api/desktop/shutdown', {})
-                        .then(() =>
-                          setError(
-                            'Desktop manager stopped. You can close this window.',
-                          ),
-                        )
-                        .catch(() =>
-                          setError('Shutdown could not be confirmed.'),
-                        );
+                      void refresh();
                     }}
                   >
-                    Stop desktop manager
+                    Retry
                   </button>
                 </section>
-              )}
-              {page === 'Settings' && (
-                <section className="list-panel settings">
-                  <div className="list-toolbar">
-                    <h2>Runtime & safeguards</h2>
+                {place.entry === 'settings' && place.tab === 'runtime' && (
+                  <AppearancePanel theme={theme} choose={chooseTheme} />
+                )}
+              </>
+            ) : loading && !bootstrap ? (
+              <div className="loading-state" role="status">
+                Opening your local workspace…
+              </div>
+            ) : (
+              <>
+                {bootstrap?.capabilities.appUpdates &&
+                  place.entry === 'settings' &&
+                  place.tab === 'updates' && <UpdateNotice {...update} />}
+                {bootstrap?.capabilities.discovery && (
+                  <div hidden={!(onAdd && place.pill === 'discover')}>
+                    <DiscoveryPanel
+                      snapshot={discovery}
+                      preview={adoption}
+                      refresh={refresh}
+                    />
                   </div>
-                  <dl>
-                    <div>
-                      <dt>Local server</dt>
-                      <dd>{window.location.origin}</dd>
-                    </div>
-                    <div>
-                      <dt>Node.js</dt>
-                      <dd>{bootstrap?.runtime.node}</dd>
-                    </div>
-                    <div>
-                      <dt>State storage</dt>
-                      <dd>Versioned JSON · atomic replacement · 5 backups</dd>
-                    </div>
-                    <div>
-                      <dt>Recovery journal</dt>
-                      <dd>
-                        {recoveryBlocked
-                          ? 'Review required · changes blocked'
-                          : 'No unresolved operations'}{' '}
-                        · external uncertainty blocks for review
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Refusal audit</dt>
-                      <dd>
-                        Persisted locally · latest 200 · no request payloads
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Authentication</dt>
-                      <dd>
-                        One-time launch · HttpOnly session · CSRF protection
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Docker discovery</dt>
-                      <dd>
-                        {discovery?.checkedAt
-                          ? `${discovery.docker.state} · CLI ${discovery.docker.cliVersion ?? 'unknown'} · gateway ${discovery.docker.gatewayVersion ?? 'unknown'} · engine ${discovery.docker.engineVersion ?? 'unknown'} · ${discovery.docker.reason.replaceAll('_', ' ')}`
-                          : 'Not scanned · only explicit read-only discovery runs Docker queries'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Secret storage & OAuth</dt>
-                      <dd>
-                        {bootstrap?.capabilities.secrets
-                          ? 'Write-only protected credentials · supported OAuth recipes only · discovery required for verification'
-                          : 'Protected credential backend unavailable'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Windows sign-in startup</dt>
-                      <dd>
-                        Managed by the tray icon · right-click the Waleed MCP
-                        Hub icon and use Start with Windows
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Appearance</dt>
-                      <dd>
+                )}
+                {place.entry === 'connectors' && (
+                  // The list stays mounted on the Add tab: it owns the
+                  // automatic discovery of all connectors.
+                  <section
+                    className="list-panel"
+                    aria-labelledby="connector-list-title"
+                    hidden={place.tab !== 'all'}
+                  >
+                    <div className="list-toolbar">
+                      <div className="list-toolbar-title">
+                        <h2 id="connector-list-title">
+                          Your connectors{' '}
+                          <span className="count">
+                            {visibleConnectors.length}
+                          </span>
+                        </h2>
+                        {visibleConnectors.length !== connectors.length && (
+                          <span className="muted">of {connectors.length}</span>
+                        )}
+                        <span className="muted">
+                          Desired state · not a live verification
+                        </span>
+                      </div>
+                      <div className="list-toolbar-controls">
+                        <div className="search">
+                          <Icon name="search" size={16} />
+                          <input
+                            type="search"
+                            aria-label="Search connectors"
+                            placeholder="Name, id or target…"
+                            value={connectorSearch}
+                            onChange={(event) =>
+                              setConnectorSearch(event.target.value)
+                            }
+                          />
+                        </div>
                         <div
                           className="segmented"
                           role="group"
-                          aria-label="Appearance"
+                          aria-label="Filter connectors by status"
                         >
-                          {themeChoices.map((choice) => (
+                          {connectorFilters.map((filter) => (
                             <button
-                              key={choice.id}
+                              key={filter.id}
                               type="button"
-                              aria-pressed={theme === choice.id}
-                              onClick={() => {
-                                setTheme(choice.id);
-                                setThemeChoice(choice.id);
-                              }}
+                              aria-pressed={statusFilter === filter.id}
+                              onClick={() => setStatusFilter(filter.id)}
                             >
-                              {choice.label}
+                              {filter.label}
                             </button>
                           ))}
                         </div>
-                      </dd>
+                      </div>
                     </div>
-                  </dl>
-                </section>
-              )}
-            </>
-          )}
+                    {/* Without automatic discovery nothing settles, so the bar
+                      would stay in its loading state. */}
+                    {bootstrap?.capabilities.runtimeChecks &&
+                      !recoveryBlocked && (
+                        <DiscoveryProgress
+                          connectors={connectors}
+                          observations={observations}
+                        />
+                      )}
+                    {connectors.length === 0 ? (
+                      <div className="empty-state">
+                        <div className="empty-icon">
+                          <Icon name="connectors" size={28} />
+                        </div>
+                        <h2>Your existing tools stay where they are</h2>
+                        <p>
+                          {discovery?.checkedAt
+                            ? 'Read-only observations are available in the adoption preview under Add › Discover environment. No connector definition has been imported into the registry or executed.'
+                            : 'The hub has not inspected or imported your pilot yet. Use read-only discovery to review your existing setup; adoption remains a separate explicit step.'}
+                        </p>
+                        {bootstrap?.capabilities.discovery && (
+                          <button
+                            onClick={() =>
+                              go({
+                                entry: 'connectors',
+                                tab: 'add',
+                                pill: 'discover',
+                              })
+                            }
+                          >
+                            Open discovery <Icon name="arrow" size={16} />
+                          </button>
+                        )}
+                        <button onClick={() => go({ entry: 'profiles' })}>
+                          Set up a local profile <Icon name="arrow" size={16} />
+                        </button>
+                        <small>
+                          Creating a profile does not register tools with
+                          agents.
+                        </small>
+                      </div>
+                    ) : (
+                      // The list stays mounted while a filter hides every row:
+                      // it owns the automatic discovery of all connectors.
+                      <>
+                        {visibleConnectors.length === 0 && (
+                          <div
+                            className="empty-state"
+                            data-testid="connector-no-match"
+                          >
+                            <div className="empty-icon">
+                              <Icon name="filter" size={28} />
+                            </div>
+                            <h2>No connectors match</h2>
+                            <p>
+                              No connector matches the current search and status
+                              filter.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={clearConnectorFilters}
+                            >
+                              Clear filters
+                            </button>
+                          </div>
+                        )}
+                        <ConnectorList
+                          connectors={connectors}
+                          visibleIds={visibleIds}
+                          revision={bootstrap?.revision ?? 0}
+                          observations={observations}
+                          observe={setObservations}
+                          profiles={profiles}
+                          disabled={recoveryBlocked}
+                          runtime={!!bootstrap?.capabilities.runtimeChecks}
+                          secrets={!!bootstrap?.capabilities.secrets}
+                          authenticate={setAuthentication}
+                          operate={setOperation}
+                          refresh={refresh}
+                          openPackage={setPackageSeed}
+                        />
+                      </>
+                    )}
+                    <div className="panel-footer">
+                      <Icon name="lock" size={15} />
+                      Saving is not execution. Capability discovery calls no
+                      tools.
+                      <span className="panel-footer-note">
+                        Definitions, verification and desired profile membership
+                      </span>
+                    </div>
+                  </section>
+                )}
+                {place.entry === 'profiles' && (
+                  <section className="list-panel">
+                    <div className="list-toolbar">
+                      <h2>
+                        Local profiles{' '}
+                        <span className="count">{profiles.length}</span>
+                      </h2>
+                      <label className="search">
+                        <Icon name="search" size={17} />
+                        <span className="sr-only">Search profiles</span>
+                        <input
+                          type="search"
+                          placeholder="Search profiles…"
+                          value={search}
+                          onChange={(e) => setSearch(e.target.value)}
+                        />
+                      </label>
+                    </div>
+                    {profiles.length === 0 ? (
+                      <div className="empty-state">
+                        <div className="empty-icon">
+                          <Icon name="profiles" size={28} />
+                        </div>
+                        <h2>A place for each workflow</h2>
+                        <p>
+                          Create a profile, edit its connector membership, then
+                          explicitly preview and apply its owned runtime files.
+                        </p>
+                        <button
+                          disabled={recoveryBlocked}
+                          onClick={() => setCreating(true)}
+                        >
+                          <Icon name="plus" size={17} />
+                          Create your first profile
+                        </button>
+                      </div>
+                    ) : filteredProfiles.length === 0 ? (
+                      <div className="empty-state">
+                        <h2>No matching profiles</h2>
+                        <p>Try a different name or description.</p>
+                      </div>
+                    ) : (
+                      <ul className="profile-list">
+                        {filteredProfiles.map((profile) => (
+                          <li key={profile.id}>
+                            <span className="row-icon">
+                              <Icon name="profiles" />
+                            </span>
+                            <div className="row-main">
+                              <h3>{profile.name}</h3>
+                              <p>{profile.description || 'No description'}</p>
+                            </div>
+                            <span className="badge">
+                              {materializations.some(
+                                (record) =>
+                                  record.profileId === profile.id &&
+                                  record.stale,
+                              )
+                                ? 'Snapshot stale — apply again'
+                                : profile.enabled === false
+                                  ? 'Disabled'
+                                  : materializations.some(
+                                        (record) =>
+                                          record.profileId === profile.id,
+                                      )
+                                    ? 'Snapshot applied — reconnect may be needed'
+                                    : 'Local only'}
+                            </span>
+                            <span className="muted">
+                              {profile.connectorIds.length} connectors
+                            </span>
+                            <div
+                              className="row-actions"
+                              role="group"
+                              aria-label={`Actions for profile ${profile.name}`}
+                            >
+                              <button
+                                disabled={recoveryBlocked}
+                                onClick={() =>
+                                  setOperation({
+                                    title: 'Edit profile membership',
+                                    operation: {
+                                      kind: 'edit_profile',
+                                      profileId: profile.id,
+                                    },
+                                    editor: 'profile',
+                                    context: {
+                                      name: profile.name,
+                                      description: profile.description,
+                                      connectorIds: profile.connectorIds,
+                                      enabled: profile.enabled !== false,
+                                    },
+                                  })
+                                }
+                              >
+                                Edit membership
+                              </button>
+                              <button
+                                disabled={recoveryBlocked}
+                                onClick={() =>
+                                  setOperation({
+                                    title:
+                                      profile.enabled === false
+                                        ? 'Enable profile'
+                                        : 'Disable profile',
+                                    operation: {
+                                      kind: 'set_profile_enabled',
+                                      profileId: profile.id,
+                                      enabled: profile.enabled === false,
+                                    },
+                                    context: {
+                                      effect:
+                                        'Desired state only; apply the profile and reconnect existing clients.',
+                                    },
+                                  })
+                                }
+                              >
+                                {profile.enabled === false
+                                  ? 'Enable profile'
+                                  : 'Disable profile'}
+                              </button>
+                              <button
+                                disabled={
+                                  recoveryBlocked ||
+                                  !bootstrap?.capabilities.materialization
+                                }
+                                onClick={() =>
+                                  setOperation({
+                                    title: 'Apply owned profile snapshot',
+                                    operation: {
+                                      kind: 'materialize_profile',
+                                      profileId: profile.id,
+                                    },
+                                    context: {
+                                      connectorIds: profile.connectorIds,
+                                      effect:
+                                        'Writes generated catalogs/launchers and isolated Docker profile only; never starts a connector or edits agent settings.',
+                                    },
+                                  })
+                                }
+                              >
+                                Apply profile
+                              </button>
+                              <button
+                                disabled={
+                                  recoveryBlocked ||
+                                  !materializations.some(
+                                    (record) => record.profileId === profile.id,
+                                  )
+                                }
+                                onClick={() =>
+                                  setOperation({
+                                    title: 'Remove owned materialization',
+                                    operation: {
+                                      kind: 'dematerialize_profile',
+                                      profileId: profile.id,
+                                    },
+                                  })
+                                }
+                              >
+                                Dematerialize
+                              </button>
+                              <button
+                                disabled={
+                                  recoveryBlocked ||
+                                  materializations.some(
+                                    (record) => record.profileId === profile.id,
+                                  )
+                                }
+                                onClick={() =>
+                                  setOperation({
+                                    title: 'Remove local profile',
+                                    operation: {
+                                      kind: 'remove_profile',
+                                      profileId: profile.id,
+                                    },
+                                    context: {
+                                      effect:
+                                        'Removes profile definition, not its connector definitions or credentials.',
+                                    },
+                                  })
+                                }
+                              >
+                                Remove profile
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="panel-footer">
+                      Registry revision {bootstrap?.revision} · Changes require
+                      a preview before apply
+                    </div>
+                  </section>
+                )}
+                {place.entry === 'agents' &&
+                  bootstrap?.capabilities.agentApply && (
+                    <AgentIntegrations
+                      revision={bootstrap.revision}
+                      blocked={recoveryBlocked}
+                      refresh={refresh}
+                    />
+                  )}
+                {place.entry === 'agents' &&
+                  !bootstrap?.capabilities.agentApply && (
+                    <section className="list-panel">
+                      <div className="list-toolbar">
+                        <h2>
+                          Integration targets <span className="count">8</span>
+                        </h2>
+                        <span className="muted">
+                          {discovery?.checkedAt
+                            ? 'User-file observations · not live MCP verification'
+                            : 'Not an installed inventory'}
+                        </span>
+                      </div>
+                      <ul className="agent-list">
+                        {agents.map((agent) => (
+                          <li key={agent.agentId}>
+                            <span className="agent-initials">
+                              {agentNames[agent.agentId]?.slice(0, 2)}
+                            </span>
+                            <div className="row-main">
+                              <h3>{agentNames[agent.agentId]}</h3>
+                              {agent.checkedAt ? (
+                                <>
+                                  <p>
+                                    {agent.detected === true
+                                      ? 'Executable found'
+                                      : agent.detected === false
+                                        ? 'Executable not found'
+                                        : 'Executable discovery error'}{' '}
+                                    ·{' '}
+                                    {agent.version
+                                      ? `${agent.version} (${agent.versionSource ?? 'observed'})`
+                                      : 'version unknown'}{' '}
+                                    · user bindings:{' '}
+                                    {agent.configSummary ?? 'pending'}
+                                  </p>
+                                  <p>
+                                    {agent.executable ??
+                                      'No resolved executable path'}
+                                  </p>
+                                  {agent.configFiles &&
+                                  agent.configFiles.length > 0 ? (
+                                    <details>
+                                      <summary>
+                                        Observed user configuration
+                                      </summary>
+                                      <ul>
+                                        {agent.configFiles.map((file) => (
+                                          <li key={file.path}>
+                                            {file.path} · {file.status} ·{' '}
+                                            {file.entryCount === null
+                                              ? 'entries unknown'
+                                              : `${file.entryCount} entries`}{' '}
+                                            · hub pointers:{' '}
+                                            {file.hubEntries.join(', ') ||
+                                              'none observed'}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </details>
+                                  ) : (
+                                    <p>
+                                      Version-specific configuration scope is
+                                      pending; no schema was guessed.
+                                    </p>
+                                  )}
+                                </>
+                              ) : (
+                                <p>
+                                  Executable, version, and configuration have
+                                  not been inspected.
+                                </p>
+                              )}
+                            </div>
+                            <span className="badge">
+                              <Icon name="clock" size={14} />
+                              Adapter pending
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="panel-footer">
+                        {discovery?.checkedAt
+                          ? 'Selected user configuration files were read only. Credential caches were not read; token values are excluded from discovery output. No MCP discovery was performed.'
+                          : 'No CLI configuration files have been opened or modified.'}
+                      </div>
+                    </section>
+                  )}
+                {place.entry === 'activity' && (
+                  <ActivityPage
+                    tab={place.tab}
+                    activity={activity}
+                    securityEvents={securityEvents}
+                  />
+                )}
+                {place.entry === 'settings' && place.tab === 'runtime' && (
+                  <RuntimeSettings
+                    bootstrap={bootstrap}
+                    discovery={discovery}
+                    recoveryBlocked={recoveryBlocked}
+                    theme={theme}
+                    chooseTheme={chooseTheme}
+                    stopDesktop={stopDesktop}
+                  />
+                )}
+                {place.entry === 'settings' && place.tab === 'recovery' && (
+                  <RecoveryStatus blocked={recoveryBlocked} />
+                )}
+              </>
+            )}
+            {/* The Add pages are not dialogs: only the page of the open pill is
+                rendered, and leaving it discards its form. */}
+            {onAdd && place.pill === 'import' && bootstrap && (
+              <ImportDialog
+                revision={bootstrap.revision}
+                close={closeAdd}
+                hold={hold}
+                stranded={strandDraft}
+                refresh={refresh}
+                savePreview={(preview, definitions) => {
+                  closeAdd();
+                  setOperation({
+                    title: 'Save connector definitions locally',
+                    operation: { kind: 'create_connectors', definitions },
+                    context: definitions,
+                    initialPreview: preview,
+                  });
+                }}
+                installBlocked={recoveryBlocked}
+                installProposal={(proposal: PackageProposal) => {
+                  // The import page stays open: the package is installed in its own,
+                  // separate review step.
+                  const version = proposal.version ?? proposal.requestedVersion;
+                  setPackageSeed({
+                    mode: 'install',
+                    name: proposal.name,
+                    ...(version ? { version } : {}),
+                    arguments: proposal.arguments,
+                    envNames: proposal.envNames,
+                    // The metadata of the imported connector travels with the
+                    // install, so the connector keeps its name, identifier,
+                    // description, enabled flag and literals.
+                    ...(proposal.connectorName
+                      ? { connectorName: proposal.connectorName }
+                      : {}),
+                    ...(proposal.connectorId
+                      ? { connectorId: proposal.connectorId }
+                      : {}),
+                    ...(proposal.description !== undefined
+                      ? { description: proposal.description }
+                      : {}),
+                    ...(proposal.entry ? { entry: proposal.entry } : {}),
+                    ...(proposal.enabled !== undefined
+                      ? { enabled: proposal.enabled }
+                      : {}),
+                    ...(proposal.environmentLiterals
+                      ? { environmentLiterals: proposal.environmentLiterals }
+                      : {}),
+                  });
+                }}
+              />
+            )}
+            {/* The header button to this page is disabled while changes are
+                blocked or the hub cannot be read; its pill and its address
+                must not get around that. */}
+            {onAdd && place.pill === 'manual' && bootstrap && (
+              <ManualMcpPage
+                blocked={
+                  recoveryBlocked
+                    ? 'Adding an MCP by hand is blocked until the recovery review is done.'
+                    : error
+                      ? 'Adding an MCP by hand is unavailable until the workspace loads again.'
+                      : null
+                }
+                revision={bootstrap.revision}
+                close={closeAdd}
+                hold={hold}
+                refresh={refresh}
+              />
+            )}
+          </TabPanel>
           <footer className="workspace-footer">
             <span>
               <Icon name="shield" size={14} />
@@ -1144,59 +1357,12 @@ export function App() {
           saved={refresh}
         />
       )}
-      {importing && bootstrap && (
-        <ImportDialog
-          revision={bootstrap.revision}
-          close={() => setImporting(false)}
-          refresh={refresh}
-          savePreview={(preview, definitions) => {
-            setImporting(false);
-            setOperation({
-              title: 'Save connector definitions locally',
-              operation: { kind: 'create_connectors', definitions },
-              context: definitions,
-              initialPreview: preview,
-            });
-          }}
-          installBlocked={recoveryBlocked}
-          installProposal={(proposal: PackageProposal) => {
-            // The import stays open: the package is installed in its own,
-            // separate review step.
-            const version = proposal.version ?? proposal.requestedVersion;
-            setPackageSeed({
-              mode: 'install',
-              name: proposal.name,
-              ...(version ? { version } : {}),
-              arguments: proposal.arguments,
-              envNames: proposal.envNames,
-              // The metadata of the imported connector travels with the
-              // install, so the connector keeps its name, identifier,
-              // description, enabled flag and literals.
-              ...(proposal.connectorName
-                ? { connectorName: proposal.connectorName }
-                : {}),
-              ...(proposal.connectorId
-                ? { connectorId: proposal.connectorId }
-                : {}),
-              ...(proposal.description !== undefined
-                ? { description: proposal.description }
-                : {}),
-              ...(proposal.entry ? { entry: proposal.entry } : {}),
-              ...(proposal.enabled !== undefined
-                ? { enabled: proposal.enabled }
-                : {}),
-              ...(proposal.environmentLiterals
-                ? { environmentLiterals: proposal.environmentLiterals }
-                : {}),
-            });
-          }}
-        />
-      )}
       {packageSeed && (
         <PackageDialog
           seed={packageSeed}
           close={() => setPackageSeed(null)}
           refresh={refresh}
+          blocked={recoveryBlocked}
         />
       )}
       {operation && bootstrap && (
@@ -1212,13 +1378,6 @@ export function App() {
           connector={authentication}
           revision={bootstrap.revision}
           close={() => setAuthentication(null)}
-          refresh={refresh}
-        />
-      )}
-      {manual && bootstrap && (
-        <ManualMcpDialog
-          revision={bootstrap.revision}
-          close={() => setManual(false)}
           refresh={refresh}
         />
       )}

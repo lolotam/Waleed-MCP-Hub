@@ -1,11 +1,22 @@
 import { useEffect, useState } from 'react';
 import { UpdateStatusSchema, type UpdateStatus } from '@waleed/contracts';
 import { api } from './api.js';
-export function UpdateNotice() {
+export interface UpdateCheck {
+  status: UpdateStatus | null;
+  busy: boolean;
+  error: boolean;
+  check: () => Promise<void>;
+}
+
+// The release check. It runs once when the hub offers it and then every hour,
+// and the shell reads its status for the count on Settings, so it lives above
+// the notice and keeps running while the notice is hidden.
+export function useUpdateCheck(enabled: boolean): UpdateCheck {
   const [status, setStatus] = useState<UpdateStatus | null>(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(false);
   useEffect(() => {
+    if (!enabled) return;
     let mounted = true;
     const refresh = () =>
       void api('/api/updates/check', {})
@@ -24,7 +35,7 @@ export function UpdateNotice() {
       mounted = false;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [enabled]);
   async function check() {
     setBusy(true);
     setError(false);
@@ -36,6 +47,10 @@ export function UpdateNotice() {
       setBusy(false);
     }
   }
+  return { status, busy, error, check };
+}
+
+export function UpdateNotice({ status, busy, error, check }: UpdateCheck) {
   return (
     <aside className="update-notice" aria-label="Application releases">
       <div role="status">
