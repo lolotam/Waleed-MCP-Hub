@@ -86,7 +86,11 @@ await access(join(root, 'apps/web/dist/index.html'));
 if (mode === 'open') await findBrowser();
 // A dedicated Edge profile isolates the app window from any already-running
 // Edge instance on the default profile, which can swallow --app launches.
-const edgeProfile = join(directory, 'edge-profile');
+// The folder name changed when extensions and sync were switched off. An Edge
+// process still running on the old `edge-profile` folder was started without
+// those switches, and Edge hands a new launch on the same folder to that
+// process. A new folder gets a new Edge process, and it starts empty.
+const edgeProfile = join(directory, 'edge-app-profile');
 async function openEdgeWindow(url) {
   const executable = await findBrowser();
   const app = spawn(executable, edgeAppArguments(edgeProfile, url), {

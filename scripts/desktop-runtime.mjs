@@ -138,6 +138,8 @@ export async function startDesktop({
   handoffDeadline = 0,
   attach = false,
   busyRetryMs = BUSY_RETRY_MS,
+  // Set by this function when it starts over inside a busy wait.
+  busyDeadline = 0,
 }) {
   const runtime = resolve(directory);
   const rootId = createHash('sha256')
@@ -277,7 +279,11 @@ export async function startDesktop({
         let acknowledged = false,
           busy = false,
           replace = false;
-        client.setTimeout(15000, () => {
+        // Inside a busy wait a request may not outlast what is left of it.
+        const replyTimeout = busyDeadline
+          ? Math.max(1000, Math.min(15000, busyDeadline - Date.now()))
+          : 15000;
+        client.setTimeout(replyTimeout, () => {
           client.destroy();
           reject(new Error('Desktop control timed out.'));
         });
@@ -300,9 +306,13 @@ export async function startDesktop({
         });
         client.once('error', (error) =>
           reject(
-            new Error('Existing desktop unavailable; no process was stopped.', {
-              cause: error,
-            }),
+            Object.assign(
+              new Error(
+                'Existing desktop unavailable; no process was stopped.',
+                { cause: error },
+              ),
+              { unavailable: true },
+            ),
           ),
         );
         client.once('close', () => {
@@ -339,8 +349,15 @@ export async function startDesktop({
       // A manager that is still starting or closing settles within seconds.
       // Start over after a short wait: the pipe is either free by then, or
       // its owner can answer the request. The wait is bounded.
-      if (error?.busy && busyRetryMs > 0) {
-        const step = Math.min(BUSY_RETRY_STEP_MS, busyRetryMs);
+      // The first busy answer sets one deadline for the whole wait, so time
+      // spent binding and waiting for replies counts too. Inside that window a
+      // pipe that vanished between the bind and the request is retried as
+      // well: that is the old manager finishing its shutdown.
+      const retryUntil =
+        busyDeadline || (error?.busy ? Date.now() + busyRetryMs : 0);
+      const retryable = error?.busy || (busyDeadline && error?.unavailable);
+      if (retryable && Date.now() < retryUntil) {
+        const step = Math.min(BUSY_RETRY_STEP_MS, retryUntil - Date.now());
         await new Promise((resolveRetry) => setTimeout(resolveRetry, step));
         return startDesktop({
           root,
@@ -350,7 +367,8 @@ export async function startDesktop({
           log,
           environment,
           attach,
-          busyRetryMs: busyRetryMs - step,
+          busyRetryMs,
+          busyDeadline: retryUntil,
         });
       }
       if (!error?.legacyClose) throw error;
@@ -372,6 +390,8 @@ export async function startDesktop({
         environment,
         handoffDeadline: Date.now() + 3000,
         attach,
+        busyRetryMs,
+        busyDeadline,
       });
     }
     if (attach) {

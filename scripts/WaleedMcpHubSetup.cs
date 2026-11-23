@@ -136,18 +136,24 @@ namespace WaleedMcpHub
             }
         }
 
-        // The launchers of this installation root that are running now. A
-        // process whose path cannot be read belongs to someone else and is
-        // left alone.
+        // The launchers of this installation root that run in this Windows
+        // session now. A process in another session, or one whose path cannot
+        // be read, belongs to someone else and is left alone. Each returned
+        // process has its handle open: Windows does not reuse a process id
+        // while a handle to it is open, so the id still names the launcher
+        // that was checked here when it is stopped later.
         private static List<Process> RunningLaunchers(string root)
         {
             List<Process> found = new List<Process>();
             string prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            int session;
+            using (Process self = Process.GetCurrentProcess()) session = self.SessionId;
             foreach (Process process in Process.GetProcessesByName("WaleedMcpHub"))
             {
                 try
                 {
-                    if (process.MainModule.FileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { found.Add(process); continue; }
+                    if (process.SessionId == session && process.Handle != IntPtr.Zero && !process.HasExited
+                        && process.MainModule.FileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { found.Add(process); continue; }
                 }
                 catch (System.ComponentModel.Win32Exception) { }
                 catch (InvalidOperationException) { }
@@ -163,37 +169,58 @@ namespace WaleedMcpHub
             return launchers.Count;
         }
 
-        private static void RunHidden(string file, string arguments, int timeoutMilliseconds)
+        // Returns the exit code, or -1 when the program did not end in time.
+        private static int RunHidden(string file, string arguments, int timeoutMilliseconds)
         {
             ProcessStartInfo start = new ProcessStartInfo(file, arguments) { UseShellExecute = false, CreateNoWindow = true };
             using (Process process = Process.Start(start))
             {
-                if (process.WaitForExit(timeoutMilliseconds)) return;
+                if (process.WaitForExit(timeoutMilliseconds)) return process.ExitCode;
                 try { process.Kill(); }
                 catch (InvalidOperationException) { }
                 catch (System.ComponentModel.Win32Exception) { }
+                return -1;
             }
         }
 
         // The owner asked for an update to close the running hub by itself.
-        // The hub is asked to quit first, the way its tray menu does. A launcher
-        // of this installation root that is still running after the wait is
+        // The hub is asked to quit first, the way its tray menu does. The
+        // request goes to the manager that owns this user's control pipe, the
+        // one the new version would take over when it opens. A launcher of
+        // this installation root that is still running after the wait is
         // stopped together with the manager and backend it started. Agent
         // bridges are started by the agents, not by a launcher, and keep running.
         private static void CloseRunningHub(string root, string installed)
         {
             if (CountRunningLaunchers(root) == 0) return;
-            try
-            {
-                RunHidden(Path.Combine(installed, "runtime", "node.exe"), "\"" + Path.Combine(installed, "scripts", "desktop.mjs") + "\" --quit", 10000);
-            }
-            catch (System.ComponentModel.Win32Exception) { }
+            string node = Path.Combine(installed, "runtime", "node.exe");
+            string quit = "\"" + Path.Combine(installed, "scripts", "desktop.mjs") + "\" --quit";
             DateTime deadline = DateTime.UtcNow.AddSeconds(20);
-            while (DateTime.UtcNow < deadline && CountRunningLaunchers(root) > 0) Thread.Sleep(250);
+            bool asking = true;
+            while (DateTime.UtcNow < deadline && CountRunningLaunchers(root) > 0)
+            {
+                if (asking)
+                {
+                    // 3: no manager listens yet (the hub is still starting);
+                    // 4: it is busy. Both are asked again. Anything else is
+                    // final: it is quitting, or it cannot be asked.
+                    int code;
+                    try { code = RunHidden(node, quit, 10000); }
+                    catch (System.ComponentModel.Win32Exception) { code = 1; }
+                    asking = code == 3 || code == 4;
+                }
+                Thread.Sleep(500);
+            }
             string taskkill = Path.Combine(Environment.SystemDirectory, "taskkill.exe");
             foreach (Process launcher in RunningLaunchers(root))
                 using (launcher)
                     RunHidden(taskkill, "/PID " + launcher.Id + " /T /F", 10000);
+            // Starting the new version over a hub that would not stop only
+            // moves the failure; say so instead.
+            DateTime stopped = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < stopped && CountRunningLaunchers(root) > 0) Thread.Sleep(250);
+            if (CountRunningLaunchers(root) > 0)
+                throw new IOException("The new version is installed, but the running Waleed MCP Hub could not be closed. Quit it from its tray icon, then open Waleed MCP Hub again.");
         }
 
         private static void Shortcut(string directory, string executable, string installationRoot)
