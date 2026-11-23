@@ -1401,6 +1401,27 @@ dialog h2 {
   font-size: 22px;
   margin-block-end: 10px;
 }
+/* The two Add forms are pages, not dialogs: one panel of form-only width. */
+.import-dialog.add-page {
+  width: 100%;
+  max-width: 840px;
+  max-height: none;
+  padding: 28px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.add-page h2 {
+  font-size: 22px;
+  margin-block-end: 10px;
+}
+@media (max-width: 600px) {
+  .import-dialog.add-page {
+    width: 100%;
+    padding: 16px;
+  }
+}
 .dialog-header {
   display: flex;
   justify-content: space-between;

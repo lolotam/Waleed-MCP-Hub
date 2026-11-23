@@ -329,7 +329,7 @@ test('the managed npm flow installs a reviewed package and never approves it', a
     ).toBe(true);
     expect(
       await page
-        .locator('dialog')
+        .getByTestId('add-manual-page')
         .evaluate((element) => element.scrollWidth <= element.clientWidth),
     ).toBe(true);
   }
@@ -353,7 +353,9 @@ test('the managed npm flow installs a reviewed package and never approves it', a
   // The submitted value is gone from the page once the install settles.
   expect(await page.content()).not.toContain('debug');
   expect(Object.keys(state.installBody ?? {})).not.toContain('package');
-  expect(await page.locator('dialog').innerText()).not.toContain('npmrc');
+  expect(await page.getByTestId('add-manual-page').innerText()).not.toContain(
+    'npmrc',
+  );
   await page.screenshot({
     path: 'test-results/package-installed.png',
     fullPage: true,
@@ -611,7 +613,9 @@ test('a failed list reload adds the stale-list sentence', async ({ page }) => {
   await page.goto(await launch());
   await fakePackageApi(page, { loseStart: true, failReload: true });
   await installDemo(page);
-  await expect(page.getByRole('dialog').getByRole('alert')).toContainText(
+  await expect(
+    page.getByTestId('add-manual-page').getByRole('alert'),
+  ).toContainText(
     'The connector list could not be reloaded; reload the page to see it.',
   );
 });

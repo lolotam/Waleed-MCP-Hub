@@ -137,6 +137,13 @@ function downloadPart(name: string, text: string) {
   }, 0);
 }
 
+// The place of one pill under Add.
+const addPlace = (pill: string): Place => ({
+  entry: 'connectors',
+  tab: 'add',
+  pill,
+});
+
 export function App() {
   // The place is held in the address, so a reload and the Back button stay on
   // the page. It is read here, not at module load, so the launch token has
@@ -167,8 +174,6 @@ export function App() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
-  const [manual, setManual] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [packageSeed, setPackageSeed] = useState<PackageSeed | null>(null);
   // The result of the last export of the registry.
   const [exportStatus, setExportStatus] = useState<string>('');
@@ -282,9 +287,14 @@ export function App() {
   }, [bootstrap, place]);
   // A move to another place is a new history entry.
   const go = useCallback((next: Place) => {
-    if (!samePlace(parsePlace(window.location.hash), next))
-      window.location.hash = formatPlace(next);
+    if (samePlace(parsePlace(window.location.hash), next)) return;
+    window.location.hash = formatPlace(next);
+    // Do not wait for hashchange: a dialog opened in the same step must find
+    // the page already changed.
+    setPlace(next);
   }, []);
+  // The Add pages close to the list of connectors.
+  const closeAdd = () => go({ entry: 'connectors', tab: 'all' });
   const entry = entryOf(place.entry);
   const page = entry.label;
   const capabilities = bootstrap?.capabilities ?? null;
@@ -480,7 +490,7 @@ export function App() {
                   <button
                     type="button"
                     disabled={loading || !!error || recoveryBlocked}
-                    onClick={() => setManual(true)}
+                    onClick={() => go(addPlace('manual'))}
                   >
                     <Icon name="upload" size={16} />
                     Add Manual MCP
@@ -500,7 +510,7 @@ export function App() {
                     type="button"
                     className="primary"
                     disabled={loading || !!error}
-                    onClick={() => setImporting(true)}
+                    onClick={() => go(addPlace('import'))}
                     aria-describedby="add-help"
                   >
                     <Icon name="plus" size={18} />
@@ -568,7 +578,7 @@ export function App() {
                 <AgentCloning
                   disabled={loading || !!error || recoveryBlocked}
                   refresh={refresh}
-                  openManual={() => setManual(true)}
+                  openManual={() => go(addPlace('manual'))}
                 />
               </div>
             )}
@@ -1088,6 +1098,63 @@ export function App() {
                 )}
               </>
             )}
+            {/* The Add pages are not dialogs: only the page of the open pill is
+                rendered, and leaving it discards its form. */}
+            {onAdd && place.pill === 'import' && bootstrap && (
+              <ImportDialog
+                revision={bootstrap.revision}
+                close={closeAdd}
+                refresh={refresh}
+                savePreview={(preview, definitions) => {
+                  closeAdd();
+                  setOperation({
+                    title: 'Save connector definitions locally',
+                    operation: { kind: 'create_connectors', definitions },
+                    context: definitions,
+                    initialPreview: preview,
+                  });
+                }}
+                installBlocked={recoveryBlocked}
+                installProposal={(proposal: PackageProposal) => {
+                  // The import page stays open: the package is installed in its own,
+                  // separate review step.
+                  const version = proposal.version ?? proposal.requestedVersion;
+                  setPackageSeed({
+                    mode: 'install',
+                    name: proposal.name,
+                    ...(version ? { version } : {}),
+                    arguments: proposal.arguments,
+                    envNames: proposal.envNames,
+                    // The metadata of the imported connector travels with the
+                    // install, so the connector keeps its name, identifier,
+                    // description, enabled flag and literals.
+                    ...(proposal.connectorName
+                      ? { connectorName: proposal.connectorName }
+                      : {}),
+                    ...(proposal.connectorId
+                      ? { connectorId: proposal.connectorId }
+                      : {}),
+                    ...(proposal.description !== undefined
+                      ? { description: proposal.description }
+                      : {}),
+                    ...(proposal.entry ? { entry: proposal.entry } : {}),
+                    ...(proposal.enabled !== undefined
+                      ? { enabled: proposal.enabled }
+                      : {}),
+                    ...(proposal.environmentLiterals
+                      ? { environmentLiterals: proposal.environmentLiterals }
+                      : {}),
+                  });
+                }}
+              />
+            )}
+            {onAdd && place.pill === 'manual' && bootstrap && (
+              <ManualMcpDialog
+                revision={bootstrap.revision}
+                close={closeAdd}
+                refresh={refresh}
+              />
+            )}
           </TabPanel>
           <footer className="workspace-footer">
             <span>
@@ -1107,54 +1174,6 @@ export function App() {
           revision={bootstrap.revision}
           close={() => setCreating(false)}
           saved={refresh}
-        />
-      )}
-      {importing && bootstrap && (
-        <ImportDialog
-          revision={bootstrap.revision}
-          close={() => setImporting(false)}
-          refresh={refresh}
-          savePreview={(preview, definitions) => {
-            setImporting(false);
-            setOperation({
-              title: 'Save connector definitions locally',
-              operation: { kind: 'create_connectors', definitions },
-              context: definitions,
-              initialPreview: preview,
-            });
-          }}
-          installBlocked={recoveryBlocked}
-          installProposal={(proposal: PackageProposal) => {
-            // The import stays open: the package is installed in its own,
-            // separate review step.
-            const version = proposal.version ?? proposal.requestedVersion;
-            setPackageSeed({
-              mode: 'install',
-              name: proposal.name,
-              ...(version ? { version } : {}),
-              arguments: proposal.arguments,
-              envNames: proposal.envNames,
-              // The metadata of the imported connector travels with the
-              // install, so the connector keeps its name, identifier,
-              // description, enabled flag and literals.
-              ...(proposal.connectorName
-                ? { connectorName: proposal.connectorName }
-                : {}),
-              ...(proposal.connectorId
-                ? { connectorId: proposal.connectorId }
-                : {}),
-              ...(proposal.description !== undefined
-                ? { description: proposal.description }
-                : {}),
-              ...(proposal.entry ? { entry: proposal.entry } : {}),
-              ...(proposal.enabled !== undefined
-                ? { enabled: proposal.enabled }
-                : {}),
-              ...(proposal.environmentLiterals
-                ? { environmentLiterals: proposal.environmentLiterals }
-                : {}),
-            });
-          }}
         />
       )}
       {packageSeed && (
@@ -1177,13 +1196,6 @@ export function App() {
           connector={authentication}
           revision={bootstrap.revision}
           close={() => setAuthentication(null)}
-          refresh={refresh}
-        />
-      )}
-      {manual && bootstrap && (
-        <ManualMcpDialog
-          revision={bootstrap.revision}
-          close={() => setManual(false)}
           refresh={refresh}
         />
       )}

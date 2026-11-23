@@ -24,8 +24,7 @@ export function ManualMcpDialog({
   close: () => void;
   refresh: () => Promise<boolean>;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null),
-    form = useRef<HTMLFormElement>(null),
+  const form = useRef<HTMLFormElement>(null),
     env = useRef<HTMLTextAreaElement>(null),
     headers = useRef<HTMLTextAreaElement>(null);
   const [type, setType] = useState<
@@ -42,7 +41,8 @@ export function ManualMcpDialog({
   };
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    dialog.current?.showModal();
+    // Opening the page puts the focus in its form, as the dialog did.
+    form.current?.querySelector<HTMLElement>('input, select')?.focus();
     return () => {
       clear();
       previous?.focus();
@@ -159,13 +159,14 @@ export function ManualMcpDialog({
     </>
   );
   return (
-    <dialog
-      ref={dialog}
-      className="import-dialog manual-dialog"
+    <section
+      className="import-dialog manual-dialog add-page"
       aria-labelledby="manual-title"
-      onCancel={(event) => {
-        event.preventDefault();
-        if (!busy && !packageRunning) {
+      data-testid="add-manual-page"
+      onKeyDown={(event) => {
+        // A page has no cancel event; Escape still closes it.
+        if (event.key === 'Escape' && !busy && !packageRunning) {
+          event.preventDefault();
           clear();
           close();
         }
@@ -186,7 +187,7 @@ export function ManualMcpDialog({
           <button
             type="button"
             className="icon-button"
-            aria-label="Close manual MCP dialog"
+            aria-label="Close manual MCP page"
             disabled={busy || packageRunning}
             onClick={() => {
               clear();
@@ -355,6 +356,6 @@ export function ManualMcpDialog({
           )}
         </footer>
       </form>
-    </dialog>
+    </section>
   );
 }

@@ -275,3 +275,45 @@ test('Settings has a Recovery tab and Activity has one tab per log', async ({
     page.getByRole('heading', { name: 'Registry activity', exact: true }),
   ).toHaveCount(0);
 });
+
+test('the Add pages are pages: the header buttons open them and only the open one is rendered', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await page
+    .getByRole('button', { name: 'Add connector', exact: true })
+    .click();
+  expect(await hash(page)).toBe('#/connectors/add/import');
+  const importPage = page.getByTestId('add-import-page');
+  const manualPage = page.getByTestId('add-manual-page');
+  await expect(importPage).toBeVisible();
+  // A page, not a modal: nothing is a dialog and the sidebar is still usable.
+  await expect(page.locator('dialog')).toHaveCount(0);
+  // The three input formats are the only radios on the page.
+  await expect(page.getByRole('radio')).toHaveCount(3);
+  await expect(
+    page.getByLabel('Configuration JSON', { exact: true }),
+  ).toBeFocused();
+
+  await page.getByRole('link', { name: 'Manual MCP', exact: true }).click();
+  expect(await hash(page)).toBe('#/connectors/add/manual');
+  await expect(manualPage).toBeVisible();
+  await expect(importPage).toHaveCount(0);
+  await expect(page.getByRole('radio')).toHaveCount(0);
+
+  // The list of connectors stays mounted behind the Add tab but is not shown.
+  await expect(page.locator('#connector-list-title')).toBeHidden();
+  await manualPage.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(await hash(page)).toBe('#/connectors');
+  await expect(manualPage).toHaveCount(0);
+  await expect(page.locator('#connector-list-title')).toBeVisible();
+
+  await page
+    .getByRole('button', { name: 'Add Manual MCP', exact: true })
+    .click();
+  expect(await hash(page)).toBe('#/connectors/add/manual');
+  await expect(manualPage).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(manualPage).toHaveCount(0);
+  expect(await hash(page)).toBe('#/connectors');
+});

@@ -56,7 +56,6 @@ export function ImportDialog({
   installProposal: (proposal: PackageProposal) => void;
   installBlocked: boolean;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
@@ -71,7 +70,6 @@ export function ImportDialog({
   useEffect(() => {
     mounted.current = true;
     const previous = document.activeElement as HTMLElement | null;
-    dialog.current?.showModal();
     form.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
     return () => {
       mounted.current = false;
@@ -285,13 +283,16 @@ export function ImportDialog({
     .map((entry) => entry.packageProposal)
     .filter((proposal): proposal is PackageProposal => !!proposal);
   return (
-    <dialog
-      ref={dialog}
-      className="import-dialog"
+    <section
+      className="import-dialog add-page"
       aria-labelledby="import-title"
-      onCancel={(event) => {
-        event.preventDefault();
-        if (!busy) void discard();
+      data-testid="add-import-page"
+      onKeyDown={(event) => {
+        // A page has no cancel event; Escape still discards the draft.
+        if (event.key === 'Escape' && !busy) {
+          event.preventDefault();
+          void discard();
+        }
       }}
     >
       <form
@@ -306,7 +307,7 @@ export function ImportDialog({
           <button
             className="icon-button"
             type="button"
-            aria-label="Close import dialog"
+            aria-label="Close import page"
             disabled={busy}
             onClick={() => {
               void discard();
@@ -768,6 +769,6 @@ export function ImportDialog({
           )}
         </footer>
       </form>
-    </dialog>
+    </section>
   );
 }

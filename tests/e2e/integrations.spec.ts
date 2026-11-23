@@ -84,7 +84,7 @@ test('scan, integrate, manual save/auto-sync and scoped disconnect preserve othe
   await page
     .getByRole('button', { name: 'Add Manual MCP', exact: true })
     .click();
-  const dialog = page.getByRole('dialog');
+  const manual = page.getByTestId('add-manual-page');
   await page
     .getByLabel('MCP name', { exact: true })
     .fill('Manual browser remote');
@@ -92,7 +92,7 @@ test('scan, integrate, manual save/auto-sync and scoped disconnect preserve othe
     .getByLabel('Arguments (JSON array, no shell expansion)', { exact: true })
     .fill('{}');
   await expect(
-    dialog.getByRole('button', { name: 'Save MCP', exact: true }),
+    manual.getByRole('button', { name: 'Save MCP', exact: true }),
   ).toBeDisabled();
   await page
     .getByLabel('Arguments (JSON array, no shell expansion)', { exact: true })
@@ -107,15 +107,15 @@ test('scan, integrate, manual save/auto-sync and scoped disconnect preserve othe
     .getByLabel('Protected headers (write-only JSON)', { exact: true })
     .fill('{"Authorization":"SYNTHETIC browser manual private"}');
   await page.getByRole('button', { name: 'Save MCP', exact: true }).click();
-  await expect(dialog.getByText(/MCP definition saved/)).toBeVisible();
-  expect(await dialog.textContent()).not.toContain(
+  await expect(manual.getByText(/MCP definition saved/)).toBeVisible();
+  expect(await manual.textContent()).not.toContain(
     'SYNTHETIC browser manual private',
   );
   await page.screenshot({
     path: 'test-results/p8-manual-saved.png',
     fullPage: true,
   });
-  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await manual.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(
     page.getByText('Manual browser remote', { exact: true }),
   ).toBeVisible();
