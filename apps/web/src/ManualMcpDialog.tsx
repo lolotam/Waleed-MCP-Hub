@@ -74,6 +74,10 @@ export function ManualMcpDialog({
       if (document.activeElement === document.body) previous?.focus();
     };
   }, [hold]);
+  // A page whose save or install has started keeps the controls of that
+  // flow, such as checking a job again, when changes become blocked.
+  const [started, setStarted] = useState(false);
+  if ((busy || packageRunning) && !started) setStarted(true);
   // Leaving mid-request or mid-install would drop the outcome.
   useEffect(() => hold(busy || packageRunning), [busy, packageRunning, hold]);
   function validate() {
@@ -236,11 +240,8 @@ export function ManualMcpDialog({
             {blocked}
           </p>
         )}
-        {/* A running request or install keeps its own controls. */}
-        <fieldset
-          className="form-hold"
-          disabled={!!blocked && !busy && !packageRunning}
-        >
+        {/* A flow that has started keeps its own controls. */}
+        <fieldset className="form-hold" disabled={!!blocked && !started}>
           {notice ? (
             <p role="status" className="notice">
               {notice}
