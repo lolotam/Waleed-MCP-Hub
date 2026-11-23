@@ -120,7 +120,9 @@ describe.skipIf(process.platform !== 'win32')(
       // The bind retries take three seconds, so the third request falls
       // inside the six-second wait. If the wait were lost across the bind
       // retries, the silent close would be answered with the legacy open.
-      await expect(open(directory, 6000)).rejects.toThrow();
+      await expect(open(directory, 6000)).rejects.toThrow(
+        'The previous hub backend stopped',
+      );
       expect(requests.length).toBeGreaterThanOrEqual(3);
       expect(requests).not.toContain('open\n');
     }, 20000);
@@ -142,7 +144,7 @@ describe.skipIf(process.platform !== 'win32')(
       // The handoff was acknowledged, so the old backend has stopped and
       // the message must not claim that nothing was stopped.
       await expect(open(directory, 2000)).rejects.toThrow(
-        'The previous desktop manager stopped, but this installation could not take over its control pipe.',
+        'The previous hub backend stopped, but this installation could not take over the control pipe.',
       );
       expect(requests).toHaveLength(2);
     }, 20000);

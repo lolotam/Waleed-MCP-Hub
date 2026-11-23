@@ -140,6 +140,10 @@ export async function startDesktop({
   busyRetryMs = BUSY_RETRY_MS,
   // Set by this function when it starts over inside a busy wait.
   busyDeadline = 0,
+  // Set by this function once the old manager acknowledged a handoff. The
+  // acknowledgement is sent when its backend has stopped; the manager may
+  // still hold the control pipe.
+  backendStopped = false,
 }) {
   const runtime = resolve(directory);
   const rootId = createHash('sha256')
@@ -274,17 +278,27 @@ export async function startDesktop({
         // as a legacy manager and a later busy answer would start a new wait.
         busyRetryMs,
         busyDeadline,
+        backendStopped,
       });
     }
     // The pipe is still taken and the busy wait is over: stop here instead
     // of opening one more negotiation.
     // A handoff deadline means the old manager acknowledged the handoff and
     // stopped its backend, so "no process was stopped" would be false here.
+    // After an acknowledged handoff every failure says what is known: the
+    // old backend stopped and the takeover did not complete.
+    const fail = (error) =>
+      backendStopped
+        ? new Error(
+            'The previous hub backend stopped, but this installation could not take over the control pipe. Open Waleed MCP Hub again.',
+            { cause: error },
+          )
+        : error;
     if (busyDeadline && Date.now() >= busyDeadline)
-      throw new Error(
-        handoffDeadline
-          ? 'The previous desktop manager stopped, but this installation could not take over its control pipe. Open Waleed MCP Hub again.'
-          : 'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+      throw fail(
+        new Error(
+          'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+        ),
       );
     const requestOwner = (request) =>
       new Promise((resolveClient, reject) => {
@@ -379,7 +393,7 @@ export async function startDesktop({
         await new Promise((resolveRetry) => setTimeout(resolveRetry, step));
         // A timer can fire late (a sleeping machine); no attempt starts
         // once the deadline has passed.
-        if (Date.now() >= retryUntil) throw error;
+        if (Date.now() >= retryUntil) throw fail(error);
         return startDesktop({
           root,
           directory,
@@ -390,11 +404,12 @@ export async function startDesktop({
           attach,
           busyRetryMs,
           busyDeadline: retryUntil,
+          backendStopped,
         });
       }
       // A manager that answered busy speaks the current protocol, so a silent
       // close after that is never a legacy manager and gets no legacy open.
-      if (!error?.legacyClose || busyDeadline) throw error;
+      if (!error?.legacyClose || busyDeadline) throw fail(error);
       // Reopen that verified protocol without killing it or deleting its
       // locks; Settings can stop it safely.
       handedOff = await requestOwner('open\n');
@@ -415,6 +430,7 @@ export async function startDesktop({
         attach,
         busyRetryMs,
         busyDeadline,
+        backendStopped: true,
       });
     }
     if (attach) {
