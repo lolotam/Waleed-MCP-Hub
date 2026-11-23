@@ -4,8 +4,11 @@ Spec: `docs/specs/F05-ui-restructure.md` (draft v2) · Branch:
 `claude/waleed-ui-restructure-5d53cd`
 
 Steps 0, 1 and 2 are implemented (pull request #42); steps 3 to 9 have not
-started. Not yet verified for steps 1 and 2: every page looked at in dark mode
-by eye. The spec's six questions were answered on
+started. For steps 1 and 2 the five pages and the Add connector dialog were
+looked at in dark mode on 2026-11-23, in screenshots of the running app at
+1440 px with no connectors or profiles saved; no dark-only defect was found.
+Not looked at in dark mode: the other five dialogs, and the connector, profile
+and activity lists with entries in them. The spec's six questions were answered on
 2026-11-23; where the "Depends on" column names a question, the step follows
 that answer in the spec's "Answered questions" section.
 

@@ -114,6 +114,16 @@ describe('theme choice', () => {
     );
   });
 
+  it('loads the early script in the head as a blocking classic script', () => {
+    const page = readFileSync('apps/web/index.html', 'utf8');
+    const head = page.slice(0, page.indexOf('</head>'));
+    // No async, defer or type=module: the parser waits for it.
+    expect(head).toContain('<script src="/theme-init.js"></script>');
+    expect(head.lastIndexOf('name="theme-color"')).toBeLessThan(
+      head.indexOf('/theme-init.js'),
+    );
+  });
+
   it('does not throw when the storage throws, and still applies', () => {
     const root = fakeRoot();
     expect(readTheme(throwingStorage)).toBe('system');
