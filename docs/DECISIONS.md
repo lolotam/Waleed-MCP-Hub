@@ -961,3 +961,32 @@ The hub writes nothing into the agents' own folders.
 When an investigation changes a baseline, append a dated decision with evidence,
 consequences, and the affected specification/plan sections. Do not silently mutate
 scope in source code alone.
+
+## Owner delivery tiers — 2026-11-19 (adopted 2026-11-20)
+
+Waleed's verbatim instruction, forwarded by the PosPay manager:
+
+> ابعت بقي ملفات وخطة ال3 pip lines دي لكل المديرين علشان يسجلوها وينفزوها كقاعدة عنهم في كل الشغل ويعملولها merg علطول بدون مراجعة light task كاضافة وثائق في ملفات المشاريع cladue.md file and agent file
+
+Adopt the Delivery tiers (Light / Medium / Heavy Implementation Pipeline) in
+[AGENTS.md](../AGENTS.md) and [CLAUDE.md](../CLAUDE.md), reference PosPay PP-195 /
+lolotam/PayPos.systems#1085. The initial change is owner-selected Light,
+docs-only, no additional exception, immediate merge after exact-head CI without
+bot-review waiting. Future tasks require the Arabic three-option tier/exception
+card first; running-task fix rounds do not. Medium is capped at three review
+rounds; Heavy retains explicit final owner approval for migration, money and
+permissions/auth PRs. Existing hard gates and explicit HOLDs remain.
+
+Actual callable lane mappings were inspected through T3 capabilities; required
+Fable5.2/Astra6.2 planning lanes exist. Kimi/MiniMax/OpenCode GLM/Grok/Claude
+Sonnet preserve the specified fallback order; metadata does not prove quota or
+approve spending. No delegate/model switch or paid service was started for this
+Light manager-authored task. Cursor's paid-plan block is retained, not bypassed.
+
+Conflict disposition: the newer explicit Light instruction replaces routine
+bot-review waiting for this qualifying docs change. It does not disable required
+checks/repository protection. Owner continuation resumes only this isolated docs
+adoption after the project freeze, not other frozen/held execution. Main's normal
+CI+Security automatic new Windows release remains unchanged; no manual release,
+staging, install, runtime or connector operation is included. Existing dirty
+shared-checkout source/docs and KEEP assets remain outside this PR untouched.
