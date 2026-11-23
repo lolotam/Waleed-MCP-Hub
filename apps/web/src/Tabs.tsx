@@ -57,6 +57,7 @@ export function TabRow({
               className="tab"
               aria-selected={selected}
               aria-controls={TAB_PANEL_ID}
+              aria-disabled={held || undefined}
               tabIndex={selected ? 0 : -1}
               onClick={() => open(tab.id)}
               onKeyDown={(event) => onKeyDown(event, index)}
@@ -98,6 +99,7 @@ export function PillRow({
             if (held) event.preventDefault();
           }}
           aria-current={pill.id === current ? 'true' : undefined}
+          aria-disabled={held || undefined}
         >
           <Icon name={pill.icon} size={14} />
           {pill.label}

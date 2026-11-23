@@ -372,7 +372,8 @@ export function App() {
   // While the hub has not answered, every tab is shown. Once it has, a place
   // that a capability hides moves to its first visible sibling, in place.
   useEffect(() => {
-    if (!bootstrap) return;
+    // A held page stays: the address may be mid-way through a refused move.
+    if (!bootstrap || holding.current) return;
     // Read from the address, not from the state: a pill that was just
     // followed has changed the address, and its hashchange may still be
     // queued.
