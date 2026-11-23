@@ -201,6 +201,9 @@ test('secure bootstrap, honest empty state, keyboard profile preview/apply, relo
   expect(refused.status()).toBe(403);
   await page.getByRole('button', { name: 'Activity', exact: true }).click();
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await page
+    .getByRole('tab', { name: 'Security refusals', exact: true })
+    .click();
   await expect(
     page.getByRole('heading', { name: 'Security refusals', exact: true }),
   ).toBeVisible();

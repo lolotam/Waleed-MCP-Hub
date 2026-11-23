@@ -34,6 +34,12 @@ import { ProfileDialog } from './ProfileDialog.js';
 import { DiscoveryPanel } from './DiscoveryPanel.js';
 import { AgentCloning } from './AgentCloning.js';
 import { UpdateNotice } from './UpdateNotice.js';
+import { ActivityPage } from './ActivityPage.js';
+import {
+  AppearancePanel,
+  RecoveryStatus,
+  RuntimeSettings,
+} from './SettingsPage.js';
 import { ImportDialog } from './ImportDialog.js';
 import {
   OperationDialog,
@@ -50,12 +56,7 @@ import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
 import { ManualMcpDialog } from './ManualMcpDialog.js';
 import { PackageDialog, type PackageSeed } from './PackageInstall.js';
-import {
-  readTheme,
-  setTheme,
-  themeChoices,
-  type ThemeChoice,
-} from './theme.js';
+import { readTheme, setTheme, type ThemeChoice } from './theme.js';
 
 const agentNames: Record<string, string> = {
   opencode: 'OpenCode',
@@ -341,6 +342,18 @@ export function App() {
     }
   }
 
+  function chooseTheme(choice: ThemeChoice) {
+    setTheme(choice);
+    setThemeChoice(choice);
+  }
+  function stopDesktop() {
+    void api('/api/desktop/shutdown', {})
+      .then(() =>
+        setError('Desktop manager stopped. You can close this window.'),
+      )
+      .catch(() => setError('Shutdown could not be confirmed.'));
+  }
+
   return (
     <div className="app-shell">
       <a
@@ -531,24 +544,28 @@ export function App() {
               />
             )}
             {error ? (
-              <section className="error-panel" role="alert">
-                <h2>Unable to load this workspace</h2>
-                <p>{error}</p>
-                <button
-                  onClick={() => {
-                    void refresh();
-                  }}
-                >
-                  Retry
-                </button>
-              </section>
+              <>
+                <section className="error-panel" role="alert">
+                  <h2>Unable to load this workspace</h2>
+                  <p>{error}</p>
+                  <button
+                    onClick={() => {
+                      void refresh();
+                    }}
+                  >
+                    Retry
+                  </button>
+                </section>
+                {place.entry === 'settings' && place.tab === 'runtime' && (
+                  <AppearancePanel theme={theme} choose={chooseTheme} />
+                )}
+              </>
             ) : loading && !bootstrap ? (
               <div className="loading-state" role="status">
                 Opening your local workspace…
               </div>
             ) : (
               <>
-                {bootstrap?.capabilities.appUpdates && <UpdateNotice />}
                 {bootstrap?.capabilities.discovery && (
                   <DiscoveryPanel
                     snapshot={discovery}
@@ -994,202 +1011,27 @@ export function App() {
                     </section>
                   )}
                 {place.entry === 'activity' && (
-                  <>
-                    <section className="list-panel">
-                      <div className="list-toolbar">
-                        <h2>Registry activity</h2>
-                        <span className="muted">
-                          Last 200 successful local changes
-                        </span>
-                      </div>
-                      {activity.length === 0 ? (
-                        <div className="empty-state">
-                          <Icon name="activity" size={28} />
-                          <h2>No registry changes yet</h2>
-                          <p>
-                            Successful local profile changes will appear here.
-                            Refused requests are recorded separately below; no
-                            request payloads are stored.
-                          </p>
-                        </div>
-                      ) : (
-                        <ul className="activity-list single-line">
-                          {[...activity].reverse().map((event) => (
-                            <li key={event.id}>
-                              <Icon name="check" size={18} />
-                              <div className="row-main">
-                                <h3>{event.operation.replaceAll('_', ' ')}</h3>
-                                <span className="activity-meta">
-                                  Registry revision {event.priorRevision} →{' '}
-                                  {event.newRevision}
-                                </span>
-                              </div>
-                              <time dateTime={event.time}>
-                                {new Date(event.time).toLocaleString()}
-                              </time>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </section>
-                    <section
-                      className="list-panel safety-section"
-                      aria-labelledby="security-activity-title"
-                    >
-                      <div className="list-toolbar">
-                        <h2 id="security-activity-title">Security refusals</h2>
-                        <span className="muted">
-                          Latest 200 · metadata only
-                        </span>
-                      </div>
-                      {securityEvents.length === 0 ? (
-                        <div className="empty-state">
-                          <Icon name="shield" size={28} />
-                          <h2>No refused requests recorded</h2>
-                          <p>
-                            Denied origins, missing sessions, invalid inputs,
-                            and conflicts appear here without headers,
-                            credentials, or request bodies.
-                          </p>
-                        </div>
-                      ) : (
-                        <ul className="activity-list">
-                          {[...securityEvents].reverse().map((event) => (
-                            <li key={event.id}>
-                              <Icon name="shield" size={18} />
-                              <div className="row-main">
-                                <h3>{event.reason.replaceAll('_', ' ')}</h3>
-                                <p>
-                                  {event.method} ·{' '}
-                                  {event.route.replaceAll('_', ' ')} · HTTP{' '}
-                                  {event.status}
-                                </p>
-                              </div>
-                              <time dateTime={event.time}>
-                                {new Date(event.time).toLocaleString()}
-                              </time>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </section>
-                  </>
+                  <ActivityPage
+                    tab={place.tab}
+                    activity={activity}
+                    securityEvents={securityEvents}
+                  />
                 )}
-                {place.entry === 'settings' &&
-                  bootstrap?.capabilities.desktop && (
-                    <section className="list-panel integration-guidance">
-                      <h2>Windows desktop session</h2>
-                      <p>
-                        Closing the app window leaves the same-user manager
-                        running. Use this action to release its locks and shut
-                        down gracefully; independent agent bridges remain
-                        agent-owned.
-                      </p>
-                      <button
-                        onClick={() => {
-                          void api('/api/desktop/shutdown', {})
-                            .then(() =>
-                              setError(
-                                'Desktop manager stopped. You can close this window.',
-                              ),
-                            )
-                            .catch(() =>
-                              setError('Shutdown could not be confirmed.'),
-                            );
-                        }}
-                      >
-                        Stop desktop manager
-                      </button>
-                    </section>
-                  )}
-                {place.entry === 'settings' && (
-                  <section className="list-panel settings">
-                    <div className="list-toolbar">
-                      <h2>Runtime & safeguards</h2>
-                    </div>
-                    <dl>
-                      <div>
-                        <dt>Local server</dt>
-                        <dd>{window.location.origin}</dd>
-                      </div>
-                      <div>
-                        <dt>Node.js</dt>
-                        <dd>{bootstrap?.runtime.node}</dd>
-                      </div>
-                      <div>
-                        <dt>State storage</dt>
-                        <dd>Versioned JSON · atomic replacement · 5 backups</dd>
-                      </div>
-                      <div>
-                        <dt>Recovery journal</dt>
-                        <dd>
-                          {recoveryBlocked
-                            ? 'Review required · changes blocked'
-                            : 'No unresolved operations'}{' '}
-                          · external uncertainty blocks for review
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Refusal audit</dt>
-                        <dd>
-                          Persisted locally · latest 200 · no request payloads
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Authentication</dt>
-                        <dd>
-                          One-time launch · HttpOnly session · CSRF protection
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Docker discovery</dt>
-                        <dd>
-                          {discovery?.checkedAt
-                            ? `${discovery.docker.state} · CLI ${discovery.docker.cliVersion ?? 'unknown'} · gateway ${discovery.docker.gatewayVersion ?? 'unknown'} · engine ${discovery.docker.engineVersion ?? 'unknown'} · ${discovery.docker.reason.replaceAll('_', ' ')}`
-                            : 'Not scanned · only explicit read-only discovery runs Docker queries'}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Secret storage & OAuth</dt>
-                        <dd>
-                          {bootstrap?.capabilities.secrets
-                            ? 'Write-only protected credentials · supported OAuth recipes only · discovery required for verification'
-                            : 'Protected credential backend unavailable'}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Windows sign-in startup</dt>
-                        <dd>
-                          Managed by the tray icon · right-click the Waleed MCP
-                          Hub icon and use Start with Windows
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Appearance</dt>
-                        <dd>
-                          <div
-                            className="segmented"
-                            role="group"
-                            aria-label="Appearance"
-                          >
-                            {themeChoices.map((choice) => (
-                              <button
-                                key={choice.id}
-                                type="button"
-                                aria-pressed={theme === choice.id}
-                                onClick={() => {
-                                  setTheme(choice.id);
-                                  setThemeChoice(choice.id);
-                                }}
-                              >
-                                {choice.label}
-                              </button>
-                            ))}
-                          </div>
-                        </dd>
-                      </div>
-                    </dl>
-                  </section>
+                {place.entry === 'settings' && place.tab === 'runtime' && (
+                  <RuntimeSettings
+                    bootstrap={bootstrap}
+                    discovery={discovery}
+                    recoveryBlocked={recoveryBlocked}
+                    theme={theme}
+                    chooseTheme={chooseTheme}
+                    stopDesktop={stopDesktop}
+                  />
+                )}
+                {place.entry === 'settings' && place.tab === 'updates' && (
+                  <UpdateNotice />
+                )}
+                {place.entry === 'settings' && place.tab === 'recovery' && (
+                  <RecoveryStatus blocked={recoveryBlocked} />
                 )}
               </>
             )}

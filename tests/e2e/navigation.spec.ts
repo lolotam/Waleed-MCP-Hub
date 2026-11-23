@@ -236,3 +236,42 @@ test('an unknown address opens Connectors, and a hidden tab moves to its first v
   ).toBeVisible();
   await expect(current(page)).toContainText('Connectors');
 });
+
+test('Appearance can be changed while the hub fails to load', async ({
+  page,
+}) => {
+  const url = await launch();
+  await page.route('**/api/bootstrap', (route) => route.abort());
+  await page.goto(url.replace('#launch=', '#/settings/runtime&launch='));
+  await expect(
+    page.getByRole('heading', { name: 'Unable to load this workspace' }),
+  ).toBeVisible();
+  await page
+    .getByRole('group', { name: 'Appearance', exact: true })
+    .getByRole('button', { name: 'Dark', exact: true })
+    .click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
+test('Settings has a Recovery tab and Activity has one tab per log', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await side(page, 'Settings').click();
+  await page.getByRole('tab', { name: 'Recovery', exact: true }).click();
+  await expect(page.getByText('No unresolved operations')).toBeVisible();
+  await side(page, 'Activity').click();
+  await expect(
+    page.getByRole('heading', { name: 'Registry activity', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Security refusals', exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Security refusals' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Security refusals', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Registry activity', exact: true }),
+  ).toHaveCount(0);
+});

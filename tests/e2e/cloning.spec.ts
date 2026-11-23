@@ -47,6 +47,8 @@ test('first opening scans agents, clones only the selection with credentials and
   await expect(
     page.getByText('Codex · 1 MCPs · found', { exact: true }),
   ).toBeVisible();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Updates', exact: true }).click();
   await expect(
     page.getByText('Version 0.2.0 is available.', { exact: true }),
   ).toBeVisible();
@@ -59,6 +61,7 @@ test('first opening scans agents, clones only the selection with credentials and
   expect(await page.locator('body').innerText()).not.toContain(
     'SYNTHETIC_FIRST_RUN_COPY_TOKEN',
   );
+  await page.getByRole('button', { name: 'Connectors', exact: true }).click();
   await page
     .getByLabel('Copy primary from Claude Code', { exact: true })
     .check();
