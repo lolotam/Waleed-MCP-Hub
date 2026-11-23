@@ -314,11 +314,17 @@ export function App() {
       const next = parsePlace(window.location.hash);
       const landed = positionOf(window.history.state);
       if (undoing.current) {
+        // Only the entry the undo was sent to ends it. Another Back or
+        // Forward in between is sent there as well.
+        if (landed !== position.current) {
+          if (landed === null) window.history.back();
+          else window.history.go(position.current - landed);
+          return;
+        }
         undoing.current = false;
         const closed = closeAfterUndo.current;
         closeAfterUndo.current = null;
         if (closed) {
-          if (landed !== null) position.current = landed;
           push(closed);
           return;
         }
@@ -354,6 +360,7 @@ export function App() {
       const landed = positionOf(event.state);
       if (
         landed !== null &&
+        !undoing.current &&
         (!holding.current ||
           samePlace(parsePlace(window.location.hash), placeNow.current))
       )
@@ -394,8 +401,9 @@ export function App() {
   // While the hub has not answered, every tab is shown. Once it has, a place
   // that a capability hides moves to its first visible sibling, in place.
   useEffect(() => {
-    // A held page stays: the address may be mid-way through a refused move.
-    if (!bootstrap || holding.current) return;
+    // A held page stays: the address may be mid-way through a refused move,
+    // also for a moment after the page has closed.
+    if (!bootstrap || holding.current || undoing.current) return;
     // Read from the address, not from the state: a pill that was just
     // followed has changed the address, and its hashchange may still be
     // queued.
@@ -414,8 +422,10 @@ export function App() {
         show(next);
         return;
       }
-      if (samePlace(parsePlace(window.location.hash), next)) return;
-      push(next);
+      if (samePlace(placeNow.current, next)) return;
+      // A Back that already changed the address to this place, with its
+      // hashchange still queued, is the move: it needs no entry of its own.
+      if (!samePlace(parsePlace(window.location.hash), next)) push(next);
       show(next);
     },
     [show, push],
