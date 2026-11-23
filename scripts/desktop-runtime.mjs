@@ -278,9 +278,13 @@ export async function startDesktop({
     }
     // The pipe is still taken and the busy wait is over: stop here instead
     // of opening one more negotiation.
+    // A handoff deadline means the old manager acknowledged the handoff and
+    // stopped its backend, so "no process was stopped" would be false here.
     if (busyDeadline && Date.now() >= busyDeadline)
       throw new Error(
-        'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
+        handoffDeadline
+          ? 'The previous desktop manager stopped, but this installation could not take over its control pipe. Open Waleed MCP Hub again.'
+          : 'The existing desktop manager is closing or starting. Open this installation again in a moment. No process was stopped.',
       );
     const requestOwner = (request) =>
       new Promise((resolveClient, reject) => {

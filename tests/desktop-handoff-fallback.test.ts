@@ -139,8 +139,10 @@ describe.skipIf(process.platform !== 'win32')(
         },
       );
 
+      // The handoff was acknowledged, so the old backend has stopped and
+      // the message must not claim that nothing was stopped.
       await expect(open(directory, 2000)).rejects.toThrow(
-        'The existing desktop manager is closing or starting.',
+        'The previous desktop manager stopped, but this installation could not take over its control pipe.',
       );
       expect(requests).toHaveLength(2);
     }, 20000);
