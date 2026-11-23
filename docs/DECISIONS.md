@@ -931,6 +931,14 @@ The hub writes nothing into the agents' own folders.
 
 **Consequences.** This entry records the decision only. The navigation code lands in later F05 steps, and `docs/SPECIFICATION.md` is edited then.
 
+## D032 — Long lists are a split view: list on one side, the chosen entry on the other (2026-11-23)
+
+**Decision.** A list whose entries have content to open is drawn as a split view: a narrow list of names on one side and the chosen entry on the other. This applies to the connector list, "Copy MCPs from your agents", the import review and the tool list of a connector. It amends D030: the connector's five tabs are the detail side of the split view, not a separate page.
+
+**Why.** Every entry was drawn open, one under the other, so the Connectors page measured 5,594 px tall with 19 entries at 1440 px width. The owner compared three prototypes on 2026-11-23 and chose the split view.
+
+**Consequences.** This entry records the decision only; the code lands with F05 step 7 and a follow-up. The Activity logs and the Agents and Profiles lists are not covered. The number D031 is taken by the update-install decision in pull request #43.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint

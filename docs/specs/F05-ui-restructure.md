@@ -40,34 +40,34 @@ Read from `apps/web/src` on this branch.
 
 Answers given on 2026-11-23:
 
-| Question | Answer |
-| --- | --- |
-| Layout | A, sidebar with tabs |
-| Palette | Harbor: colours, fonts and corner radius |
-| Dark mode | Light and dark |
-| Fonts | Bundled files were allowed; Harbor needs none |
-| Devices | Desktop only |
-| Languages | English only |
-| Sizes and spacing | Unchanged from the app today |
+| Question          | Answer                                        |
+| ----------------- | --------------------------------------------- |
+| Layout            | A, sidebar with tabs                          |
+| Palette           | Harbor: colours, fonts and corner radius      |
+| Dark mode         | Light and dark                                |
+| Fonts             | Bundled files were allowed; Harbor needs none |
+| Devices           | Desktop only                                  |
+| Languages         | English only                                  |
+| Sizes and spacing | Unchanged from the app today                  |
 
 ## Target grouping
 
 Sidebar entries keep today's names and order.
 
-| Sidebar entry | Tab | Under the tab | Holds today's |
-| --- | --- | --- | --- |
-| Connectors | All connectors | Connector detail (five tabs) | Connector list; expanded row |
-| Connectors | Add | Paste or import | "Add connector" dialog |
-| Connectors | Add | Manual MCP | "Add Manual MCP" dialog |
-| Connectors | Add | From your agents | "Copy MCPs from your agents" panel |
-| Connectors | Add | Discover environment | "Environment discovery" panel |
-| Agents | (none) | | Agents page |
-| Profiles | (none) | Profile detail, Create a profile | Profiles page; profile dialog |
-| Activity | Registry activity | | First Activity section |
-| Activity | Security refusals | | Second Activity section |
-| Settings | Runtime & safeguards | | Settings page; safety notice |
-| Settings | Updates | | Update notice |
-| Settings | Recovery | | Recovery alert |
+| Sidebar entry | Tab                  | Under the tab                    | Holds today's                      |
+| ------------- | -------------------- | -------------------------------- | ---------------------------------- |
+| Connectors    | All connectors       | Connector detail (five tabs)     | Connector list; expanded row       |
+| Connectors    | Add                  | Paste or import                  | "Add connector" dialog             |
+| Connectors    | Add                  | Manual MCP                       | "Add Manual MCP" dialog            |
+| Connectors    | Add                  | From your agents                 | "Copy MCPs from your agents" panel |
+| Connectors    | Add                  | Discover environment             | "Environment discovery" panel      |
+| Agents        | (none)               |                                  | Agents page                        |
+| Profiles      | (none)               | Profile detail, Create a profile | Profiles page; profile dialog      |
+| Activity      | Registry activity    |                                  | First Activity section             |
+| Activity      | Security refusals    |                                  | Second Activity section            |
+| Settings      | Runtime & safeguards |                                  | Settings page; safety notice       |
+| Settings      | Updates              |                                  | Update notice                      |
+| Settings      | Recovery             |                                  | Recovery alert                     |
 
 Connector detail tabs: Overview, Configuration, Authentication, Tools &
 permissions, Diagnostics. These are the five tabs of `SPECIFICATION.md` §6.3,
@@ -98,62 +98,90 @@ fonts) and **Console** (flat violet, IBM Plex, bundled fonts).
 All values are the app's own today (`apps/web/src/styles.css`) except the rows
 marked new.
 
-| Part | Value |
-| --- | --- |
-| Sidebar | 232 px; 208 px at 1100 px and below |
-| Top bar | 68 px |
-| Tab row (new) | 44 px |
-| Add pills (new) | 32 px, the segmented filter's height |
-| Navigation item | 44 px |
-| Button | 36 px; small 32 px |
-| Input | 10 px 12 px padding |
-| Page padding | 40 px; 24 px at 1100 px and below |
-| Content width | up to 1536 px |
-| Form-only page width (new) | up to 840 px |
-| Base text | 14 px, line-height 1.5 |
-| Page title | 28 px |
-| Radius (new) | cards 10 px, controls 8 px, pills 999 px |
-| Spacing | 4 px unit: 4, 8, 12, 16, 24, 32 |
+| Part                       | Value                                    |
+| -------------------------- | ---------------------------------------- |
+| Sidebar                    | 232 px; 208 px at 1100 px and below      |
+| Top bar                    | 68 px                                    |
+| Tab row (new)              | 44 px                                    |
+| Add pills (new)            | 32 px, the segmented filter's height     |
+| Navigation item            | 44 px                                    |
+| Button                     | 36 px; small 32 px                       |
+| Input                      | 10 px 12 px padding                      |
+| Page padding               | 40 px; 24 px at 1100 px and below        |
+| Content width              | up to 1536 px                            |
+| Form-only page width (new) | up to 840 px                             |
+| Base text                  | 14 px, line-height 1.5                   |
+| Page title                 | 28 px                                    |
+| Radius (new)               | cards 10 px, controls 8 px, pills 999 px |
+| Spacing                    | 4 px unit: 4, 8, 12, 16, 24, 32          |
 
 ## Route map
 
 The app has no URLs today, so none change. "Place" is where the page sits in
 the navigation.
 
-| Page | Place today | Place in F05 |
-| --- | --- | --- |
-| Connector list | Connectors | Connectors › All connectors |
-| Connector detail | Expanded row | Connectors › All connectors › {name} |
-| Add connector (import) | Dialog from header | Connectors › Add › Paste or import |
-| Add Manual MCP | Dialog from header | Connectors › Add › Manual MCP |
-| Copy MCPs from your agents | Panel on every page | Connectors › Add › From your agents |
-| Environment discovery | Panel on every page | Connectors › Add › Discover environment |
-| Package install | Dialog from three places | Child of Connectors |
-| Review change (all operations) | Dialog | Child of the page that opened it |
-| Authentication | Dialog from row | Connector detail › Authentication |
-| Agents | Agents | Agents |
-| Profiles | Profiles | Profiles |
-| Create a profile | Dialog | Profiles › Create a profile |
-| Registry activity | Activity, first section | Activity › Registry activity |
-| Security refusals | Activity, second section | Activity › Security refusals |
-| Runtime & safeguards | Settings | Settings › Runtime & safeguards |
-| Update notice | Notice on every page | Settings › Updates, plus a count on Settings |
-| Recovery alert | Alert on every page when blocked | Above every page when blocked, and Settings › Recovery |
+| Page                           | Place today                      | Place in F05                                           |
+| ------------------------------ | -------------------------------- | ------------------------------------------------------ |
+| Connector list                 | Connectors                       | Connectors › All connectors                            |
+| Connector detail               | Expanded row                     | Connectors › All connectors › {name}                   |
+| Add connector (import)         | Dialog from header               | Connectors › Add › Paste or import                     |
+| Add Manual MCP                 | Dialog from header               | Connectors › Add › Manual MCP                          |
+| Copy MCPs from your agents     | Panel on every page              | Connectors › Add › From your agents                    |
+| Environment discovery          | Panel on every page              | Connectors › Add › Discover environment                |
+| Package install                | Dialog from three places         | Child of Connectors                                    |
+| Review change (all operations) | Dialog                           | Child of the page that opened it                       |
+| Authentication                 | Dialog from row                  | Connector detail › Authentication                      |
+| Agents                         | Agents                           | Agents                                                 |
+| Profiles                       | Profiles                         | Profiles                                               |
+| Create a profile               | Dialog                           | Profiles › Create a profile                            |
+| Registry activity              | Activity, first section          | Activity › Registry activity                           |
+| Security refusals              | Activity, second section         | Activity › Security refusals                           |
+| Runtime & safeguards           | Settings                         | Settings › Runtime & safeguards                        |
+| Update notice                  | Notice on every page             | Settings › Updates, plus a count on Settings           |
+| Recovery alert                 | Alert on every page when blocked | Above every page when blocked, and Settings › Recovery |
 
 New pages: Connector detail, Profile detail, Updates, Recovery. No page is
 removed.
 
 ## Page layout rules
 
-| Template | Structure | Pages |
-| --- | --- | --- |
-| List | Header, one panel holding filter bar and rows | Connector list, Agents, Profiles, both Activity pages |
-| Detail | Header, in-page tabs, the tab's panels | Connector detail |
-| Two-column | Main column and a side column from 1024 px | Paste or import, Manual MCP, Review change, Profile detail, Runtime & safeguards, Updates |
-| Form | Header, one panel of titled sections, action bar | Create a profile |
+| Template   | Structure                                        | Pages                                                                                     |
+| ---------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| List       | Header, one panel holding filter bar and rows    | Connector list, Agents, Profiles, both Activity pages                                     |
+| Detail     | Header, in-page tabs, the tab's panels           | Connector detail                                                                          |
+| Two-column | Main column and a side column from 1024 px       | Paste or import, Manual MCP, Review change, Profile detail, Runtime & safeguards, Updates |
+| Form       | Header, one panel of titled sections, action bar | Create a profile                                                                          |
 
 One primary button per page, at the end of the page header. A destructive
 action is never the page's primary button.
+
+### Long lists: list and detail
+
+The owner chose this on 2026-11-23 from three prototypes (split view, one-open
+accordion, table with a side panel); D032 records it. It replaces the "Detail"
+row above for the connector: the connector's five tabs are the detail side of
+a split view, not a page of their own.
+
+A list whose entries have content to open is drawn as a split view. One side
+is a narrow list with one line per entry (name, state). The other side shows
+the chosen entry and nothing else. Choosing another entry replaces the detail;
+the page does not grow. With no entry chosen the detail side says so.
+
+| List                       | Today                                       | With the split view                                       |
+| -------------------------- | ------------------------------------------- | --------------------------------------------------------- |
+| Your connectors            | Every row can be open at once               | List of names; the chosen connector's five tabs beside it |
+| Copy MCPs from your agents | Every MCP of every agent drawn open         | Agents and their MCPs in the list; one MCP beside it      |
+| Import review              | One open section per entry of a pasted file | Entries in the list; one entry beside it                  |
+| Tools & permissions        | One line per tool, each with its setting    | Tools in the list; one tool's setting beside it           |
+
+Proposed sizes, to be checked in the browser when step 7 is built: list 320 px
+wide, detail the rest; both sides scroll on their own inside the page's
+height. At 1024 px window width the detail side is about 390 px, which may be
+too narrow for five tabs in one row.
+
+Not decided: the two Activity logs (single lines with nothing to open) and the
+Agents and Profiles lists (short) stay as they are until the owner says
+otherwise.
 
 ## Design system: Harbor
 
@@ -161,25 +189,25 @@ The source of the values is
 `F:\Dev\Projects\Waleed-MCP-Hub-ui-prototypes\palettes\harbor.css`, written in
 `oklch()`. The hex values below are conversions for reading.
 
-| Role | App variable today | Light | Dark |
-| --- | --- | --- | --- |
-| Page background | `--canvas` | `#f3f6fa` | `#0d131c` |
-| Surface | `--surface` | `#ffffff` | `#171e2a` |
-| Muted surface | `--muted-surface` | `#edf2f6` | `#1e242f` |
-| Text | `--text` | `#192230` | `#ebeff4` |
-| Secondary text | `--muted` | `#535f6f` | `#a3acb8` |
-| Border | `--border` | `#d9dfe6` | `#2e3643` |
-| Action, links | `--action` | `#1f53b8` | `#81aaf7` |
-| Text on action | (literal `white`) | `#ffffff` | `#0c1628` |
-| Danger | `--danger` | `#c2181d` | `#f47a79` |
-| Selected item background | (literal `#e8f2f0`) | `#dbe9ff` | `#1f304f` |
-| Selected item text | (uses `--action`) | `#0e3685` | `#bfd8ff` |
-| Control outline | (uses `--border`) | `#758192` | `#6a7586` |
-| Focus ring | (uses `--action`) | `#2d69de` | `#81aaf7` |
-| Success text / background | (literals) | `#106c3e` / `#ddf6e4` | `#81d39f` / `#1a3424` |
-| Warning text / background | (literals) | `#844b00` / `#feedc9` | `#eabc6e` / `#3e2d10` |
-| Info text / background (reserved; no token until a rule uses it) | (none) | `#236b8f` / `#dff2fd` | `#8bbfde` / `#18313f` |
-| Danger background | (colour-mix) | `#ffe7e4` | `#442322` |
+| Role                                                             | App variable today  | Light                 | Dark                  |
+| ---------------------------------------------------------------- | ------------------- | --------------------- | --------------------- |
+| Page background                                                  | `--canvas`          | `#f3f6fa`             | `#0d131c`             |
+| Surface                                                          | `--surface`         | `#ffffff`             | `#171e2a`             |
+| Muted surface                                                    | `--muted-surface`   | `#edf2f6`             | `#1e242f`             |
+| Text                                                             | `--text`            | `#192230`             | `#ebeff4`             |
+| Secondary text                                                   | `--muted`           | `#535f6f`             | `#a3acb8`             |
+| Border                                                           | `--border`          | `#d9dfe6`             | `#2e3643`             |
+| Action, links                                                    | `--action`          | `#1f53b8`             | `#81aaf7`             |
+| Text on action                                                   | (literal `white`)   | `#ffffff`             | `#0c1628`             |
+| Danger                                                           | `--danger`          | `#c2181d`             | `#f47a79`             |
+| Selected item background                                         | (literal `#e8f2f0`) | `#dbe9ff`             | `#1f304f`             |
+| Selected item text                                               | (uses `--action`)   | `#0e3685`             | `#bfd8ff`             |
+| Control outline                                                  | (uses `--border`)   | `#758192`             | `#6a7586`             |
+| Focus ring                                                       | (uses `--action`)   | `#2d69de`             | `#81aaf7`             |
+| Success text / background                                        | (literals)          | `#106c3e` / `#ddf6e4` | `#81d39f` / `#1a3424` |
+| Warning text / background                                        | (literals)          | `#844b00` / `#feedc9` | `#eabc6e` / `#3e2d10` |
+| Info text / background (reserved; no token until a rule uses it) | (none)              | `#236b8f` / `#dff2fd` | `#8bbfde` / `#18313f` |
+| Danger background                                                | (colour-mix)        | `#ffe7e4`             | `#442322`             |
 
 - **Contrast:** 33 text and background pairs pass WCAG AA in light and in dark
   (the engine's `contrast.mjs`, 15 pairs, and
