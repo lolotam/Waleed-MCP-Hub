@@ -907,6 +907,38 @@ The hub writes nothing into the agents' own folders.
 
 **Deferred.** An opt-in `SKILL.md` per agent, only for a CLI that receives none of the three, needs its own decision.
 
+## D028 — Harbor replaces the teal palette (2026-11-23)
+
+**Decision.** The web UI uses the Harbor palette, type stack and corner radius: a blue action colour, Segoe UI Variable text and display families, cards 10 px, controls 8 px, pills 999 px. This reverses "Teal reserved for primary actions, selection, and focus" (`docs/DESIGN.md:57`) and the token table at `docs/DESIGN.md:82-94`. The eight existing variable names in `apps/web/src/styles.css` stay and take the Harbor values; every other colour becomes a token. Sizes, spacing and control heights do not change.
+
+**Why.** The owner chose Harbor on 2026-11-23 from nine clickable prototypes (three layouts in three palettes). Harbor needs no bundled font file, and its 33 text and background pairs pass WCAG AA in light and dark.
+
+**Consequences.** The action colour stays apart from health colours (`docs/DESIGN.md:96-98`): blue acts; green, amber and red report status, always with a word. Follow-ups: the logo and favicon in `apps/web/public/brand` still use the teal gradient. `docs/DESIGN.md` is updated in a later F05 step.
+
+## D029 — Dark mode (2026-11-23)
+
+**Decision.** The web UI has a dark theme next to the light one, chosen as Light, Dark or System. System follows Windows through `prefers-color-scheme`; Light and Dark set `data-theme` on the root element. The choice is saved in the browser under `wmh-theme-v1` and is applied before the first render. This reverses "Light unless dark is deliberately required" (`docs/DESIGN.md:177`).
+
+**Why.** The owner asked for light and dark on 2026-11-23. Every colour is a token with a light and a dark value, so one stylesheet serves both.
+
+**Consequences.** A new colour needs a light value, a dark value and a contrast check. The control is on Settings › Runtime & safeguards.
+
+## D030 — Sidebar entries gain tabs; the connector drawer becomes a page (2026-11-23)
+
+**Decision.** The five sidebar entries keep their names and order. An entry with more than one page shows a tab row under the top bar, and the connector detail becomes a page with five tabs instead of the drawer. This amends `docs/SPECIFICATION.md` §6.1 to §6.3. The grouping is in `docs/specs/F05-ui-restructure.md`.
+
+**Why.** Up to five blocks sat above every page's own content, and four ways to add a tool lived in four places. The owner chose layout A (sidebar with tabs) on 2026-11-23.
+
+**Consequences.** This entry records the decision only. The navigation code lands in later F05 steps, and `docs/SPECIFICATION.md` is edited then.
+
+## D032 — Long lists are a split view: list on one side, the chosen entry on the other (2026-11-23)
+
+**Decision.** A list whose entries have content to open is drawn as a split view: a narrow list of names on one side and the chosen entry on the other. This applies to the connector list, "Copy MCPs from your agents", the import review and the tool list of a connector. It amends D030: the connector's five tabs are the detail side of the split view, not a separate page.
+
+**Why.** Every entry was drawn open, one under the other, so the Connectors page measured 5,594 px tall with 19 entries at 1440 px width. The owner compared three prototypes on 2026-11-23 and chose the split view.
+
+**Consequences.** This entry records the decision only; the code lands with F05 step 7 and a follow-up. The Activity logs and the Agents and Profiles lists are not covered. The number D031 is taken by the update-install decision in pull request #43.
+
 ## Open investigations before/during implementation
 
 1. **Postora authentication:** determine which credential/auth flow its MCP endpoint
