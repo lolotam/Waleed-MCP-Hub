@@ -40,6 +40,9 @@ function sourceFromForm(form: HTMLFormElement, mode: Mode): string {
 
 // The longest wait on the discard that is sent when the page is left.
 const LEAVE_DISCARD_LIMIT_MS = 10_000;
+// The longest wait on a request that holds the page. A hub that never
+// answers must not keep the navigation held.
+const HELD_REQUEST_LIMIT_MS = 30_000;
 
 export function ImportDialog({
   revision,
@@ -155,7 +158,11 @@ export function ImportDialog({
     setError('');
     try {
       if (draftId.current)
-        await api(`/api/imports/${draftId.current}/cancel`, {});
+        await api(
+          `/api/imports/${draftId.current}/cancel`,
+          {},
+          AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
+        );
       draftId.current = null;
       setPreview(null);
       setSelection([]);
@@ -218,10 +225,11 @@ export function ImportDialog({
         } finally {
           form.current?.reset();
         }
-        const request = api<ImportPreview>('/api/imports/preview', {
-          source,
-          expectedRevision: revision,
-        });
+        const request = api<ImportPreview>(
+          '/api/imports/preview',
+          { source, expectedRevision: revision },
+          AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
+        );
         source = '';
         const next = await request;
         if (!mounted.current) {
@@ -233,6 +241,7 @@ export function ImportDialog({
         const next = await api<ImportPreview>(
           `/api/imports/${preview.id}/selection`,
           { expectedRevision: preview.expectedRevision, entries: selection },
+          AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
         );
         if (mounted.current) accept(next);
       }
@@ -284,6 +293,7 @@ export function ImportDialog({
       const operation = await api<OperationPreview>(
         `/api/imports/${preview.id}/save-preview`,
         { expectedRevision: preview.expectedRevision },
+        AbortSignal.timeout(HELD_REQUEST_LIMIT_MS),
       );
       draftId.current = null;
       savePreview(

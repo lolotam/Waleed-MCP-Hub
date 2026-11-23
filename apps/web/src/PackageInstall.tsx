@@ -1068,12 +1068,12 @@ export function PackageDialog({
         npm registry is contacted.
       </p>
       {/* The recovery alert of the shell is outside this modal. */}
-      {blocked && (
-        <p role="status" className="notice">
-          Changes are blocked until the recovery review is done. A job that
-          already runs can still be followed.
-        </p>
-      )}
+      {/* The region is always there, so its text is announced when it
+          arrives. */}
+      <p role="status" className={blocked ? 'notice' : undefined}>
+        {blocked &&
+          'Changes are blocked until the recovery review is done. A job that already runs can still be followed.'}
+      </p>
       <PackageInstall
         seed={seed}
         close={close}
