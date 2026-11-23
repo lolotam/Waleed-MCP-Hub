@@ -841,6 +841,8 @@ test('a running install holds the page against the sidebar and Back', async ({
   page,
 }) => {
   await page.goto(await launch());
+  await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+  await page.getByRole('button', { name: 'Connectors', exact: true }).click();
   // Three lost polls keep the job running for several seconds.
   await fakePackageApi(page, { losePolls: 3 });
   await installDemo(page);
@@ -856,8 +858,12 @@ test('a running install holds the page against the sidebar and Back', async ({
   await expect(manual.getByText(/Saving is not approval/)).toBeVisible({
     timeout: 20_000,
   });
-  // The outcome is shown, and the page can be left again.
-  await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+  // The outcome is shown, the page can be left again, and the refused Back
+  // did not overwrite the entries behind the page.
+  await page.goBack();
+  expect(await address()).toBe('#/connectors');
+  await page.goBack();
+  expect(await address()).toBe('#/profiles');
   await expect(
     page.getByRole('heading', { name: 'Profiles', exact: true }),
   ).toBeVisible();

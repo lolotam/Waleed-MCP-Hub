@@ -15,6 +15,23 @@ const map = (text: string): Record<string, string> => {
     throw new Error();
   return value as Record<string, string>;
 };
+// The page is offered only while changes can be made. A page that is already
+// open stays open, so the outcome of its own save is never replaced.
+export function ManualMcpPage({
+  blocked,
+  ...page
+}: Parameters<typeof ManualMcpDialog>[0] & { blocked: string | null }) {
+  const [admitted, setAdmitted] = useState(!blocked);
+  if (!blocked && !admitted) setAdmitted(true);
+  return admitted ? (
+    <ManualMcpDialog {...page} />
+  ) : (
+    <p className="notice" role="status">
+      {blocked}
+    </p>
+  );
+}
+
 export function ManualMcpDialog({
   revision,
   close,

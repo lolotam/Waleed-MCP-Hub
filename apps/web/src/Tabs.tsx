@@ -17,14 +17,18 @@ export function TabRow({
   entry,
   tabs,
   current,
+  held,
   open,
 }: {
   entry: EntryNode;
   tabs: TabNode[];
   current: string | undefined;
+  // While an Add page holds the place the tabs do nothing.
+  held: boolean;
   open: (tab: string) => void;
 }) {
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    if (held) return;
     const last = tabs.length - 1;
     const targets: Record<string, number> = {
       ArrowRight: index === last ? 0 : index + 1,

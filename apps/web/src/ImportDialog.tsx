@@ -46,6 +46,7 @@ export function ImportDialog({
   installProposal,
   installBlocked,
   hold,
+  stranded,
 }: {
   revision: number;
   close: () => void;
@@ -58,6 +59,9 @@ export function ImportDialog({
   installBlocked: boolean;
   // Tells the shell that the page waits on the hub and must not be left.
   hold: (busy: boolean) => void;
+  // Tells the shell that the page was left and the hub did not confirm the
+  // discard of this draft.
+  stranded: (draftId: string) => void;
 }) {
   const form = useRef<HTMLFormElement>(null);
   const file = useRef<HTMLInputElement>(null);
@@ -82,11 +86,16 @@ export function ImportDialog({
       form.current?.reset();
       const id = draftId.current;
       draftId.current = null;
-      if (id) void api(`/api/imports/${id}/cancel`, {}).catch(() => undefined);
+      if (id)
+        void api(`/api/imports/${id}/cancel`, {}).catch((failure: unknown) => {
+          // A draft the hub no longer knows is gone, which is the goal.
+          if (!(failure instanceof ApiError && failure.status === 404))
+            stranded(id);
+        });
       // Only a focus that went away with the page is given back.
       if (document.activeElement === document.body) previous?.focus();
     };
-  }, [hold]);
+  }, [hold, stranded]);
   useEffect(() => hold(busy), [busy, hold]);
   useEffect(() => {
     if (!preview) return;

@@ -269,4 +269,11 @@ describe('launch fragment', () => {
     expect(result.hash).not.toContain('launch');
     expect(readLaunchFragment('#launch=')).toEqual({ token: null, hash: '' });
   });
+
+  it('takes the token out when the name launch is percent-encoded', () => {
+    expect(readLaunchFragment(`#/profiles&l%61unch=${token}`)).toEqual({
+      token,
+      hash: '#/profiles',
+    });
+  });
 });

@@ -243,14 +243,16 @@ export interface LaunchFragment {
 // share it: the fragment is a list of parts joined by `&`, a part that starts
 // with `launch=` is the token and the rest is the page address, so
 // `#/profiles&launch=<token>` and `#launch=<token>&/profiles` both read as the
-// token plus `#/profiles`. The token never stays in the returned hash.
+// token plus `#/profiles`. The token never stays in the returned hash, also
+// when the name `launch` arrives percent-encoded.
 export function readLaunchFragment(hash: string): LaunchFragment {
   const parts = hash.replace(/^#/, '').split('&');
   let token: string | null = null;
   const rest: string[] = [];
   for (const part of parts) {
-    if (part.startsWith('launch=')) {
-      token ??= decode(part.slice('launch='.length)) || null;
+    const cut = part.indexOf('=');
+    if (cut > 0 && decode(part.slice(0, cut)) === 'launch') {
+      token ??= decode(part.slice(cut + 1)) || null;
     } else if (part) rest.push(part);
   }
   return { token, hash: rest.length ? `#${rest.join('&')}` : '' };

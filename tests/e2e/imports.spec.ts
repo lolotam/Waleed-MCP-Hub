@@ -520,3 +520,27 @@ test('the registry export round trips through the file loader and deselects an i
     .getByRole('button', { name: 'Cancel and discard', exact: true })
     .click();
 });
+
+test('a draft whose discard fails when its page is left stays visible and can be retried', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  await paste(page, mixedImport);
+  await page.route('**/api/imports/*/cancel', (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Synthetic discard failure.' }),
+    }),
+  );
+  await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+  const warning = page.getByRole('alert').filter({
+    hasText: 'A private import draft was not discarded',
+  });
+  await expect(warning).toBeVisible();
+  await page.unroute('**/api/imports/*/cancel');
+  await warning
+    .getByRole('button', { name: 'Retry discard', exact: true })
+    .click();
+  await expect(warning).toHaveCount(0);
+});

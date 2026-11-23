@@ -14,7 +14,7 @@ import {
   type Materialization,
   type PackageProposal,
 } from '@waleed/contracts';
-import { api, sessionReady } from './api.js';
+import { api, ApiError, sessionReady } from './api.js';
 import { latestRunner, untilAborted } from './latest.js';
 import { Icon } from './Icon.js';
 import {
@@ -54,7 +54,7 @@ import { DiscoveryProgress } from './DiscoveryProgress.js';
 import { currentObservation, isApproved } from './discovery-progress.js';
 import { AuthDialog } from './AuthDialog.js';
 import { AgentIntegrations } from './AgentIntegrations.js';
-import { ManualMcpDialog } from './ManualMcpDialog.js';
+import { ManualMcpPage } from './ManualMcpDialog.js';
 import { PackageDialog, type PackageSeed } from './PackageInstall.js';
 import { readTheme, setTheme, type ThemeChoice } from './theme.js';
 
@@ -140,6 +140,15 @@ function downloadPart(name: string, text: string) {
 // The address of a place on this page, for a history entry.
 const address = (target: Place) =>
   window.location.pathname + window.location.search + formatPlace(target);
+
+// The position of a history entry, as this app wrote it into the entry.
+function positionOf(state: unknown): number | null {
+  const position = (state as { position?: unknown } | null)?.position;
+  return typeof position === 'number' ? position : null;
+}
+
+// A private import draft lives five minutes on the hub.
+const DRAFT_LIFETIME_MS = 5 * 60_000;
 
 // The place of one pill under Add.
 const addPlace = (pill: string): Place => ({
@@ -285,35 +294,78 @@ export function App() {
     holding.current = busy;
     setHeld(busy);
   }, []);
+  // Every history entry of the app carries its position, so a refused Back
+  // or Forward can be undone instead of overwriting the entry it landed on.
+  const position = useRef(0);
   useEffect(() => {
+    const known = positionOf(window.history.state);
+    if (known === null) window.history.replaceState({ position: 0 }, '');
+    else position.current = known;
     const read = () => {
       const next = parsePlace(window.location.hash);
+      const landed = positionOf(window.history.state);
       if (holding.current && !samePlace(next, placeNow.current)) {
-        // Back, a pill or a typed address during the wait: put it back.
-        window.history.replaceState(null, '', address(placeNow.current));
+        // Refused during the wait. A pill or a typed address made a new
+        // entry: step back off it. Back or Forward landed on an old entry:
+        // return to the entry it came from.
+        if (landed === null) window.history.back();
+        else if (landed !== position.current)
+          window.history.go(position.current - landed);
+        else
+          window.history.replaceState(
+            window.history.state,
+            '',
+            address(placeNow.current),
+          );
         return;
       }
+      if (landed === null) {
+        position.current += 1;
+        window.history.replaceState({ position: position.current }, '');
+      } else position.current = landed;
       show(next);
     };
     window.addEventListener('hashchange', read);
     return () => window.removeEventListener('hashchange', read);
   }, [show]);
+  // A draft whose discard the hub did not confirm when its page was left.
+  const [strandedDraft, setStrandedDraft] = useState<string | null>(null);
+  useEffect(() => {
+    if (!strandedDraft) return;
+    const timer = window.setTimeout(
+      () => setStrandedDraft(null),
+      DRAFT_LIFETIME_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [strandedDraft]);
+  async function retryDiscard(id: string) {
+    try {
+      await api(`/api/imports/${id}/cancel`, {});
+    } catch (failure) {
+      // A draft the hub no longer knows is gone, which is the goal.
+      if (!(failure instanceof ApiError && failure.status === 404)) return;
+    }
+    setStrandedDraft(null);
+  }
   // While the hub has not answered, every tab is shown. Once it has, a place
   // that a capability hides moves to its first visible sibling, in place.
   useEffect(() => {
     if (!bootstrap) return;
     const fixed = resolvePlace(place, bootstrap.capabilities);
     if (samePlace(fixed, place)) return;
-    window.history.replaceState(null, '', address(fixed));
+    window.history.replaceState(window.history.state, '', address(fixed));
     show(fixed);
   }, [bootstrap, place, show]);
   // A move to another place is a new history entry.
   const move = useCallback(
     (next: Place) => {
       if (samePlace(parsePlace(window.location.hash), next)) return;
-      window.location.hash = formatPlace(next);
-      // Do not wait for hashchange: a dialog opened in the same step must find
-      // the page already changed.
+      position.current += 1;
+      window.history.pushState(
+        { position: position.current },
+        '',
+        address(next),
+      );
       show(next);
     },
     [show],
@@ -435,6 +487,8 @@ export function App() {
                 }
                 aria-current={place.entry === item.id ? 'page' : undefined}
                 onClick={() => {
+                  // A held page keeps its filters too.
+                  if (held) return;
                   go(firstPlace(item, capabilities));
                   setSearch('');
                   setConnectorSearch('');
@@ -498,6 +552,7 @@ export function App() {
             entry={entry}
             tabs={tabs}
             current={currentTab?.id}
+            held={held}
             open={(tab) => go(firstPlace(entry, capabilities, tab))}
           />
         )}
@@ -591,6 +646,38 @@ export function App() {
                 </p>
               )}
 
+            {/* Above every page while changes are blocked, also when the
+                hub can no longer be read. */}
+            {recoveryBlocked && (
+              <section className="error-panel" role="alert">
+                <h2>Recovery review required</h2>
+                <p>
+                  An unfinished operation needs recovery review. Further changes
+                  are blocked; nothing will be replayed or rolled back
+                  automatically. Inspect the local runtime using the README
+                  recovery instructions before retrying.
+                </p>
+                <a href="/api/recovery" target="_blank" rel="noreferrer">
+                  Inspect recovery metadata
+                </a>
+              </section>
+            )}
+            {strandedDraft && (
+              <section className="error-panel" role="alert">
+                <h2>A private import draft was not discarded</h2>
+                <p>
+                  The import page was left, but the hub did not confirm that its
+                  draft is gone. The draft expires within five minutes.
+                </p>
+                <button
+                  onClick={() => {
+                    void retryDiscard(strandedDraft);
+                  }}
+                >
+                  Retry discard
+                </button>
+              </section>
+            )}
             {showNotice && (
               <div className="foundation-notice">
                 <Icon name="shield" />
@@ -650,20 +737,6 @@ export function App() {
                       refresh={refresh}
                     />
                   </div>
-                )}
-                {recoveryBlocked && (
-                  <section className="error-panel" role="alert">
-                    <h2>Recovery review required</h2>
-                    <p>
-                      An unfinished operation needs recovery review. Further
-                      changes are blocked; nothing will be replayed or rolled
-                      back automatically. Inspect the local runtime using the
-                      README recovery instructions before retrying.
-                    </p>
-                    <a href="/api/recovery" target="_blank" rel="noreferrer">
-                      Inspect recovery metadata
-                    </a>
-                  </section>
                 )}
                 {place.entry === 'connectors' && (
                   // The list stays mounted on the Add tab: it owns the
@@ -1133,6 +1206,7 @@ export function App() {
                 revision={bootstrap.revision}
                 close={closeAdd}
                 hold={hold}
+                stranded={setStrandedDraft}
                 refresh={refresh}
                 savePreview={(preview, definitions) => {
                   closeAdd();
@@ -1178,23 +1252,23 @@ export function App() {
               />
             )}
             {/* The header button to this page is disabled while changes are
-                blocked; its pill and its address must not get around that. */}
-            {onAdd &&
-              place.pill === 'manual' &&
-              bootstrap &&
-              (recoveryBlocked ? (
-                <p className="notice" role="status">
-                  Adding an MCP by hand is blocked until the recovery review is
-                  done.
-                </p>
-              ) : (
-                <ManualMcpDialog
-                  revision={bootstrap.revision}
-                  close={closeAdd}
-                  hold={hold}
-                  refresh={refresh}
-                />
-              ))}
+                blocked or the hub cannot be read; its pill and its address
+                must not get around that. */}
+            {onAdd && place.pill === 'manual' && bootstrap && (
+              <ManualMcpPage
+                blocked={
+                  recoveryBlocked
+                    ? 'Adding an MCP by hand is blocked until the recovery review is done.'
+                    : error
+                      ? 'Adding an MCP by hand is unavailable until the workspace loads again.'
+                      : null
+                }
+                revision={bootstrap.revision}
+                close={closeAdd}
+                hold={hold}
+                refresh={refresh}
+              />
+            )}
           </TabPanel>
           <footer className="workspace-footer">
             <span>
