@@ -109,6 +109,9 @@ describe('theme choice', () => {
     const script = readFileSync('apps/web/public/theme-init.js', 'utf8');
     expect(script).toContain(`getItem('${THEME_STORAGE_KEY}')`);
     expect(script).toContain("choice === 'light' || choice === 'dark'");
+    expect(script).toContain(
+      `choice === 'dark' ? '${THEME_COLORS.dark}' : '${THEME_COLORS.light}'`,
+    );
   });
 
   it('does not throw when the storage throws, and still applies', () => {

@@ -241,13 +241,23 @@ test('a saved theme is applied before the app module loads, without a session', 
   expect(script.status()).toBe(200);
   expect(script.headers()['content-type']).toContain('javascript');
 
-  // Hold back the app bundle: only the head script can set the theme.
-  await page.route('**/assets/**', (route) => route.abort());
+  // Hold back the app script but not the stylesheet: only the head script can
+  // set the theme, and the system asks for the other one.
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.route('**/assets/**/*.js', (route) => route.abort());
+  await page.route('**/assets/*.js', (route) => route.abort());
   await page.addInitScript(() =>
     window.localStorage.setItem('wmh-theme-v1', 'dark'),
   );
   await page.goto('http://127.0.0.1:4187/');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+  expect(
+    await page
+      .locator('meta[name="theme-color"]')
+      .evaluateAll((tags) => tags.map((tag) => tag.getAttribute('content'))),
+  ).toEqual(['#0d131c', '#0d131c']);
+  await expect(page.locator('#root')).toBeEmpty();
 });
 
 test('source-mode server starts on Node 24 and releases its writer lock on shutdown', async () => {
