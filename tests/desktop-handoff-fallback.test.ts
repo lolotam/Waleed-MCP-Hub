@@ -125,6 +125,26 @@ describe.skipIf(process.platform !== 'win32')(
       expect(requests).not.toContain('open\n');
     }, 20000);
 
+    it('sends no further request when the busy wait ends during the bind retries', async () => {
+      let asked = 0;
+      const { directory, requests } = await existingOwner(
+        (_request, socket) => {
+          // Busy, then an acknowledged handoff while this owner keeps the
+          // pipe. The two-second wait ends inside the three-second bind
+          // retries, so nothing more may be asked.
+          asked += 1;
+          socket.end(
+            asked === 1 ? 'wmh-desktop-busy\n' : 'wmh-desktop-handoff\n',
+          );
+        },
+      );
+
+      await expect(open(directory, 2000)).rejects.toThrow(
+        'The existing desktop manager is closing or starting.',
+      );
+      expect(requests).toHaveLength(2);
+    }, 20000);
+
     it('keeps the hub window free of extensions and account sync', () => {
       expect(
         edgeAppArguments('C:/hub/edge-profile', 'http://127.0.0.1:1/'),
