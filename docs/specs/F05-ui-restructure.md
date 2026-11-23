@@ -3,9 +3,10 @@
 Status: draft v2, open questions answered 2026-11-23, awaiting approval to build · Branch `claude/waleed-ui-restructure-5d53cd` ·
 Follows F04 (`docs/specs/F04-hub-ui-refresh.md`)
 
-No application code has changed. This document describes the layout and the
-design system the owner chose from nine clickable prototypes, and what it would
-take to build them.
+This document describes the layout and the design system the owner chose from
+nine clickable prototypes, and what it takes to build them. The design system
+(tokens, dark mode, theme control) is implemented; the layout is not. The plan
+tracks which steps have landed.
 
 ## Problem
 

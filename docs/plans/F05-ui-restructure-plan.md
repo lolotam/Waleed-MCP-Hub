@@ -3,7 +3,9 @@
 Spec: `docs/specs/F05-ui-restructure.md` (draft v2) · Branch:
 `claude/waleed-ui-restructure-5d53cd`
 
-Nothing in this plan has started. The spec's six questions were answered on
+Steps 0, 1 and 2 are implemented (pull request #42); steps 3 to 9 have not
+started. Not yet verified for steps 1 and 2: every page looked at in dark mode
+by eye. The spec's six questions were answered on
 2026-11-23; where the "Depends on" column names a question, the step follows
 that answer in the spec's "Answered questions" section.
 
@@ -97,3 +99,18 @@ The prototypes this plan follows, and their sources:
 The prototypes approximate the app's components with a prototype engine's
 markup. They show structure, colour and type; they are not a pixel reference
 for the React components.
+
+## Deferred from the review of pull request #42
+
+Raised by review bots, judged real, and left out of that pull request:
+
+- **Saved theme can flash on a cold load.** The module script that applies the
+  saved choice may run after the first paint. A fix needs a small classic
+  script in `<head>` served from the app itself (the content security policy
+  allows no inline script). Do it with step 4, which already changes startup.
+- **`theme-color` follows Windows, not an explicit Light or Dark choice.** The
+  Edge app window can show a title bar that does not match the page. Sync the
+  two `theme-color` tags from `theme.ts` when the choice changes.
+- **Appearance is unreachable while the hub fails to load.** The error branch
+  replaces every page body. Step 8 (Settings as three tabs) renders local-only
+  settings outside that branch.
