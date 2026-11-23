@@ -461,6 +461,15 @@ button.tab[aria-selected='true']:hover:not(:disabled) {
   border-block-end-color: var(--action);
   color: var(--selected-text);
 }
+/* While an Add page waits on the hub the navigation is held: it is dimmed
+   and takes no pointer. The shell also refuses the move itself. */
+.app-shell[data-held] .sidebar nav,
+.app-shell[data-held] .tab-row,
+.app-shell[data-held] .pill-row,
+.app-shell[data-held] .page-actions {
+  opacity: 0.55;
+  pointer-events: none;
+}
 /* The pills under the Add tab are links to their own addresses, 32 px high
    like the segments of the status filter. */
 .pill-row {

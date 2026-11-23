@@ -18,10 +18,13 @@ const map = (text: string): Record<string, string> => {
 export function ManualMcpDialog({
   revision,
   close,
+  hold,
   refresh,
 }: {
   revision: number;
   close: () => void;
+  // Tells the shell that the page waits on the hub and must not be left.
+  hold: (busy: boolean) => void;
   refresh: () => Promise<boolean>;
 }) {
   const form = useRef<HTMLFormElement>(null),
@@ -41,13 +44,19 @@ export function ManualMcpDialog({
   };
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    // Opening the page puts the focus in its form, as the dialog did.
-    form.current?.querySelector<HTMLElement>('input, select')?.focus();
+    // Opening the page puts the focus in its form, as the dialog did. A tab
+    // that opened the page with an arrow key keeps the focus.
+    if (previous?.getAttribute('role') !== 'tab')
+      form.current?.querySelector<HTMLElement>('input, select')?.focus();
     return () => {
+      hold(false);
       clear();
-      previous?.focus();
+      // Only a focus that went away with the page is given back.
+      if (document.activeElement === document.body) previous?.focus();
     };
-  }, []);
+  }, [hold]);
+  // Leaving mid-request or mid-install would drop the outcome.
+  useEffect(() => hold(busy || packageRunning), [busy, packageRunning, hold]);
   function validate() {
     // The managed package flow has its own fields and its own validation.
     if (type === 'npm') {

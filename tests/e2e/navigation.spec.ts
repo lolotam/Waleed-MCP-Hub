@@ -317,3 +317,43 @@ test('the Add pages are pages: the header buttons open them and only the open on
   await expect(manualPage).toHaveCount(0);
   expect(await hash(page)).toBe('#/connectors');
 });
+
+test('a tab opened with an arrow key keeps the focus on the tab row', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  const all = page.getByRole('tab', { name: 'All connectors', exact: true });
+  const add = page.getByRole('tab', { name: 'Add', exact: true });
+  await all.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByTestId('add-import-page')).toBeVisible();
+  await expect(add).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.getByTestId('add-import-page')).toHaveCount(0);
+  await expect(all).toBeFocused();
+});
+
+test('the Manual MCP page is not offered while changes are blocked', async ({
+  page,
+}) => {
+  const url = await launch();
+  await page.route('**/api/recovery', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ blocked: true }),
+    }),
+  );
+  await page.goto(url);
+  await expect(
+    page.getByRole('button', { name: 'Add Manual MCP', exact: true }),
+  ).toBeDisabled();
+  // The pill is another way to the same page.
+  await page.getByRole('tab', { name: 'Add', exact: true }).click();
+  await page.getByRole('link', { name: 'Manual MCP', exact: true }).click();
+  expect(await hash(page)).toBe('#/connectors/add/manual');
+  await expect(
+    page.getByText(/Adding an MCP by hand is blocked/),
+  ).toBeVisible();
+  await expect(page.getByTestId('add-manual-page')).toHaveCount(0);
+});

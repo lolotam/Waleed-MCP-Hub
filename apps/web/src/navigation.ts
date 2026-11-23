@@ -154,15 +154,10 @@ export function firstPlace(
   capabilities: Capabilities,
   tabId?: string,
 ): Place {
-  const tabs = visibleTabs(entry, capabilities);
-  const tab = tabs.find((candidate) => candidate.id === tabId) ?? tabs[0];
-  if (!tab) return { entry: entry.id as EntryId };
-  const pill = visiblePills(tab, capabilities)[0];
-  return {
-    entry: entry.id as EntryId,
-    tab: tab.id,
-    ...(pill ? { pill: pill.id } : {}),
-  };
+  return resolvePlace(
+    { entry: entry.id as EntryId, ...(tabId ? { tab: tabId } : {}) },
+    capabilities,
+  );
 }
 
 // A place that names a tab or a pill the capabilities hide falls back to the

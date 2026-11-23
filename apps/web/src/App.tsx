@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import {
   BootstrapSchema,
   type Bootstrap,
@@ -137,6 +137,10 @@ function downloadPart(name: string, text: string) {
   }, 0);
 }
 
+// The address of a place on this page, for a history entry.
+const address = (target: Place) =>
+  window.location.pathname + window.location.search + formatPlace(target);
+
 // The place of one pill under Add.
 const addPlace = (pill: string): Place => ({
   entry: 'connectors',
@@ -267,34 +271,63 @@ export function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  // The place as the address handlers see it, without waiting for a render.
+  const placeNow = useRef(place);
+  const show = useCallback((next: Place) => {
+    placeNow.current = next;
+    setPlace(next);
+  }, []);
+  // An Add page that waits on the hub holds the place. As a dialog it was
+  // modal, so nothing could leave it mid-request and lose the outcome.
+  const holding = useRef(false);
+  const [held, setHeld] = useState(false);
+  const hold = useCallback((busy: boolean) => {
+    holding.current = busy;
+    setHeld(busy);
+  }, []);
   useEffect(() => {
-    const read = () => setPlace(parsePlace(window.location.hash));
+    const read = () => {
+      const next = parsePlace(window.location.hash);
+      if (holding.current && !samePlace(next, placeNow.current)) {
+        // Back, a pill or a typed address during the wait: put it back.
+        window.history.replaceState(null, '', address(placeNow.current));
+        return;
+      }
+      show(next);
+    };
     window.addEventListener('hashchange', read);
     return () => window.removeEventListener('hashchange', read);
-  }, []);
+  }, [show]);
   // While the hub has not answered, every tab is shown. Once it has, a place
   // that a capability hides moves to its first visible sibling, in place.
   useEffect(() => {
     if (!bootstrap) return;
     const fixed = resolvePlace(place, bootstrap.capabilities);
     if (samePlace(fixed, place)) return;
-    window.history.replaceState(
-      null,
-      '',
-      window.location.pathname + window.location.search + formatPlace(fixed),
-    );
-    setPlace(fixed);
-  }, [bootstrap, place]);
+    window.history.replaceState(null, '', address(fixed));
+    show(fixed);
+  }, [bootstrap, place, show]);
   // A move to another place is a new history entry.
-  const go = useCallback((next: Place) => {
-    if (samePlace(parsePlace(window.location.hash), next)) return;
-    window.location.hash = formatPlace(next);
-    // Do not wait for hashchange: a dialog opened in the same step must find
-    // the page already changed.
-    setPlace(next);
-  }, []);
-  // The Add pages close to the list of connectors.
-  const closeAdd = () => go({ entry: 'connectors', tab: 'all' });
+  const move = useCallback(
+    (next: Place) => {
+      if (samePlace(parsePlace(window.location.hash), next)) return;
+      window.location.hash = formatPlace(next);
+      // Do not wait for hashchange: a dialog opened in the same step must find
+      // the page already changed.
+      show(next);
+    },
+    [show],
+  );
+  // The navigation of the user. It waits while an Add page holds the place.
+  const go = useCallback(
+    (next: Place) => {
+      if (!holding.current) move(next);
+    },
+    [move],
+  );
+  // An Add page closes itself to the list of connectors, also while it holds
+  // the place: closing is how its own request ends.
+  const closeAdd = () => move({ entry: 'connectors', tab: 'all' });
   const entry = entryOf(place.entry);
   const page = entry.label;
   const capabilities = bootstrap?.capabilities ?? null;
@@ -371,7 +404,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-held={held || undefined}>
       <a
         className="skip-link"
         href="#main"
@@ -571,8 +604,9 @@ export function App() {
                 <span className="read-only-tag">Explicit actions only</span>
               </div>
             )}
-            {/* The three panels below keep their state and their timers: they
-                stay mounted and are only hidden when their page is not open. */}
+            {/* The agent and discovery panels keep their state and their
+                timers: they stay mounted and are only hidden when their page
+                is not open. */}
             {bootstrap?.capabilities.agentCloning && (
               <div hidden={!(onAdd && place.pill === 'agents')}>
                 <AgentCloning
@@ -605,14 +639,8 @@ export function App() {
               </div>
             ) : (
               <>
-                {bootstrap?.capabilities.appUpdates && (
-                  <div
-                    hidden={
-                      !(place.entry === 'settings' && place.tab === 'updates')
-                    }
-                  >
-                    <UpdateNotice {...update} />
-                  </div>
+                {place.entry === 'settings' && place.tab === 'updates' && (
+                  <UpdateNotice {...update} />
                 )}
                 {bootstrap?.capabilities.discovery && (
                   <div hidden={!(onAdd && place.pill === 'discover')}>
@@ -1104,6 +1132,7 @@ export function App() {
               <ImportDialog
                 revision={bootstrap.revision}
                 close={closeAdd}
+                hold={hold}
                 refresh={refresh}
                 savePreview={(preview, definitions) => {
                   closeAdd();
@@ -1148,13 +1177,24 @@ export function App() {
                 }}
               />
             )}
-            {onAdd && place.pill === 'manual' && bootstrap && (
-              <ManualMcpDialog
-                revision={bootstrap.revision}
-                close={closeAdd}
-                refresh={refresh}
-              />
-            )}
+            {/* The header button to this page is disabled while changes are
+                blocked; its pill and its address must not get around that. */}
+            {onAdd &&
+              place.pill === 'manual' &&
+              bootstrap &&
+              (recoveryBlocked ? (
+                <p className="notice" role="status">
+                  Adding an MCP by hand is blocked until the recovery review is
+                  done.
+                </p>
+              ) : (
+                <ManualMcpDialog
+                  revision={bootstrap.revision}
+                  close={closeAdd}
+                  hold={hold}
+                  refresh={refresh}
+                />
+              ))}
           </TabPanel>
           <footer className="workspace-footer">
             <span>

@@ -45,6 +45,7 @@ export function ImportDialog({
   savePreview,
   installProposal,
   installBlocked,
+  hold,
 }: {
   revision: number;
   close: () => void;
@@ -55,6 +56,8 @@ export function ImportDialog({
   ) => void;
   installProposal: (proposal: PackageProposal) => void;
   installBlocked: boolean;
+  // Tells the shell that the page waits on the hub and must not be left.
+  hold: (busy: boolean) => void;
 }) {
   const form = useRef<HTMLFormElement>(null);
   const file = useRef<HTMLInputElement>(null);
@@ -70,16 +73,21 @@ export function ImportDialog({
   useEffect(() => {
     mounted.current = true;
     const previous = document.activeElement as HTMLElement | null;
-    form.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+    // A tab that opened the page with an arrow key keeps the focus.
+    if (previous?.getAttribute('role') !== 'tab')
+      form.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
     return () => {
       mounted.current = false;
+      hold(false);
       form.current?.reset();
       const id = draftId.current;
       draftId.current = null;
       if (id) void api(`/api/imports/${id}/cancel`, {}).catch(() => undefined);
-      previous?.focus();
+      // Only a focus that went away with the page is given back.
+      if (document.activeElement === document.body) previous?.focus();
     };
-  }, []);
+  }, [hold]);
+  useEffect(() => hold(busy), [busy, hold]);
   useEffect(() => {
     if (!preview) return;
     const timer = window.setTimeout(() => {

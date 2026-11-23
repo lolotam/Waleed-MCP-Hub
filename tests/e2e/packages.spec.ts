@@ -836,3 +836,29 @@ for (const variant of ['npm', 'github', 'github-update'])
       ).toHaveCount(0);
     }
   });
+
+test('a running install holds the page against the sidebar and Back', async ({
+  page,
+}) => {
+  await page.goto(await launch());
+  // Three lost polls keep the job running for several seconds.
+  await fakePackageApi(page, { losePolls: 3 });
+  await installDemo(page);
+  const manual = page.getByTestId('add-manual-page');
+  const address = () => page.evaluate(() => window.location.hash);
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-held', 'true');
+  // The sidebar takes no pointer while held, so the keyboard is the way in.
+  await page.getByRole('button', { name: 'Profiles', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await page.goBack();
+  await expect(manual).toBeVisible();
+  expect(await address()).toBe('#/connectors/add/manual');
+  await expect(manual.getByText(/Saving is not approval/)).toBeVisible({
+    timeout: 20_000,
+  });
+  // The outcome is shown, and the page can be left again.
+  await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Profiles', exact: true }),
+  ).toBeVisible();
+});

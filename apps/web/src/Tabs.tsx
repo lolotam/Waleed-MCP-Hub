@@ -26,21 +26,14 @@ export function TabRow({
 }) {
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
     const last = tabs.length - 1;
-    const target =
-      event.key === 'ArrowRight'
-        ? index === last
-          ? 0
-          : index + 1
-        : event.key === 'ArrowLeft'
-          ? index === 0
-            ? last
-            : index - 1
-          : event.key === 'Home'
-            ? 0
-            : event.key === 'End'
-              ? last
-              : -1;
-    if (target < 0) return;
+    const targets: Record<string, number> = {
+      ArrowRight: index === last ? 0 : index + 1,
+      ArrowLeft: index === 0 ? last : index - 1,
+      Home: 0,
+      End: last,
+    };
+    const target = targets[event.key];
+    if (target === undefined) return;
     event.preventDefault();
     const next = tabs[target]!;
     document.getElementById(tabId(entry.id, next.id))?.focus();
@@ -105,7 +98,9 @@ export function PillRow({
 }
 
 // Wraps the content under the tab row. With tabs it is the labelled panel of
-// the current tab; without tabs it is only a wrapper.
+// the current tab; without tabs it is only a wrapper. The wrapper is the same
+// element for every entry: a wrapper that changed with the entry would mount
+// everything inside it again and drop the state of the panels kept there.
 export function TabPanel({
   entry,
   capabilities,
@@ -117,12 +112,12 @@ export function TabPanel({
   current: string | undefined;
   children: ReactNode;
 }) {
-  if (visibleTabs(entry, capabilities).length < 2) return <>{children}</>;
+  const tabbed = visibleTabs(entry, capabilities).length > 1;
   return (
     <div
       id={TAB_PANEL_ID}
-      role="tabpanel"
-      aria-labelledby={current ? tabId(entry.id, current) : undefined}
+      role={tabbed ? 'tabpanel' : undefined}
+      aria-labelledby={tabbed && current ? tabId(entry.id, current) : undefined}
     >
       {children}
     </div>

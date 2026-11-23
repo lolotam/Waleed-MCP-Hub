@@ -162,3 +162,19 @@ test('a saved copy reports an inventory refresh failure without suggesting anoth
   expect(report.names).toEqual(['primary']);
   expect(report.sourceUnchanged).toBe(true);
 });
+test('a selection under Add survives a visit to a page without tabs', async ({
+  page,
+}) => {
+  const copy = page.getByLabel('Copy primary from Claude Code', {
+    exact: true,
+  });
+  await copy.check();
+  // Profiles has no tab row; Connectors has one.
+  await page.getByRole('button', { name: 'Profiles', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Profiles', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Connectors', exact: true }).click();
+  await openAgents(page);
+  await expect(copy).toBeChecked();
+});
