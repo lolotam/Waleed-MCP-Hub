@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -173,4 +173,44 @@ it('answers a third parallel call with the documented concurrency notice', async
   );
   release();
   await Promise.all(running);
+});
+
+const slowTool: Tool = { name: 'slow', inputSchema: { type: 'object' } };
+
+it('reports a call that runs past the hub deadline as timed out, not as an unavailable connector', async () => {
+  const agent = await connectAgent(
+    profileState(['native']),
+    [slowTool],
+    '__',
+    () => new Promise<CallToolResult>(() => undefined),
+  );
+  const name = (await agent.listTools()).tools[0]!.name;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    // The agent itself waits longer than the hub, so the hub answers first.
+    const pending = agent.callTool({ name, arguments: {} }, undefined, {
+      timeout: 120_000,
+    });
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(await pending).toMatchObject({
+      isError: true,
+      content: [{ text: bridgeNotices.callTimedOut }],
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('still reports a peer that fails at once as an unavailable connector', async () => {
+  const agent = await connectAgent(
+    profileState(['native']),
+    [slowTool],
+    '__',
+    () => Promise.reject(new Error('synthetic peer failure')),
+  );
+  const name = (await agent.listTools()).tools[0]!.name;
+  expect(await agent.callTool({ name, arguments: {} })).toMatchObject({
+    isError: true,
+    content: [{ text: bridgeNotices.connectorUnavailable }],
+  });
 });

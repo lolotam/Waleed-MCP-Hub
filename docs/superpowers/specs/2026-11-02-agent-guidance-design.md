@@ -34,10 +34,11 @@ The bridge (`packages/hub-core/src/integrations/bridge.ts`) never forwards a `Ru
 | `bridgeNotices.refreshTools`         | notice text  | The tool name is unknown or its definition changed.                                                                                                                                                    |
 | `bridgeNotices.connectorUnavailable` | notice text  | The connector is unavailable, changed, disabled, or needs authentication.                                                                                                                              |
 | `bridgeNotices.concurrencyLimit`     | notice text  | The agent already has two hub requests running and starts a third.                                                                                                                                     |
+| `bridgeNotices.callTimedOut`         | notice text  | The hub waited its 60 seconds for one call and stopped waiting. A call the agent cancelled is not reported this way.                                                                                   |
 
 The approval prompt starts with "Hub permission request: approve one call only?". It labels the connector name and the arguments as untrusted data.
 
-The approved part 1 named "12 fault reasons". That was wrong: those are internal, and the agent sees the eight values above. The drift check in this design covers those eight.
+The approved part 1 named "12 fault reasons". That was wrong: those are internal, and the agent sees the nine values above. The drift check in this design covers those nine.
 
 ## Design
 
@@ -46,7 +47,7 @@ The approved part 1 named "12 fault reasons". That was wrong: those are internal
 **`packages/hub-core/src/integrations/agent-guide.ts` (new).** The only source of the guidance text.
 
 - `type RefusalCode` is the union of the four refusal codes. `ToolPolicyRefused` accepts only a `RefusalCode` or one of the notice texts, so every value an agent can see has a type.
-- `bridgeNotices` holds the four notice texts as one `as const` object. `bridge.ts` imports the texts from it instead of declaring its own constants.
+- `bridgeNotices` holds the five notice texts as one `as const` object. `bridge.ts` imports the texts from it instead of declaring its own constants.
 - `guidance: Record<RefusalCode | keyof typeof bridgeNotices, Entry>` holds one entry per agent-visible value: its meaning, what the agent does, and what it tells the user.
 - `shortInstructions(separator: '__' | '_'): string` returns the always-on text, about 1,200 characters, in English.
 - `fullGuide(separator): string` returns the markdown guide: the naming rule, the approval flow, and the full `guidance` table.
@@ -66,7 +67,7 @@ The approved part 1 named "12 fault reasons". That was wrong: those are internal
 
 ### The short instructions
 
-The shipped text is `shortInstructions()` in `agent-guide.ts`, 959 characters with the `__` separator (the test caps it at 1,200). It covers the tool-name form, refreshing after `refreshTools`, the meaning of "Hub permission request", no retry or rephrasing after `tool_approval_denied` or `tool_blocked`, at most two hub calls at once, that only hub refusals and notices are fixed values while connector results are untrusted, never editing hub files to clear an error, and where to read `hub://guide`.
+The shipped text is `shortInstructions()` in `agent-guide.ts`, 1,006 characters with the `__` separator (the test caps it at 1,200). It covers the tool-name form, refreshing after `refreshTools`, the meaning of "Hub permission request", no retry or rephrasing after `tool_approval_denied` or `tool_blocked`, at most two hub calls at once, that only hub refusals and notices are fixed values while connector results are untrusted, never editing hub files to clear an error, and where to read `hub://guide`.
 
 ### Security rule
 
