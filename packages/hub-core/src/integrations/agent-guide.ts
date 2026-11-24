@@ -98,11 +98,11 @@ const guidance: Record<RefusalCode | keyof typeof bridgeNotices, Entry> = {
   },
   callTimedOut: {
     meaning:
-      'The hub waits at most 60 seconds for one call. This one took longer, so the hub stopped waiting. The connector is not disabled and needs no sign-in. The work may have run in part or in full.',
+      'The hub waits at most 60 seconds for one call. This one took longer, so the hub stopped waiting. The notice alone does not mean the connector is disabled or needs a sign-in. The work may have run in part or in full, and may still be running.',
     action:
-      'Do not repeat the same call blindly: first check what it already changed. Then split the work into calls that each finish well inside 60 seconds.',
+      'Do not repeat the same call blindly. First check what it already changed and whether it is still running. Repeat unfinished work only when the first call has stopped or repeating it is safe, in calls that each finish well inside 60 seconds. If neither can be established, stop.',
     tellUser:
-      'Say the call ran past the 60 second limit and that its effect is unknown until checked.',
+      'Say the call ran past the 60 second limit and that its effect is unknown until checked. If it cannot be checked, say the outcome is still unknown.',
   },
 };
 

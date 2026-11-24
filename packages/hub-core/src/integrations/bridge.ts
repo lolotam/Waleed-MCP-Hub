@@ -436,9 +436,13 @@ class PeerRefused extends Error {}
 // stays; only this request is refused.
 class StaleTool extends Error {}
 // The hub's own deadline ended the call. A call the agent cancelled is not
-// one that ran out of time, whatever the deadline did afterwards.
-const ranOutOfTime = (deadline: AbortSignal, caller: AbortSignal) =>
-  deadline.aborted && !caller.aborted;
+// one that ran out of time, and neither is one the hub refused before it
+// reached the peer, whatever the deadline did in the meantime.
+const ranOutOfTime = (
+  error: unknown,
+  deadline: AbortSignal,
+  caller: AbortSignal,
+) => deadline.aborted && !caller.aborted && !(error instanceof PeerRefused);
 
 // The lease of a healthy peer ends before this operation could. The peer
 // stays; only this request is refused.
@@ -1714,7 +1718,7 @@ export function createAgentBridge(
                       ? bridgeNotices.registryUnavailable
                       : error instanceof StaleTool
                         ? bridgeNotices.refreshTools
-                        : ranOutOfTime(deadline.signal, extra.signal)
+                        : ranOutOfTime(error, deadline.signal, extra.signal)
                           ? bridgeNotices.callTimedOut
                           : bridgeNotices.connectorUnavailable,
                 },
@@ -1726,11 +1730,10 @@ export function createAgentBridge(
         }
       }
       let peer: BridgePeer | undefined;
-      // The deadline ends with the call, like the one of a pooled call.
+      // The deadline ends with the call, like the one of a pooled call. It
+      // starts once the connector has passed its first check.
       const deadline = new AbortController();
-      const timer = setTimeout(() => {
-        deadline.abort();
-      }, callTimeout);
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const state = await readState();
         const connector = state.connectors.find(
@@ -1741,9 +1744,12 @@ export function createAgentBridge(
           !approved(connector) ||
           definitionHash(connector) !== target.hash
         )
-          throw new Error();
+          throw new PeerRefused();
+        if (closing) throw new PeerRefused();
+        timer = setTimeout(() => {
+          deadline.abort();
+        }, callTimeout);
         const signal = AbortSignal.any([extra.signal, deadline.signal]);
-        if (closing) throw new Error();
         authorize(state);
         peer = await connect(connector, signal);
         // Recheck approval after startup, immediately before the explicit call.
@@ -1757,7 +1763,7 @@ export function createAgentBridge(
           !approved(latest) ||
           definitionHash(latest) !== target.hash
         )
-          throw new Error();
+          throw new PeerRefused();
         const result = await peer.client.callTool(
           {
             name: target.name,
@@ -1776,7 +1782,7 @@ export function createAgentBridge(
           content: [
             {
               type: 'text' as const,
-              text: ranOutOfTime(deadline.signal, extra.signal)
+              text: ranOutOfTime(error, deadline.signal, extra.signal)
                 ? bridgeNotices.callTimedOut
                 : bridgeNotices.connectorUnavailable,
             },
