@@ -445,7 +445,12 @@ const ranOutOfTime = (
 ) =>
   deadline.aborted &&
   !caller.aborted &&
-  !(error instanceof PeerRefused || error instanceof LeaseEnding);
+  !(
+    error instanceof PeerRefused ||
+    error instanceof LeaseEnding ||
+    // The pool refused the peer, by its age for one, before the call was sent.
+    (error instanceof RuntimeFault && error.reason === 'dependency_unavailable')
+  );
 
 // The lease of a healthy peer ends before this operation could. The peer
 // stays; only this request is refused.
