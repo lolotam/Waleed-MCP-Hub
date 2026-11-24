@@ -442,7 +442,10 @@ const ranOutOfTime = (
   error: unknown,
   deadline: AbortSignal,
   caller: AbortSignal,
-) => deadline.aborted && !caller.aborted && !(error instanceof PeerRefused);
+) =>
+  deadline.aborted &&
+  !caller.aborted &&
+  !(error instanceof PeerRefused || error instanceof LeaseEnding);
 
 // The lease of a healthy peer ends before this operation could. The peer
 // stays; only this request is refused.
@@ -1753,7 +1756,11 @@ export function createAgentBridge(
         authorize(state);
         peer = await connect(connector, signal);
         // Recheck approval after startup, immediately before the explicit call.
-        const latestStateForCall = await readState();
+        // A registry that cannot be read here refuses the call before it is
+        // sent, as it always did.
+        const latestStateForCall = await readState().catch(() => {
+          throw new PeerRefused();
+        });
         authorize(latestStateForCall);
         const latest = latestStateForCall.connectors.find(
           (item) => item.id === connector.id,
