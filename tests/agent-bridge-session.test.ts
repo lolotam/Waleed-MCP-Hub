@@ -25,6 +25,8 @@ import {
 import { profileState } from './helpers/runtime.js';
 import { mcpSessionFixture } from './helpers/mcp-session-http.js';
 
+const callTimedOut =
+  'The call did not finish within 60 seconds and the hub stopped waiting. It may still have taken effect.';
 const connectorUnavailable =
   'The connector is unavailable, changed, disabled, or requires authentication. Inspect the hub and refresh tools.';
 const registryUnavailable =
@@ -423,9 +425,11 @@ describe('agent bridge session mode', () => {
       await wait();
       // The operation deadline of the call passes while it is in flight.
       harness.clock.advance(60_001);
+      // The agent is told the call ran out of time, not that the connector
+      // is unavailable or needs a sign-in.
       expect(await pending).toMatchObject({
         isError: true,
-        content: [{ text: connectorUnavailable }],
+        content: [{ text: callTimedOut }],
       });
       expect(harness.peers[0]?.calls).toHaveLength(1);
       expect(harness.peers[0]?.disposed).toBe(1);

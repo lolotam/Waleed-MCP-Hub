@@ -435,6 +435,10 @@ class PeerRefused extends Error {}
 // The agent used a tool of a definition that is no longer current. The peer
 // stays; only this request is refused.
 class StaleTool extends Error {}
+// The hub's own deadline ended the call. A call the agent cancelled is not
+// one that ran out of time, whatever the deadline did afterwards.
+const ranOutOfTime = (deadline: AbortSignal, caller: AbortSignal) =>
+  deadline.aborted && !caller.aborted;
 
 // The lease of a healthy peer ends before this operation could. The peer
 // stays; only this request is refused.
@@ -1710,7 +1714,9 @@ export function createAgentBridge(
                       ? bridgeNotices.registryUnavailable
                       : error instanceof StaleTool
                         ? bridgeNotices.refreshTools
-                        : bridgeNotices.connectorUnavailable,
+                        : ranOutOfTime(deadline.signal, extra.signal)
+                          ? bridgeNotices.callTimedOut
+                          : bridgeNotices.connectorUnavailable,
                 },
               ],
             };
@@ -1720,6 +1726,11 @@ export function createAgentBridge(
         }
       }
       let peer: BridgePeer | undefined;
+      // The deadline ends with the call, like the one of a pooled call.
+      const deadline = new AbortController();
+      const timer = setTimeout(() => {
+        deadline.abort();
+      }, callTimeout);
       try {
         const state = await readState();
         const connector = state.connectors.find(
@@ -1731,10 +1742,7 @@ export function createAgentBridge(
           definitionHash(connector) !== target.hash
         )
           throw new Error();
-        const signal = AbortSignal.any([
-          extra.signal,
-          AbortSignal.timeout(60000),
-        ]);
+        const signal = AbortSignal.any([extra.signal, deadline.signal]);
         if (closing) throw new Error();
         authorize(state);
         peer = await connect(connector, signal);
@@ -1756,7 +1764,7 @@ export function createAgentBridge(
             arguments: args,
           },
           undefined,
-          { signal, timeout: 60000 },
+          { signal, timeout: callTimeout },
         );
         peer.assertPublic(result);
         return result;
@@ -1768,11 +1776,14 @@ export function createAgentBridge(
           content: [
             {
               type: 'text' as const,
-              text: bridgeNotices.connectorUnavailable,
+              text: ranOutOfTime(deadline.signal, extra.signal)
+                ? bridgeNotices.callTimedOut
+                : bridgeNotices.connectorUnavailable,
             },
           ],
         };
       } finally {
+        clearTimeout(timer);
         await disposePeer(peer);
       }
     }),
